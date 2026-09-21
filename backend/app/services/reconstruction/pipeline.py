@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -30,6 +31,32 @@ class ReconstructionPipeline:
     def _write_json(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _vision_debug_payload(self) -> dict:
+        provider = self.scene_analyzer.vision_provider
+        if hasattr(provider, "vision_debug"):
+            payload = dict(provider.vision_debug())
+        else:
+            payload = {
+                "provider": getattr(provider, "provider_name", getattr(provider, "name", "local")),
+                "model": getattr(provider, "model_name", getattr(provider, "model", None)),
+                "rawResponseAvailable": False,
+                "repairUsed": False,
+                "normalizationApplied": False,
+                "validationErrors": [],
+                "droppedElements": 0,
+                "normalizationWarnings": [],
+            }
+        return {
+            "provider": payload.get("provider", "qwen"),
+            "model": payload.get("model"),
+            "rawResponseAvailable": bool(payload.get("rawResponseAvailable")),
+            "repairUsed": bool(payload.get("repairUsed")),
+            "normalizationApplied": bool(payload.get("normalizationApplied")),
+            "validationErrors": [_redact_debug_text(value) for value in (payload.get("validationErrors") or [])],
+            "droppedElements": int(payload.get("droppedElements") or 0),
+            "normalizationWarnings": [_redact_debug_text(value) for value in (payload.get("normalizationWarnings") or [])],
+        }
 
     def _apply_refined_scene(self, layout: dict, scene: dict) -> dict:
         by_id = {item["id"]: item for item in scene.get("elements", [])}
@@ -95,6 +122,7 @@ class ReconstructionPipeline:
             layout, _ = self.layout_service.build_layout(normalized_path, width, height, regions, background_url, page_output / "assets")
             segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
             scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
             self.reconstruction_router.apply(scene_refined.get("elements", []))
             routing = self.scene_analyzer.vision_routing
@@ -146,3 +174,12 @@ class ReconstructionPipeline:
         warnings.extend(ocr.warnings)
         warnings.extend(inpainting.warnings)
         return slides, ocr.provider_name, sorted(set(warnings))
+
+
+def _redact_debug_text(value: object) -> str:
+    message = str(value)
+    message = re.sub(r"(?i)(authorization|api[_ -]?key)\s*[:=]\s*\S+", r"\1=[redacted]", message)
+    message = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", message)
+    message = re.sub(r"://[^/@\s]+@", "://[redacted]@", message)
+    return message[:1000]

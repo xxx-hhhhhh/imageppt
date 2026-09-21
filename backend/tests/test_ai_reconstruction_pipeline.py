@@ -66,6 +66,24 @@ class FakeLayoutService:
 class FakeVisionProvider:
     warnings: list[str] = []
 
+    def __init__(self, ai_enabled: bool) -> None:
+        self.ai_enabled = ai_enabled
+
+    def vision_debug(self) -> dict:
+        return {
+            "provider": "qwen" if self.ai_enabled else "local",
+            "model": "qwen3-vl-flash" if self.ai_enabled else None,
+            "rawResponseAvailable": self.ai_enabled,
+            "repairUsed": False,
+            "normalizationApplied": self.ai_enabled,
+            "validationErrors": [],
+            "droppedElements": 0,
+            "normalizationWarnings": [
+                "elements[0].fontWeight: 'bold' -> 700",
+                "api_key=sk-secret-value-123456",
+            ] if self.ai_enabled else [],
+        }
+
     def critique_reconstruction(self, original_path: Path, reconstructed_path: Path, scene: dict) -> dict:
         return {"issues": [{"elementId": "text_001", "adjustment": {"moveX": 2, "fontSizeScale": 1.05}}]}
 
@@ -76,7 +94,7 @@ class FakeSceneAnalyzer:
         self.layout_provider = SimpleNamespace(name="fake-layout")
         self.layout_warnings: list[str] = []
         self.vlm_warnings: list[str] = []
-        self.vision_provider = FakeVisionProvider()
+        self.vision_provider = FakeVisionProvider(ai_enabled)
         self.vision_routing: dict = {}
 
     def analyze(self, image_path: Path, layout: dict, regions: list, segmentation: list, enable_vision: bool = True, mode: str = "standard") -> tuple[dict, list[str]]:
@@ -137,7 +155,7 @@ class FakePPTXRenderer:
         return output, {"valid": True}
 
 
-def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool) -> tuple[list[dict], dict]:
+def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool) -> tuple[list[dict], dict, dict]:
     image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
     fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
     shutil.copy2(fixture_path, image_path)
@@ -171,11 +189,12 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool) -> tuple[list[d
     pipeline.reconstruction_router = ReconstructionRouter()
     slides, _, _ = pipeline.analyze_project("ai-standard" if ai_enabled else "local-standard", "standard")
     report_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "conversion_report.json"
-    return slides, json.loads(report_path.read_text(encoding="utf-8"))
+    debug_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "vision_debug.json"
+    return slides, json.loads(report_path.read_text(encoding="utf-8")), json.loads(debug_path.read_text(encoding="utf-8"))
 
 
 def test_standard_mode_applies_qwen_strategy_and_one_critic_round(monkeypatch, tmp_path: Path) -> None:
-    slides, report = _run_pipeline(monkeypatch, tmp_path, True)
+    slides, report, debug = _run_pipeline(monkeypatch, tmp_path, True)
     element = slides[0]["elements"][0]
     assert element["text"] == "OCR original text"
     assert element["role"] == "main_title"
@@ -191,13 +210,27 @@ def test_standard_mode_applies_qwen_strategy_and_one_critic_round(monkeypatch, t
     assert report["aiStrategiesApplied"] == 1
     assert report["criticRounds"] == 1
     assert report["criticAdjustmentsApplied"] == 1
+    assert debug == {
+        "provider": "qwen",
+        "model": "qwen3-vl-flash",
+        "rawResponseAvailable": True,
+        "repairUsed": False,
+        "normalizationApplied": True,
+        "validationErrors": [],
+        "droppedElements": 0,
+        "normalizationWarnings": ["elements[0].fontWeight: 'bold' -> 700", "api_key=[redacted]"],
+    }
+    assert "sk-secret-value-123456" not in json.dumps(debug).lower()
+    assert "authorization" not in json.dumps(debug).lower()
 
 
 def test_local_mode_reports_no_ai_strategy_or_critic_round(monkeypatch, tmp_path: Path) -> None:
-    _, report = _run_pipeline(monkeypatch, tmp_path, False)
+    _, report, debug = _run_pipeline(monkeypatch, tmp_path, False)
     assert report["aiUsed"] is False
     assert report["visionProvider"] == "local"
     assert report["visionMatchedElements"] == 0
     assert report["aiStrategiesApplied"] == 0
     assert report["criticRounds"] == 0
     assert report["criticAdjustmentsApplied"] == 0
+    assert debug["provider"] == "local"
+    assert debug["rawResponseAvailable"] is False

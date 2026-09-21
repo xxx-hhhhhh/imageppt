@@ -12,7 +12,7 @@ import httpx
 from .proxy import resolve_proxy
 from .base import VisionProvider
 from .prompts import CRITIC_PROMPT, SCENE_REPAIR_PROMPT, SCENE_SYSTEM_PROMPT, scene_user_prompt
-from .schemas import repair_json
+from .schemas import extract_json, validate_json
 from .test_assets import cleanup_test_image, create_test_image
 
 
@@ -39,6 +39,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         self.timeout = timeout
         self.max_retries = max_retries
         self.proxy_url = proxy_url if proxy_url is not None else resolve_proxy().url
+        self._reset_scene_diagnostics()
         if not api_key:
             raise VisionProviderError(f"{provider_name} API Key 未配置")
         if not base_url:
@@ -75,22 +76,65 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         return [{"role": "system", "content": SCENE_SYSTEM_PROMPT}, {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}}, {"type": "text", "text": scene_user_prompt((context or {}).get("ocr_elements", []), context)}]}]
 
     def analyze_scene(self, image_path: Path, context: dict | None = None, mode: str = "standard") -> dict[str, Any]:
+        self._reset_scene_diagnostics()
         messages = self._messages(image_path, context)
         raw = self._request(messages)
+        self.last_raw_response = raw
         try:
-            return {"provider": self.name, "model": getattr(self, "model", None), "aiUsed": True, **repair_json(raw, "scene")}
-        except Exception:
+            payload = extract_json(raw)
+        except (TypeError, ValueError):
             repaired = self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT)
-            return {"provider": self.name, "model": getattr(self, "model", None), "aiUsed": True, **repair_json(repaired, "scene")}
+            self.last_repaired_response = repaired
+            self.repair_used = True
+            payload = extract_json(repaired)
+        diagnostics: dict[str, Any] = {}
+        self.normalization_applied = True
+        try:
+            scene = validate_json(payload, "scene", diagnostics)
+        except Exception as exc:
+            self._capture_scene_diagnostics(diagnostics)
+            details = diagnostics.get("validationErrors") or [str(exc)]
+            raise VisionProviderError("Vision validation failed: " + "; ".join(str(item) for item in details)) from exc
+        self._capture_scene_diagnostics(diagnostics)
+        return {"provider": self.name, "model": getattr(self, "model", None), "aiUsed": True, **scene}
 
     def critique_reconstruction(self, original_path: Path, reconstructed_path: Path, scene: dict) -> dict[str, Any]:
         messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_to_data_url(original_path)}}, {"type": "image_url", "image_url": {"url": image_to_data_url(reconstructed_path)}}, {"type": "text", "text": CRITIC_PROMPT + "\nSCENE_SUMMARY:\n" + str({"elements": len(scene.get("elements", [])), "groups": len(scene.get("groups", []))})}]}]
         raw = self._request(messages)
         try:
-            return {"provider": self.name, "model": self.model, **repair_json(raw, "critic")}
-        except Exception:
+            payload = extract_json(raw)
+        except (TypeError, ValueError):
             repaired = self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT)
-            return {"provider": self.name, "model": self.model, **repair_json(repaired, "critic")}
+            payload = extract_json(repaired)
+        return {"provider": self.name, "model": self.model, **validate_json(payload, "critic")}
+
+    def _reset_scene_diagnostics(self) -> None:
+        self.last_raw_response: str | None = None
+        self.last_repaired_response: str | None = None
+        self.last_validation_errors: list[str] = []
+        self.last_normalized_payload: dict[str, Any] | None = None
+        self.normalization_warnings: list[str] = []
+        self.dropped_elements = 0
+        self.repair_used = False
+        self.normalization_applied = False
+
+    def _capture_scene_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        self.last_validation_errors = list(diagnostics.get("validationErrors") or [])
+        self.last_normalized_payload = diagnostics.get("normalizedPayload")
+        self.normalization_warnings = list(diagnostics.get("normalizationWarnings") or [])
+        self.dropped_elements = int(diagnostics.get("droppedElements") or 0)
+
+    def vision_debug(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "model": getattr(self, "model", None),
+            "rawResponseAvailable": bool(self.last_raw_response),
+            "repairUsed": self.repair_used,
+            "normalizationApplied": self.normalization_applied,
+            "validationErrors": self.last_validation_errors,
+            "droppedElements": self.dropped_elements,
+            "normalizationWarnings": self.normalization_warnings,
+        }
 
     def test_connection(self, image_path: Path | None = None) -> dict[str, Any]:
         owned_path = image_path is None

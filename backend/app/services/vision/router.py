@@ -100,7 +100,8 @@ class VisionRouter(VisionProvider):
             return {"success": False, "provider": "qwen", "model": model, "message": message, "diagnostics": diagnostics}
 
     def routing_result(self) -> dict[str, Any]:
-        return {"requestedProvider": self.requested_provider, "attempts": self.attempts, "usedProvider": self.used_provider, "usedModel": self.used_model, "fallbackCount": 0, "aiUsed": self.used_provider == "qwen"}
+        fallback_count = 1 if self.requested_provider == "qwen" and self.used_provider == "local" and bool(self.attempts) else 0
+        return {"requestedProvider": self.requested_provider, "attempts": self.attempts, "usedProvider": self.used_provider, "usedModel": self.used_model, "fallbackCount": fallback_count, "aiUsed": self.used_provider == "qwen"}
 
     def status(self) -> dict[str, Any]:
         candidate = self._candidate()
@@ -118,6 +119,8 @@ def _test_failure(message: str, diagnostics: dict[str, Any]) -> dict[str, Any]:
 def _friendly_error(error: Exception) -> str:
     code = getattr(error, "status_code", getattr(error, "code", None))
     text = str(error).lower()
+    if "vision validation failed" in text:
+        return str(error)[:1000]
     if code in {401, 403}:
         return "API Key 无效"
     if code == 429:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,11 @@ class SceneAnalyzer:
                 self.ai_used = self.ai_used or bool(vision.get("aiUsed"))
                 self.vision_routing = vision.get("routing") or {"requestedProvider": self.vision_provider.provider_name, "usedProvider": vision.get("provider"), "usedModel": vision.get("model"), "fallbackCount": 0, "aiUsed": self.ai_used, "attempts": []}
             except Exception as exc:
-                vision = {"provider": self.vision_provider.name, "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
-                self.vision_warnings.append(f"Vision analysis failed, using OCR+CV fallback: {type(exc).__name__}")
+                requested_provider = "local" if self.vision_provider.provider_name == "none" else "qwen"
+                reason = _safe_vision_failure(exc)
+                vision = {"provider": "local", "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
+                self.vision_routing = {"requestedProvider": requested_provider, "usedProvider": "local", "usedModel": None, "fallbackCount": 1 if requested_provider == "qwen" else 0, "aiUsed": False, "attempts": [{"provider": requested_provider, "success": False, "error": reason}]}
+                self.vision_warnings.append(f"{reason}; using OCR+CV fallback")
         else:
             vision = {"provider": "none", "page": {}, "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
             self.vision_routing = {"requestedProvider": "qwen", "usedProvider": "local", "usedModel": None, "fallbackCount": 0, "aiUsed": False, "attempts": []}
@@ -69,3 +73,23 @@ class SceneAnalyzer:
             item["zIndex"] = updated["zIndex"]
         scene["refined"] = True
         return scene
+
+
+def _safe_vision_failure(error: Exception) -> str:
+    details = getattr(error, "errors", None)
+    if callable(details):
+        formatted = []
+        for item in details(include_url=False, include_context=False, include_input=False):
+            location = ".".join(str(part) for part in item.get("loc", []))
+            formatted.append(f"{location}: {item.get('msg', 'invalid value')}")
+        message = "Vision validation failed: " + "; ".join(formatted)
+    else:
+        message = str(error).strip() or type(error).__name__
+        if "validation" in type(error).__name__.lower() and not message.lower().startswith("vision validation failed"):
+            message = "Vision validation failed: " + message
+        elif not message.lower().startswith("vision"):
+            message = "Vision analysis failed: " + message
+    message = re.sub(r"(?i)(authorization|api[_ -]?key)\s*[:=]\s*\S+", r"\1=[redacted]", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", message)
+    message = re.sub(r"://[^/@\s]+@", "://[redacted]@", message)
+    return message[:1000]

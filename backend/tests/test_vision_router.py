@@ -45,6 +45,8 @@ def test_router_does_not_fallback_to_other_provider(tmp_path):
     result = router.analyze_scene(image, {}, "standard")
     assert result["provider"] == "local"
     assert result["aiUsed"] is False
+    assert result["routing"]["usedModel"] is None
+    assert result["routing"]["fallbackCount"] == 1
     assert called == ["qwen"]
 
 
