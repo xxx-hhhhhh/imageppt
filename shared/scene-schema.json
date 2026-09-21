@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://image2editableppt.local/schema/scene.json",
+  "title": "Image2EditablePPT Scene Graph",
+  "type": "object",
+  "required": ["version", "canvas", "regions", "elements", "groups", "relations", "styleTokens", "confidence"],
+  "properties": {
+    "version": { "type": "string" },
+    "canvas": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 },
+        "backgroundColor": { "type": "string" }
+      }
+    },
+    "regions": { "type": "array", "items": { "type": "object" } },
+    "elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "bbox", "rotation", "zIndex", "editable", "confidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "role": { "type": ["string", "null"] },
+          "bbox": { "type": "object" },
+          "rotation": { "type": "number" },
+          "zIndex": { "type": "number" },
+          "groupId": { "type": ["string", "null"] },
+          "editable": { "type": "boolean" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "groups": { "type": "array", "items": { "type": "object" } },
+    "relations": { "type": "array", "items": { "type": "object" } },
+    "styleTokens": { "type": "object" },
+    "confidence": { "type": "object" }
+  }
+}

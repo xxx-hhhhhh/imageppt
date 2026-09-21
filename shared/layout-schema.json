@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://image2editableppt.local/schema/layout.json",
+  "title": "Image2EditablePPT Layout",
+  "type": "object",
+  "required": ["version", "slide", "elements"],
+  "properties": {
+    "version": { "type": "string" },
+    "slide": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "source": { "type": "string" },
+    "backgroundUrl": { "type": ["string", "null"] },
+    "coordinateSystem": { "type": "string" },
+    "elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "x", "y", "width", "height", "rotation", "zIndex"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "enum": ["text", "image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow", "group", "background"] },
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "width": { "type": "number", "minimum": 0 },
+          "height": { "type": "number", "minimum": 0 },
+          "rotation": { "type": "number" },
+          "zIndex": { "type": "number" },
+          "text": { "type": "string" },
+          "src": { "type": ["string", "null"] },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "groupId": { "type": ["string", "null"] },
+          "role": { "type": ["string", "null"] },
+          "componentType": { "type": ["string", "null"] },
+          "metadata": { "type": "object" },
+          "style": { "type": "object" }
+        }
+      }
+    }
+  }
+}

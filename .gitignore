@@ -1,0 +1,44 @@
+# Python runtimes and caches. Keep them outside Google Drive when running locally.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Frontend dependencies and build output.
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local secrets and runtime data.
+.env
+uploads/*
+!uploads/.gitkeep
+outputs/*
+!outputs/.gitkeep
+temp/*
+!temp/.gitkeep
+work/*
+!work/.gitkeep
+*.log
+frontend/tsconfig.tsbuildinfo
+backend/tests/tmp_debug.png
+.gitignore-placeholder/
+
+# OCR and VLM model caches must stay outside this project.
+.paddlex/
+.paddleocr/
+.cache/
+models/
+*.onnx
+*.pt
+*.pdparams
+*.pdmodel
+
+# Windows files
+Thumbs.db
+Desktop.ini
