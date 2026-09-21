@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from app.services.pptx.renderer import _default_strategy, _path_from_src
+
 
 def _font(style: dict[str, Any], size_scale: float = 0.75) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     size = max(8, int(float(style.get("fontSize", 20)) * size_scale))
@@ -31,21 +33,30 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
     draw = ImageDraw.Draw(base, "RGBA")
     for element in sorted(layout.get("elements", []), key=lambda item: item.get("zIndex", 0)):
         kind = element.get("type")
-        if kind in {"background", "group"}:
+        strategy = (element.get("metadata") or {}).get("reconstructionStrategy") or _default_strategy(kind)
+        if strategy == "group":
             continue
         x, y = float(element.get("x", 0)), float(element.get("y", 0))
         w, h = max(1.0, float(element.get("width", 1))), max(1.0, float(element.get("height", 1)))
         style = element.get("style") or {}
-        if kind == "text":
+        if strategy in {"transparent_image", "local_image", "background_image"}:
+            image_path = _path_from_src(element.get("src"))
+            if image_path and image_path.exists():
+                with Image.open(image_path) as source:
+                    asset = source.convert("RGBA").resize((max(1, int(round(w))), max(1, int(round(h)))), Image.Resampling.LANCZOS)
+                base.alpha_composite(asset, (int(round(x)), int(round(y))))
+                draw = ImageDraw.Draw(base, "RGBA")
+            continue
+        if strategy == "editable_text":
             draw.multiline_text((x, y), element.get("text") or "", font=_font(style), fill=style.get("color", "#111827"), spacing=max(0, int(float(style.get("lineSpacing", 1.1)) * 4)), align=style.get("align", "left"))
-        elif kind in {"rectangle", "roundedRectangle"}:
+        elif strategy == "native_shape" and kind in {"rectangle", "roundedRectangle"}:
             fill = style.get("fill", "#DCE6F1")
             outline = style.get("stroke", fill)
             alpha = int(float(style.get("opacity", 1)) * 255)
             draw.rounded_rectangle((x, y, x + w, y + h), radius=min(w, h) * 0.16 if kind == "roundedRectangle" else 0, fill=fill + f"{alpha:02X}" if isinstance(fill, str) and len(fill) == 7 else fill, outline=outline, width=max(1, int(float(style.get("strokeWidth", 1)))))
-        elif kind in {"ellipse", "circle"}:
+        elif strategy == "native_shape" and kind in {"ellipse", "circle"}:
             draw.ellipse((x, y, x + w, y + h), fill=style.get("fill", "#DCE6F1"), outline=style.get("stroke", style.get("fill", "#DCE6F1")), width=max(1, int(float(style.get("strokeWidth", 1)))))
-        elif kind in {"line", "arrow"}:
+        elif strategy == "native_shape" and kind in {"line", "arrow"}:
             draw.line((x, y + h / 2, x + w, y + h / 2), fill=style.get("stroke", "#17365D"), width=max(1, int(float(style.get("strokeWidth", 1)))))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     base.convert("RGB").save(output_path)

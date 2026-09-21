@@ -23,6 +23,28 @@ def test_json_parser_strips_fence_and_validates_scene():
     assert scene["elements"][0]["role"] == "main_title"
 
 
+def test_scene_schema_preserves_reconstruction_semantics():
+    scene = validate_json({"elements": [{
+        "id": "icon_1",
+        "role": "icon",
+        "semanticType": "ornament",
+        "groupId": "hero",
+        "zLayer": "foreground",
+        "fontClass": "display",
+        "fontWeight": 700,
+        "alignment": "center",
+        "reconstructionStrategy": "transparent_image",
+        "doNotVectorize": True,
+        "visualComplexity": 0.9,
+        "visionConfidence": 0.95,
+    }]})
+    element = scene["elements"][0]
+    assert element["semanticType"] == "ornament"
+    assert element["reconstructionStrategy"] == "transparent_image"
+    assert element["doNotVectorize"] is True
+    assert element["visualComplexity"] == 0.9
+
+
 def test_qwen_provider_retries_json_repair(monkeypatch, tmp_path):
     provider = object.__new__(QwenProvider)
     provider.name = "qwen"

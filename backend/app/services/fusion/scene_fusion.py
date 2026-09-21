@@ -23,13 +23,20 @@ def fuse_scene(layout: dict[str, Any], ocr_results: list[Any], vision: dict[str,
             strategy = match.get("reconstructionStrategy")
             if strategy:
                 metadata["reconstructionStrategy"] = strategy
+                metadata["reconstructionStrategySource"] = "vision"
             metadata["visionSemanticType"] = match.get("semanticType", "unknown")
+            metadata["visionMatched"] = True
+            metadata["doNotVectorize"] = bool(match.get("doNotVectorize", False))
+            metadata["visualComplexity"] = _confidence(match.get("visualComplexity", 0.0))
             fused["metadata"] = metadata
             if match.get("fontClass") and fused.get("type") == "text":
                 fused.setdefault("style", {})["fontClass"] = match["fontClass"]
-            if match.get("fontWeight") and fused.get("type") == "text":
-                weight = match["fontWeight"]
-                fused.setdefault("style", {})["fontWeight"] = 700 if str(weight).lower() in {"bold", "semibold", "700"} else 400
+            if match.get("fontWeight") is not None and fused.get("type") == "text":
+                fused.setdefault("style", {})["fontWeight"] = _font_weight(match["fontWeight"])
+            if match.get("alignment") and fused.get("type") == "text":
+                alignment = str(match["alignment"]).lower()
+                if alignment in {"left", "center", "right"}:
+                    fused.setdefault("style", {})["align"] = alignment
             vision_conf = _confidence(match.get("visionConfidence", vision.get("confidence", 0.5)))
         else:
             vision_conf = 0.0
@@ -101,6 +108,17 @@ def _confidence(value: Any) -> float:
         return max(0.0, min(1.0, float(value)))
     except (TypeError, ValueError):
         return 0.5
+
+
+def _font_weight(value: Any) -> int:
+    aliases = {"normal": 400, "regular": 400, "medium": 500, "semibold": 600, "bold": 700, "black": 900}
+    text = str(value).strip().lower()
+    if text in aliases:
+        return aliases[text]
+    try:
+        return max(100, min(900, int(float(value))))
+    except (TypeError, ValueError):
+        return 400
 
 
 def _fuse_groups(groups: list[dict[str, Any]], elements: list[dict[str, Any]]) -> list[dict[str, Any]]:

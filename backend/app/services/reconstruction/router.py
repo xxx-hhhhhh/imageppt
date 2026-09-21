@@ -23,11 +23,13 @@ class ReconstructionRouter:
 
     def route(self, element: dict[str, Any]) -> str:
         metadata = element.get("metadata") or {}
+        element_type = element.get("type")
+        if metadata.get("doNotVectorize") and element_type not in {"text", "background", "group"}:
+            return "transparent_image" if element.get("src") else "local_image"
         requested = metadata.get("reconstructionStrategy")
         if requested in _STRATEGIES:
             return str(requested)
 
-        element_type = element.get("type")
         role = element.get("role") or metadata.get("visualClass")
         if element_type == "text":
             return "editable_text"
@@ -45,7 +47,11 @@ class ReconstructionRouter:
 
     def apply(self, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for element in elements:
-            element.setdefault("metadata", {})["reconstructionStrategy"] = self.route(element)
+            metadata = element.setdefault("metadata", {})
+            had_strategy = metadata.get("reconstructionStrategy") in _STRATEGIES
+            metadata["reconstructionStrategy"] = self.route(element)
+            if not had_strategy:
+                metadata["reconstructionStrategySource"] = "router"
         return elements
 
 

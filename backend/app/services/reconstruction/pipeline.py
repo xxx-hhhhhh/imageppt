@@ -44,7 +44,22 @@ class ReconstructionPipeline:
             item["width"] = float(box.get("width", item.get("width", 1)))
             item["height"] = float(box.get("height", item.get("height", 1)))
             item["zIndex"] = int(scene_item.get("zIndex", item.get("zIndex", 0)))
-            item.setdefault("metadata", {})["sceneId"] = scene_item["id"]
+            for field in ("role", "componentType", "groupId", "visionConfidence", "finalConfidence"):
+                if field in scene_item:
+                    item[field] = copy.deepcopy(scene_item[field])
+            scene_metadata = scene_item.get("metadata") or {}
+            metadata = dict(item.get("metadata") or {})
+            for field in ("reconstructionStrategy", "visionSemanticType", "doNotVectorize", "visualComplexity", "visionMatched", "reconstructionStrategySource"):
+                if field in scene_metadata:
+                    metadata[field] = copy.deepcopy(scene_metadata[field])
+            metadata["sceneId"] = scene_item["id"]
+            item["metadata"] = metadata
+            scene_style = scene_item.get("style") or {}
+            layout_style = dict(item.get("style") or {})
+            for field in ("fontClass", "fontWeight", "fontSize", "align"):
+                if field in scene_style:
+                    layout_style[field] = copy.deepcopy(scene_style[field])
+            item["style"] = layout_style
         refined["sceneVersion"] = scene.get("version", "2.0")
         refined["coordinateSystem"] = "source-pixels-left-top"
         return refined
@@ -57,6 +72,15 @@ class ReconstructionPipeline:
         slides: list[dict] = []
         warnings = list(ocr.warnings) + list(inpainting.warnings) + self.segmentation_warnings + self.scene_analyzer.layout_warnings + self.scene_analyzer.vlm_warnings
         project_output = OUTPUTS_DIR / project_id
+        reconstruction_stats = {
+            "aiUsed": False,
+            "visionProvider": "local",
+            "visionModel": None,
+            "visionMatchedElements": 0,
+            "aiStrategiesApplied": 0,
+            "criticRounds": 0,
+            "criticAdjustmentsApplied": 0,
+        }
         for page_index, image in enumerate(record.get("images", []), start=1):
             source_path = Path(image["path"])
             page_output = project_output
@@ -73,8 +97,20 @@ class ReconstructionPipeline:
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
             scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
             self.reconstruction_router.apply(scene_refined.get("elements", []))
-            layout = self._apply_refined_scene(layout, scene_refined)
             routing = self.scene_analyzer.vision_routing
+            reconstruction_stats["aiUsed"] = reconstruction_stats["aiUsed"] or bool(routing.get("aiUsed"))
+            if routing.get("usedProvider") == "qwen":
+                reconstruction_stats["visionProvider"] = "qwen"
+                reconstruction_stats["visionModel"] = routing.get("usedModel") or reconstruction_stats["visionModel"]
+            reconstruction_stats["visionMatchedElements"] += sum(
+                1 for item in scene_refined.get("elements", []) if (item.get("metadata") or {}).get("visionMatched")
+            )
+            reconstruction_stats["aiStrategiesApplied"] += sum(
+                1
+                for item in scene_refined.get("elements", [])
+                if (item.get("metadata") or {}).get("reconstructionStrategySource") == "vision"
+            )
+            layout = self._apply_refined_scene(layout, scene_refined)
             layout["metadata"] = {"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies}
             self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
             self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
@@ -82,18 +118,21 @@ class ReconstructionPipeline:
             shutil.copy2(background_path, page_output / "background.png" if page_index == 1 else page_output / f"background_{page_index}.png")
             preview_path = page_output / "reconstructed_preview.png" if page_index == 1 else page_output / f"reconstructed_preview_{page_index}.png"
             render_preview(background_path, layout, preview_path)
-            critic_rounds = 3 if conversion_mode == "maximum" else 1 if conversion_mode == "high_quality" else 0
+            critic_rounds = {"fast": 0, "standard": 1, "high_quality": 2, "maximum": 3}[conversion_mode]
             critic_reports: list[dict] = []
-            if critic_rounds and routing.get("usedProvider") not in {None, "none"}:
+            if critic_rounds and routing.get("usedProvider") not in {None, "none", "local"}:
                 for round_index in range(critic_rounds):
                     critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
                     critic_reports.append(critic)
                     scene_refined = apply_safe_adjustments(scene_refined, critic)
+                    reconstruction_stats["criticRounds"] += 1
+                    reconstruction_stats["criticAdjustmentsApplied"] += len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
                     layout = self._apply_refined_scene(layout, scene_refined)
                     render_preview(background_path, layout, preview_path)
                     self._write_json(page_output / f"visual_critic_{round_index + 1}.json", critic)
             if critic_reports:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
+                self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             self._write_json(page_output / "visual_score.json" if page_index == 1 else page_output / f"visual_score_{page_index}.json", score)
             self._write_json(page_output / "visual_validation.json" if page_index == 1 else page_output / f"visual_validation_{page_index}.json", score)
@@ -103,7 +142,7 @@ class ReconstructionPipeline:
         if slides:
             output_path, validation = PPTXRenderer().render_project(project_id, slides)
             shutil.copy2(output_path, project_output / "output.pptx")
-            self._write_json(project_output / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode, "ocrProvider": ocr.provider_name, "visionProvider": self.scene_analyzer.vision_routing.get("usedProvider", "none"), "visionModel": self.scene_analyzer.vision_routing.get("usedModel"), "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"), "routing": self.scene_analyzer.vision_routing, "layoutProvider": self.scene_analyzer.layout_provider.name, "segmentationProvider": self.segmentation_provider.name, "slideCount": len(slides), "validation": validation, "warnings": sorted(set(warnings + getattr(self.scene_analyzer.vision_provider, "warnings", [])))})
+            self._write_json(project_output / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode, "ocrProvider": ocr.provider_name, "visionProvider": reconstruction_stats["visionProvider"], "visionModel": reconstruction_stats["visionModel"], "aiUsed": reconstruction_stats["aiUsed"], "visionMatchedElements": reconstruction_stats["visionMatchedElements"], "aiStrategiesApplied": reconstruction_stats["aiStrategiesApplied"], "criticRounds": reconstruction_stats["criticRounds"], "criticAdjustmentsApplied": reconstruction_stats["criticAdjustmentsApplied"], "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"), "routing": self.scene_analyzer.vision_routing, "layoutProvider": self.scene_analyzer.layout_provider.name, "segmentationProvider": self.segmentation_provider.name, "slideCount": len(slides), "validation": validation, "warnings": sorted(set(warnings + getattr(self.scene_analyzer.vision_provider, "warnings", [])))})
         warnings.extend(ocr.warnings)
         warnings.extend(inpainting.warnings)
         return slides, ocr.provider_name, sorted(set(warnings))

@@ -12,3 +12,4 @@ def test_router_honors_background_and_explicit_strategy():
     router = ReconstructionRouter()
     assert router.route({"type": "background"}) == "background_image"
     assert router.route({"type": "image", "metadata": {"reconstructionStrategy": "transparent_image"}}) == "transparent_image"
+    assert router.route({"type": "ellipse", "src": "/asset.png", "metadata": {"reconstructionStrategy": "native_shape", "doNotVectorize": True}}) == "transparent_image"

@@ -15,7 +15,12 @@ class QwenSceneElement(BaseModel):
     semanticType: str = "unknown"
     groupId: str | None = None
     zLayer: str = "foreground"
+    fontClass: str = "unknown"
+    fontWeight: int | str = 400
+    alignment: str = "left"
     reconstructionStrategy: str | None = None
+    doNotVectorize: bool = False
+    visualComplexity: float = Field(default=0.0, ge=0, le=1)
     visionConfidence: float = Field(default=0.5, ge=0, le=1)
 
 
@@ -51,7 +56,7 @@ def extract_json(value: str | dict[str, Any]) -> dict[str, Any]:
 
 def validate_json(payload: dict[str, Any], kind: str = "scene") -> dict[str, Any]:
     model = QwenScene if kind == "scene" else QwenCritic
-    return model.model_validate(payload).model_dump(mode="json")
+    return model.model_validate(payload).model_dump(mode="json", exclude_unset=True)
 
 
 def repair_json(value: str | dict[str, Any], kind: str = "scene") -> dict[str, Any]:

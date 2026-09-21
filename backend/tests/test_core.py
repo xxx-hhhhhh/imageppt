@@ -54,3 +54,22 @@ def test_renderer_preserves_editable_object_types(tmp_path: Path) -> None:
     assert report["valid"] is True
     assert validate_pptx(output, [layout])["structural"]["slideCount"] == 1
 
+
+def test_renderer_routes_by_reconstruction_strategy(tmp_path: Path) -> None:
+    project_id = "test_renderer_strategy"
+    image_path = tmp_path / "strategy.png"
+    make_sample(image_path)
+    layout = {
+        "version": "1.0",
+        "slide": {"width": 640, "height": 360},
+        "elements": [
+            {"id": "asset", "type": "rectangle", "x": 20, "y": 20, "width": 120, "height": 80, "src": str(image_path), "metadata": {"reconstructionStrategy": "local_image"}, "style": {}},
+            {"id": "text", "type": "rectangle", "x": 160, "y": 20, "width": 220, "height": 50, "text": "Strategy textbox", "metadata": {"reconstructionStrategy": "editable_text"}, "style": {"fontSize": 24}},
+            {"id": "skip", "type": "rectangle", "x": 400, "y": 20, "width": 100, "height": 50, "metadata": {"reconstructionStrategy": "group"}, "style": {"fill": "#FF0000"}},
+        ],
+    }
+    output, _ = PPTXRenderer().render_project(project_id, [layout])
+    shapes = list(Presentation(str(output)).slides[0].shapes)
+    assert len(shapes) == 2
+    assert any(shape.shape_type == 13 for shape in shapes)
+    assert any(shape.has_text_frame and "Strategy textbox" in shape.text for shape in shapes)

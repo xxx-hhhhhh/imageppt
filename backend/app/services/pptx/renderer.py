@@ -92,14 +92,16 @@ class PPTXRenderer:
 
     def _add_element(self, slide: Any, element: dict[str, Any], sx: float, sy: float) -> None:
         kind = element.get("type")
-        if kind == "group":
+        metadata = element.get("metadata") or {}
+        strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
+        if strategy == "group":
             return
         x = Inches(element.get("x", 0) * sx)
         y = Inches(element.get("y", 0) * sy)
         width = Inches(max(0.01, element.get("width", 1) * sx))
         height = Inches(max(0.01, element.get("height", 1) * sy))
         style = element.get("style") or {}
-        if kind in ("background", "image"):
+        if strategy in {"transparent_image", "local_image", "background_image"}:
             image_path = _path_from_src(element.get("src"))
             if image_path and image_path.exists():
                 picture = slide.shapes.add_picture(str(image_path), x, y, width=width, height=height)
@@ -109,7 +111,7 @@ class PPTXRenderer:
                         setattr(picture, f"crop_{key}", float(crop[key]))
                 picture.rotation = float(element.get("rotation", 0))
             return
-        if kind == "text":
+        if strategy == "editable_text":
             shape = slide.shapes.add_textbox(x, y, width, height)
             shape.rotation = float(element.get("rotation", 0))
             frame = shape.text_frame
@@ -131,6 +133,8 @@ class PPTXRenderer:
             font.bold = int(style.get("fontWeight", 400)) >= 600
             font.italic = style.get("fontStyle", "normal") == "italic"
             font.color.rgb = _rgb(style.get("color"))
+            return
+        if strategy != "native_shape":
             return
         if kind in ("line", "arrow"):
             connector_type = MSO_CONNECTOR.STRAIGHT
@@ -157,3 +161,17 @@ class PPTXRenderer:
             pass
         shape.line.color.rgb = _rgb(style.get("stroke"), "#17365D")
         shape.line.width = Pt(max(0.5, float(style.get("strokeWidth", 1))))
+
+
+def _default_strategy(kind: str | None) -> str:
+    if kind == "text":
+        return "editable_text"
+    if kind == "group":
+        return "group"
+    if kind == "background":
+        return "background_image"
+    if kind == "image":
+        return "local_image"
+    if kind in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:
+        return "native_shape"
+    return "local_image"
