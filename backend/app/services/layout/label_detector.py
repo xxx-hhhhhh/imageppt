@@ -55,7 +55,13 @@ def _sample_fill(image: np.ndarray, bounds: tuple[float, float, float, float]) -
     return f"#{r:02X}{g:02X}{b:02X}"
 
 
-def _extract_alpha_crop(image: np.ndarray, item: dict[str, Any], destination: Path) -> tuple[int, int, int, int] | None:
+def _extract_whole_badge_crop(image: np.ndarray, item: dict[str, Any], destination: Path) -> tuple[int, int, int, int] | None:
+    """Save the complete badge pixels without foreground/background separation.
+
+    White artwork inside a badge is authored content, not transparency.  Whole
+    badge assets therefore stay ordinary RGB PNGs and retain their original
+    fill, highlight, shadow, gradient, and texture.
+    """
     x, y, w, h = [int(max(0, item[key])) for key in ("x", "y", "width", "height")]
     padding = max(2, int(round(min(w, h) * 0.04)))
     x, y = max(0, x - padding), max(0, y - padding)
@@ -64,16 +70,8 @@ def _extract_alpha_crop(image: np.ndarray, item: dict[str, Any], destination: Pa
     crop = image[y:min(image.shape[0], y + h), x:min(image.shape[1], x + w)]
     if crop.size == 0:
         return None
-    background = np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]], axis=0), axis=0)
-    distance = np.linalg.norm(crop.astype(np.float32) - background.astype(np.float32), axis=2)
-    alpha = np.uint8(np.clip((distance - 8) * 12, 0, 255))
-    if int((alpha > 32).sum()) < max(20, crop.shape[0] * crop.shape[1] // 50):
-        return None
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    rgba = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
-    rgba[:, :, 3] = alpha
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return (x, y, w, h) if cv2.imwrite(str(destination), rgba) else None
+    return (x, y, w, h) if cv2.imwrite(str(destination), crop) else None
 
 
 def _complex_badge(image: np.ndarray, item: dict[str, Any]) -> bool:
@@ -87,7 +85,13 @@ def _complex_badge(image: np.ndarray, item: dict[str, Any]) -> bool:
     edges = cv2.Canny(gray, 45, 135)
     edge_ratio = float((edges[mask > 0] > 0).mean()) if np.any(mask) else 0.0
     color_variance = float(np.mean(np.var(crop[mask > 0].astype(np.float32), axis=0))) if np.any(mask) else 0.0
-    return edge_ratio >= 0.018 and color_variance >= 100
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    inside = mask > 0
+    saturated_ratio = float((hsv[:, :, 1][inside] > 70).mean()) if np.any(inside) else 0.0
+    white_ratio = float(((hsv[:, :, 1][inside] < 45) & (hsv[:, :, 2][inside] > 205)).mean()) if np.any(inside) else 0.0
+    # A saturated circular plate with bright internal artwork and local detail
+    # is an emblem/badge.  Preserve it whole even when segmentation is unsure.
+    return saturated_ratio >= 0.32 and white_ratio >= 0.004 and edge_ratio >= 0.012 and color_variance >= 60
 
 
 def _inside_shape(text: dict[str, Any], shape: dict[str, Any]) -> bool:
@@ -148,19 +152,68 @@ def detect_label_groups(image_path: Path, image_width: int, image_height: int, o
         members = [shape, text]
         if asset_dir and project_id and _complex_badge(image, shape):
             icon_path = asset_dir / f"component_{group_id}.png"
-            crop_bounds = _extract_alpha_crop(image, shape, icon_path)
+            crop_bounds = _extract_whole_badge_crop(image, shape, icon_path)
             if crop_bounds:
                 crop_x, crop_y, crop_w, crop_h = crop_bounds
                 icon = {"id": f"component_asset_{next_group:04d}", "type": "image", "x": float(crop_x), "y": float(crop_y), "width": float(crop_w), "height": float(crop_h), "rotation": 0, "zIndex": 16, "src": f"/media/assets/{project_id}/{icon_path.name}", "style": {"opacity": 1}, "confidence": 0.82}
                 _mark(icon, group_id, role, "wholeBadgeImage")
-                icon.setdefault("metadata", {}).update({"wholeBadgeAsset": True, "preserveAsImage": True, "doNotVectorize": True, "reconstructionStrategy": "transparent_image", "sourceContentPreserved": True, "owns": [shape["id"]]})
-                shape.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressRender": True, "duplicateSuppressed": True, "reconstructionStrategy": "group", "sourceContentPreserved": False})
+                icon.setdefault("metadata", {}).update({"wholeBadgeAsset": True, "preserveWholeAsset": True, "preserveAsImage": True, "doNotVectorize": True, "transparent": False, "reconstructionStrategy": "local_image", "sourceContentPreserved": True, "badgeForegroundTransparentExtraction": False, "owns": [shape["id"]]})
+                shape.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressed": True, "suppressRender": True, "duplicateSuppressed": True, "badgeSyntheticBackgroundSuppressed": True, "duplicateBadgeLayerRemoved": True, "reconstructionStrategy": "group", "sourceContentPreserved": False})
                 for contained in texts:
                     if contained is not text and _inside_shape(contained, shape):
-                        contained.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressRender": True, "duplicateSuppressed": True, "reconstructionStrategy": "group", "sourceContentPreserved": True})
+                        contained.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressed": True, "suppressRender": True, "duplicateSuppressed": True, "duplicateBadgeLayerRemoved": True, "reconstructionStrategy": "group", "sourceContentPreserved": True})
                 additions.append(icon)
         group_box = (min(item["x"] for item in members), min(item["y"] for item in members), max(item["x"] + item["width"] for item in members), max(item["y"] + item["height"] for item in members))
         group = {"id": f"group_{group_id}", "type": "group", "x": group_box[0], "y": group_box[1], "width": group_box[2] - group_box[0], "height": group_box[3] - group_box[1], "rotation": 0, "zIndex": 5, "style": {"opacity": 1}, "confidence": 0.55}
         _mark(group, group_id, role, "group")
         additions.append(group)
     return base_elements + additions
+
+
+def apply_badge_ownership(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Suppress synthetic/foreground layers already owned by a whole badge."""
+    badges = [item for item in elements if (item.get("metadata") or {}).get("preserveWholeAsset")]
+    for badge in badges:
+        badge_metadata = badge.setdefault("metadata", {})
+        owned = list(badge_metadata.get("owns") or [])
+        for child in elements:
+            if child is badge or child.get("type") in {"background", "group", "text"}:
+                continue
+            metadata = child.setdefault("metadata", {})
+            if metadata.get("ownedBy") == badge.get("id"):
+                if child.get("id") not in owned:
+                    owned.append(child.get("id"))
+                continue
+            if _overlap_ratio(child, badge) < 0.72:
+                continue
+            child_type = child.get("type")
+            likely_badge_layer = child_type == "ellipse" or (
+                child_type == "image"
+                and (metadata.get("transparent", True) or child.get("componentType") in {"icon", "iconForeground"})
+            )
+            if not likely_badge_layer:
+                continue
+            metadata.update({
+                "ownedBy": badge["id"],
+                "suppressed": True,
+                "suppressRender": True,
+                "duplicateSuppressed": True,
+                "duplicateBadgeLayerRemoved": True,
+                "reconstructionStrategy": "group",
+            })
+            if child_type == "ellipse":
+                metadata["badgeSyntheticBackgroundSuppressed"] = True
+            else:
+                metadata["badgeForegroundLayerSuppressed"] = True
+            if child.get("id") not in owned:
+                owned.append(child.get("id"))
+        badge_metadata["owns"] = owned
+    return elements
+
+
+def _overlap_ratio(item: dict[str, Any], owner: dict[str, Any]) -> float:
+    ix1, iy1, ix2, iy2 = _bbox(item)
+    ox1, oy1, ox2, oy2 = _bbox(owner)
+    overlap = max(0.0, min(ix2, ox2) - max(ix1, ox1)) * max(0.0, min(iy2, oy2) - max(iy1, oy1))
+    item_area = max(1.0, (ix2 - ix1) * (iy2 - iy1))
+    return overlap / item_area

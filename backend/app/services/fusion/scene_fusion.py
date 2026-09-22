@@ -23,13 +23,18 @@ def fuse_scene(layout: dict[str, Any], ocr_results: list[Any], vision: dict[str,
                 fused["groupId"] = str(match["groupId"])
             metadata = dict(fused.get("metadata") or {})
             strategy = match.get("reconstructionStrategy")
-            if strategy:
+            preserve_whole_asset = bool(metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset"))
+            if strategy and not preserve_whole_asset:
                 metadata["reconstructionStrategy"] = strategy
                 metadata["reconstructionStrategySource"] = "vision"
             metadata["visionSemanticType"] = match.get("semanticType", "unknown")
             metadata["visionMatched"] = True
-            metadata["doNotVectorize"] = bool(match.get("doNotVectorize", False))
+            metadata["doNotVectorize"] = True if preserve_whole_asset else bool(match.get("doNotVectorize", False))
             metadata["visualComplexity"] = _confidence(match.get("visualComplexity", 0.0))
+            if preserve_whole_asset:
+                metadata["reconstructionStrategy"] = "local_image"
+                metadata["reconstructionStrategySource"] = "whole-badge"
+                metadata["transparent"] = False
             fused["metadata"] = metadata
             if match.get("fontClass") and fused.get("type") == "text":
                 style = fused.setdefault("style", {})

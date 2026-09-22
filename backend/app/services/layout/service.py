@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.layout.detectors import detect_image_regions, detect_simple_shapes, detect_text_elements
-from app.services.layout.label_detector import detect_label_groups
+from app.services.layout.label_detector import apply_badge_ownership, detect_label_groups
 from app.services.layout.position_refiner import refine_layout
 from app.services.layout.text_blocks import group_text_elements
 from app.services.ocr.provider import OCRResult
@@ -11,7 +11,7 @@ from app.services.ocr.provider import OCRResult
 
 class LayoutService:
     def __init__(self) -> None:
-        self.last_stats = {"textBlocksMerged": 0, "singleLinePreserved": 0, "wholeBadgeAssets": 0, "duplicateElementsRemoved": 0}
+        self.last_stats = {"textBlocksMerged": 0, "singleLinePreserved": 0, "wholeBadgeAssets": 0, "duplicateElementsRemoved": 0, "badgeForegroundTransparentExtractions": 0, "badgeSyntheticBackgroundsSuppressed": 0, "duplicateBadgeLayersRemoved": 0}
 
     def analyze(self, image_path: Path, background_url: str | None = None, asset_dir: Path | None = None) -> tuple[dict, list[OCRResult]]:
         from PIL import Image
@@ -32,11 +32,6 @@ class LayoutService:
         shapes = detect_simple_shapes(image_path, ocr_results)
         project_id = asset_dir.parent.name if asset_dir else None
         elements = detect_label_groups(image_path, width, height, ocr_results, texts + shapes, asset_dir, project_id)
-        self.last_stats = {
-            **text_stats,
-            "wholeBadgeAssets": sum(1 for item in elements if (item.get("metadata") or {}).get("wholeBadgeAsset")),
-            "duplicateElementsRemoved": sum(1 for item in elements if (item.get("metadata") or {}).get("duplicateSuppressed")),
-        }
         images = detect_image_regions(image_path, ocr_results, shapes)
         if asset_dir and images:
             asset_dir.mkdir(parents=True, exist_ok=True)
@@ -49,7 +44,15 @@ class LayoutService:
                 cv2.imwrite(str(asset_path), crop)
                 project_id = asset_dir.parent.name
                 item["src"] = f"/media/assets/{project_id}/{asset_path.name}"
-        elements = elements + images
+        elements = apply_badge_ownership(elements + images)
+        self.last_stats = {
+            **text_stats,
+            "wholeBadgeAssets": sum(1 for item in elements if (item.get("metadata") or {}).get("wholeBadgeAsset")),
+            "duplicateElementsRemoved": sum(1 for item in elements if (item.get("metadata") or {}).get("duplicateSuppressed")),
+            "badgeForegroundTransparentExtractions": sum(1 for item in elements if (item.get("metadata") or {}).get("badgeForegroundTransparentExtraction")),
+            "badgeSyntheticBackgroundsSuppressed": sum(1 for item in elements if (item.get("metadata") or {}).get("badgeSyntheticBackgroundSuppressed")),
+            "duplicateBadgeLayersRemoved": sum(1 for item in elements if (item.get("metadata") or {}).get("duplicateBadgeLayerRemoved")),
+        }
         if background_url:
             elements.insert(0, {
                 "id": "background_001", "type": "background", "x": 0, "y": 0,

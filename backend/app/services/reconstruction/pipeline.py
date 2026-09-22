@@ -113,6 +113,9 @@ class ReconstructionPipeline:
             "ghostingRegionsRecleaned": 0,
             "wholeBadgeAssets": 0,
             "duplicateElementsRemoved": 0,
+            "badgeForegroundTransparentExtractions": 0,
+            "badgeSyntheticBackgroundsSuppressed": 0,
+            "duplicateBadgeLayersRemoved": 0,
         }
         for page_index, image in enumerate(record.get("images", []), start=1):
             source_path = Path(image["path"])
@@ -132,7 +135,7 @@ class ReconstructionPipeline:
             ]
             inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
             _apply_preserved_text_ownership(layout, inpainting.last_strategies)
-            for key in ("textBlocksMerged", "singleLinePreserved", "wholeBadgeAssets", "duplicateElementsRemoved"):
+            for key in ("textBlocksMerged", "singleLinePreserved", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
             for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
                 reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
@@ -208,6 +211,9 @@ class ReconstructionPipeline:
                 "ghostingRegionsRecleaned": reconstruction_stats["ghostingRegionsRecleaned"],
                 "wholeBadgeAssets": reconstruction_stats["wholeBadgeAssets"],
                 "duplicateElementsRemoved": reconstruction_stats["duplicateElementsRemoved"],
+                "badgeForegroundTransparentExtractions": reconstruction_stats["badgeForegroundTransparentExtractions"],
+                "badgeSyntheticBackgroundsSuppressed": reconstruction_stats["badgeSyntheticBackgroundsSuppressed"],
+                "duplicateBadgeLayersRemoved": reconstruction_stats["duplicateBadgeLayersRemoved"],
                 "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
                 "routing": self.scene_analyzer.vision_routing,
                 "layoutProvider": self.scene_analyzer.layout_provider.name,

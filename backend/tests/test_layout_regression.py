@@ -88,10 +88,38 @@ def test_complex_badge_owns_and_suppresses_native_circle(tmp_path: Path) -> None
     elements = detect_label_groups(source, 500, 300, regions, texts + [ellipse], tmp_path / "assets", "badge-test")
     asset = next(item for item in elements if (item.get("metadata") or {}).get("wholeBadgeAsset"))
     source_shape = next(item for item in elements if item.get("id") == "shape_badge")
-    assert asset["metadata"]["reconstructionStrategy"] == "transparent_image"
+    assert asset["metadata"]["reconstructionStrategy"] == "local_image"
+    assert asset["metadata"]["preserveWholeAsset"] is True
+    assert asset["metadata"]["doNotVectorize"] is True
+    assert asset["metadata"]["transparent"] is False
     assert asset["metadata"]["owns"] == ["shape_badge"]
     assert source_shape["metadata"]["suppressRender"] is True
+    assert source_shape["metadata"]["suppressed"] is True
     assert source_shape["metadata"]["ownedBy"] == asset["id"]
+    assert source_shape["metadata"]["badgeSyntheticBackgroundSuppressed"] is True
+    exported = cv2.imread(str(tmp_path / "assets" / Path(asset["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert exported is not None
+    assert exported.ndim == 3 and exported.shape[2] == 3
+    center = exported[exported.shape[0] // 2, exported.shape[1] // 2]
+    assert np.all(center > 240)
+
+
+def test_whole_badge_renderer_skips_synthetic_circle_and_transparent_foreground(tmp_path: Path) -> None:
+    badge_path = tmp_path / "whole-badge.png"
+    badge = np.full((80, 80, 3), 255, dtype=np.uint8)
+    cv2.circle(badge, (40, 40), 36, (20, 25, 220), -1)
+    cv2.line(badge, (24, 40), (56, 40), (255, 255, 255), 7)
+    cv2.imwrite(str(badge_path), badge)
+    owner = "badge_asset_001"
+    layout = {"version": "1.1", "slide": {"width": 200, "height": 120}, "elements": [
+        {"id": owner, "type": "image", "x": 20, "y": 20, "width": 80, "height": 80, "rotation": 0, "zIndex": 16, "src": str(badge_path), "style": {}, "metadata": {"preserveWholeAsset": True, "doNotVectorize": True, "reconstructionStrategy": "local_image", "transparent": False}},
+        {"id": "synthetic_circle", "type": "ellipse", "x": 20, "y": 20, "width": 80, "height": 80, "rotation": 0, "zIndex": 10, "style": {"fill": "#DC1914"}, "metadata": {"ownedBy": owner, "suppressRender": True, "badgeSyntheticBackgroundSuppressed": True}},
+        {"id": "transparent_foreground", "type": "image", "x": 20, "y": 20, "width": 80, "height": 80, "rotation": 0, "zIndex": 17, "src": str(badge_path), "style": {}, "metadata": {"ownedBy": owner, "suppressRender": True, "transparent": True}},
+    ]}
+    _, report = PPTXRenderer().render_project("whole_badge_render", [layout])
+    assert report["valid"] is True
+    assert report["structural"]["imageCount"] == 1
+    assert report["structural"]["shapeCount"] == 0
 
 
 def test_export_contains_text_shape_and_image(tmp_path: Path) -> None:

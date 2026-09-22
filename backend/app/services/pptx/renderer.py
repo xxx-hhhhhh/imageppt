@@ -93,9 +93,9 @@ class PPTXRenderer:
     def _add_element(self, slide: Any, element: dict[str, Any], sx: float, sy: float) -> None:
         kind = element.get("type")
         metadata = element.get("metadata") or {}
-        if metadata.get("suppressRender") or metadata.get("ownedBy"):
+        if metadata.get("suppressed") or metadata.get("suppressRender") or metadata.get("ownedBy"):
             return
-        strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
+        strategy = "local_image" if metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset") else metadata.get("reconstructionStrategy") or _default_strategy(kind)
         if strategy == "group":
             return
         x = Inches(element.get("x", 0) * sx)

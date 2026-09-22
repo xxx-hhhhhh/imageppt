@@ -13,3 +13,17 @@ def test_router_honors_background_and_explicit_strategy():
     assert router.route({"type": "background"}) == "background_image"
     assert router.route({"type": "image", "metadata": {"reconstructionStrategy": "transparent_image"}}) == "transparent_image"
     assert router.route({"type": "ellipse", "src": "/asset.png", "metadata": {"reconstructionStrategy": "native_shape", "doNotVectorize": True}}) == "transparent_image"
+
+
+def test_router_forces_complex_badge_to_whole_local_image():
+    router = ReconstructionRouter()
+    element = {
+        "type": "image",
+        "src": "/badge.png",
+        "metadata": {
+            "preserveWholeAsset": True,
+            "doNotVectorize": True,
+            "reconstructionStrategy": "transparent_image",
+        },
+    }
+    assert router.route(element) == "local_image"

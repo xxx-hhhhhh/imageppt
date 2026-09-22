@@ -24,8 +24,10 @@ class ReconstructionRouter:
     def route(self, element: dict[str, Any]) -> str:
         metadata = element.get("metadata") or {}
         element_type = element.get("type")
-        if metadata.get("suppressRender") or metadata.get("ownedBy"):
+        if metadata.get("suppressed") or metadata.get("suppressRender") or metadata.get("ownedBy"):
             return "group"
+        if metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset"):
+            return "local_image"
         if metadata.get("preserveAsImage") and element.get("src"):
             return "transparent_image" if metadata.get("transparent", True) else "local_image"
         if metadata.get("doNotVectorize") and element_type not in {"text", "background", "group"}:
