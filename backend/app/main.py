@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app.config import OUTPUTS_DIR, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
+from app.config import OUTPUTS_DIR, PUBLIC_SHARED_MODE, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
 from app.models.project_store import ProjectStore
 from app.schemas.layout import AnalyzeResponse, LayoutJSON
 from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
@@ -110,6 +110,7 @@ def vision_status() -> dict:
 
 @app.post("/api/vision/test")
 def vision_test() -> dict:
+    _require_private_settings_access()
     runtime = load_vision_settings()
     result = VisionRouter(runtime).test_connection()
     return {"provider": result.get("provider", runtime.selected_provider), "model": result.get("model"), "configured": bool(result.get("success")), "success": bool(result.get("success")), "error": None if result.get("success") else result.get("message")}
@@ -123,15 +124,22 @@ def get_vision_settings() -> VisionSettingsResponse:
 
 @app.put("/api/settings/vision", response_model=VisionSettingsResponse)
 def put_vision_settings(payload: VisionSettingsPayload) -> VisionSettingsResponse:
+    _require_private_settings_access()
     runtime = save_vision_settings(payload.model_dump(mode="json"))
     return _vision_settings_response(runtime)
 
 
 @app.post("/api/settings/vision/test", response_model=VisionTestResponse)
 def test_vision_settings() -> VisionTestResponse:
+    _require_private_settings_access()
     runtime = load_vision_settings()
     result = VisionRouter(runtime).test_connection()
     return VisionTestResponse(success=bool(result.get("success")), provider=str(result.get("provider", runtime.selected_provider)), model=str(result.get("model") or ""), message=str(result.get("message", "连接失败")), diagnostics=result.get("diagnostics", {}))
+
+
+def _require_private_settings_access() -> None:
+    if PUBLIC_SHARED_MODE:
+        raise HTTPException(status_code=403, detail="公网共享模式下不能修改或测试 AI 设置")
 
 
 def _vision_settings_response(runtime) -> VisionSettingsResponse:

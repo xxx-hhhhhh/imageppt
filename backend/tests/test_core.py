@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from pptx import Presentation
 from fastapi.testclient import TestClient
+import app.main as main_module
 
 from app.main import app
 from app.services.pptx import PPTXRenderer
@@ -29,6 +30,14 @@ def test_health_and_project_upload(tmp_path: Path) -> None:
     response = client.post("/api/projects/%s/images" % project["id"], files={"files": ("sample.png", image_path.read_bytes(), "image/png")})
     assert response.status_code == 200
     assert response.json()["project"]["imageCount"] == 1
+
+
+def test_public_share_mode_protects_model_settings(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "PUBLIC_SHARED_MODE", True)
+    client = TestClient(app)
+    response = client.post("/api/settings/vision/test")
+    assert response.status_code == 403
+    assert "公网共享模式" in response.json()["detail"]
 
 
 def test_renderer_preserves_editable_object_types(tmp_path: Path) -> None:

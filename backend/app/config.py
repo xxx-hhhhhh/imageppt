@@ -43,6 +43,7 @@ QWEN_TIMEOUT = env_int("QWEN_TIMEOUT", 120)
 QWEN_MAX_RETRIES = env_int("QWEN_MAX_RETRIES", 2)
 CONVERSION_MODE = os.getenv("CONVERSION_MODE", "standard")
 MAX_AI_CALLS_PER_SLIDE = env_int("MAX_AI_CALLS_PER_SLIDE", 3)
+PUBLIC_SHARED_MODE = os.getenv("IMAGE2EDITABLEPPT_PUBLIC_SHARED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Settings:
