@@ -1,7 +1,9 @@
 # Optional high-accuracy OCR. Installation is best effort on Windows/Python versions
 # where PaddlePaddle has a compatible wheel.
-paddleocr>=2.8
-paddlepaddle>=2.6
+paddleocr[doc-parser]>=3.7,<3.8
+# 3.3.x currently fails on Windows CPU/oneDNN PP-StructureV3 inference.
+paddlepaddle>=3.2.2,<3.3
+# PaddleOCR currently permits chardet 7.x, while requests requires <6.
+chardet>=5,<6
 # Optional neural inpainting. The application falls back to OpenCV when unavailable.
 simple-lama-inpainting>=0.1
-

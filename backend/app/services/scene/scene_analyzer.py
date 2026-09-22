@@ -41,7 +41,7 @@ class SceneAnalyzer:
         ocr_payload = [{"id": f"ocr_{index + 1}", "text": item.text, "bbox": item.bbox, "confidence": item.confidence} for index, item in enumerate(ocr_results)]
         if enable_vision:
             try:
-                vision = self.vision_provider.analyze_scene(image_path, {"ocr_elements": ocr_payload, "width": width, "height": height}, mode)
+                vision = self.vision_provider.analyze_scene(image_path, {"ocr_elements": ocr_payload, "layout_regions": provider_regions, "width": width, "height": height}, mode)
                 self.ai_used = self.ai_used or bool(vision.get("aiUsed"))
                 self.vision_routing = vision.get("routing") or {"requestedProvider": self.vision_provider.provider_name, "usedProvider": vision.get("provider"), "usedModel": vision.get("model"), "fallbackCount": 0, "aiUsed": self.ai_used, "attempts": []}
             except Exception as exc:
@@ -55,7 +55,7 @@ class SceneAnalyzer:
             self.vision_routing = {"requestedProvider": "qwen", "usedProvider": "local", "usedModel": None, "fallbackCount": 0, "aiUsed": False, "attempts": []}
         fused = fuse_scene({"elements": elements, "groups": groups, "relations": relations}, ocr_results, vision)
         scene = {"version": "2.0", "canvas": {"width": width, "height": height, "backgroundColor": analyze_colors(image_path).get("background", "#FFFFFF")}, "regions": provider_regions, "elements": fused["elements"], "groups": fused["groups"], "relations": fused["relations"], "repeatedComponents": fused["repeatedComponents"], "layers": fused["layers"], "page": fused["page"], "styleTokens": analyze_colors(image_path), "confidence": {"ocr": sum((item.confidence for item in ocr_results), 0.0) / max(1, len(ocr_results)), "layout": self.layout_provider.name, "segmentation": len(segmentation), "vision": vision.get("confidence", 0.0), "final": sum((item.get("finalConfidence", 0.0) for item in fused["elements"]), 0.0) / max(1, len(fused["elements"]))}, "textLines": text_analysis["lines"], "paragraphs": text_analysis["paragraphs"], "segmentation": segmentation, "vision": vision, "visionRouting": self.vision_routing}
-        warnings = self.layout_warnings + self.vision_warnings + list(getattr(self.vision_provider, "warnings", []))
+        warnings = self.layout_warnings + list(getattr(self.layout_provider, "warnings", [])) + self.vision_warnings + list(getattr(self.vision_provider, "warnings", []))
         return scene, warnings
 
     def refine(self, scene: dict[str, Any]) -> dict[str, Any]:

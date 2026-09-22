@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ import cv2
 import numpy as np
 
 from app.services.typography.analyzer import analyze_text_style
+from app.services.paddle_runtime import predict_ocr
 
 
 @dataclass
@@ -41,21 +43,18 @@ class PaddleOCRProvider(OCRProvider):
     name = "paddleocr"
 
     def __init__(self) -> None:
-        module = importlib.import_module("paddleocr")
-        PaddleOCR = getattr(module, "PaddleOCR")
-        try:
-            self.engine = PaddleOCR(lang="ch", use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)
-        except TypeError:
-            self.engine = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+        if importlib.util.find_spec("paddleocr") is None:
+            raise ImportError("paddleocr is not installed")
 
     def recognize(self, image_path: Path) -> list[OCRResult]:
-        raw = self.engine.predict(str(image_path)) if hasattr(self.engine, "predict") else self.engine.ocr(str(image_path), cls=True)
+        raw = predict_ocr(str(image_path))
         results: list[OCRResult] = []
         for item in raw or []:
-            if isinstance(item, dict):
-                boxes = item.get("rec_boxes") or item.get("dt_polys") or item.get("boxes")
-                texts = item.get("rec_texts") or item.get("texts") or []
-                scores = item.get("rec_scores") or item.get("scores") or []
+            payload = _paddle_payload(item)
+            if payload:
+                boxes = payload.get("rec_polys") or payload.get("rec_boxes") or payload.get("dt_polys") or payload.get("boxes")
+                texts = payload.get("rec_texts") or payload.get("texts") or []
+                scores = payload.get("rec_scores") or payload.get("scores") or []
                 for index, polygon in enumerate(boxes or []):
                     points = np.asarray(polygon).reshape(-1, 2)
                     x1, y1 = points.min(axis=0)
@@ -78,6 +77,19 @@ class PaddleOCRProvider(OCRProvider):
                         if text.strip():
                             results.append(OCRResult(text.strip(), bbox, score, _style_from_region(image_path, bbox, text, score)))
         return results
+
+
+def _paddle_payload(item: Any) -> dict[str, Any] | None:
+    if isinstance(item, dict):
+        payload = item
+    else:
+        payload = getattr(item, "json", None)
+        if callable(payload):
+            payload = payload()
+    if not isinstance(payload, dict):
+        return None
+    nested = payload.get("res")
+    return nested if isinstance(nested, dict) else payload
 
 
 class RapidOCRProvider(OCRProvider):

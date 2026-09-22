@@ -18,6 +18,7 @@ from app.services.reconstruction import ReconstructionPipeline
 from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
 from app.services.vision.router import VisionRouter
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
+from app.services.paddle_runtime import paddle_diagnostics
 
 
 ensure_runtime_dirs()
@@ -46,7 +47,7 @@ def _get_project(project_id: str) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "service": "Image2EditablePPT"}
+    return {"status": "ok", "service": "Image2EditablePPT", **paddle_diagnostics()}
 
 
 @app.post("/api/projects", response_model=ProjectResponse)
