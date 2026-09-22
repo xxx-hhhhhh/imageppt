@@ -55,6 +55,33 @@ export interface VisionSettings {
   network?: { systemProxy?: string; proxyUrl?: string; source?: string; status?: string; proxyTcp?: { status?: string; message?: string } };
 }
 
+export interface VisionTestResult {
+  success: boolean;
+  provider: string;
+  model: string;
+  message: string;
+  stage?: 'auth' | 'model' | 'network' | 'request' | null;
+  statusCode?: number | null;
+  errorType?: string | null;
+  errorCode?: string | null;
+  connectionPath?: string | null;
+  latencyMs?: number | null;
+  diagnostics?: {
+    tcp?: boolean;
+    httpsReachable?: boolean;
+    auth?: boolean;
+    modelReachable?: boolean;
+    visionRequest?: boolean;
+    directTried?: boolean;
+    proxyTried?: boolean;
+    proxyTcp?: { status?: string; message?: string };
+    qwenBaseUrl?: { status?: string; message?: string; httpStatus?: number };
+    qwenApi?: { status?: string; message?: string; httpStatus?: number; errorType?: string; errorCode?: string };
+    networkPath?: string;
+    connectionPath?: string;
+  };
+}
+
 export async function getVisionStatus(): Promise<VisionStatus> {
   const response = await api.get<VisionStatus>('/vision/status');
   return response.data;
@@ -70,8 +97,8 @@ export async function saveVisionSettings(payload: { enabled: boolean; selectedPr
   return response.data;
 }
 
-export async function testVisionSettings(): Promise<{ success: boolean; provider: string; model: string; message: string; diagnostics?: { proxyTcp?: { status?: string; message?: string }; qwenBaseUrl?: { status?: string; message?: string }; qwenApi?: { status?: string; message?: string }; networkPath?: string } }> {
-  const response = await api.post<{ success: boolean; provider: string; model: string; message: string; diagnostics?: { proxyTcp?: { status?: string; message?: string }; qwenBaseUrl?: { status?: string; message?: string }; qwenApi?: { status?: string; message?: string }; networkPath?: string } }>('/settings/vision/test');
+export async function testVisionSettings(): Promise<VisionTestResult> {
+  const response = await api.post<VisionTestResult>('/settings/vision/test');
   return response.data;
 }
 

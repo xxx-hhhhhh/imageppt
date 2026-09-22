@@ -35,7 +35,7 @@ def test_health_and_project_upload(tmp_path: Path) -> None:
 def test_public_share_mode_protects_model_settings(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "PUBLIC_SHARED_MODE", True)
     client = TestClient(app)
-    response = client.post("/api/settings/vision/test")
+    response = client.put("/api/settings/vision", json={"enabled": True, "selectedProvider": "qwen"})
     assert response.status_code == 403
     assert "公网共享模式" in response.json()["detail"]
 

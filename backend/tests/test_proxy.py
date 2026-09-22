@@ -34,3 +34,14 @@ def test_proxy_tcp_failure_uses_user_message(monkeypatch):
     result = proxy.proxy_tcp_test("http://127.0.0.1:7897")
     assert result["status"] == "FAIL"
     assert result["message"] == "当前系统代理端口不可用，请检查代理软件。"
+
+
+def test_proxy_mode_none_never_uses_system_or_environment(monkeypatch):
+    monkeypatch.setattr(proxy, "read_windows_proxy", lambda: proxy.ProxyInfo("http://127.0.0.1:7897", "windows-system", True))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8443")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+
+    resolved = proxy.resolve_proxy("none")
+
+    assert resolved.url is None
+    assert resolved.source == "direct"

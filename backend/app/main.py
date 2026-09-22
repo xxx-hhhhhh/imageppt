@@ -111,10 +111,9 @@ def vision_status() -> dict:
 
 @app.post("/api/vision/test")
 def vision_test() -> dict:
-    _require_private_settings_access()
     runtime = load_vision_settings()
     result = VisionRouter(runtime).test_connection()
-    return {"provider": result.get("provider", runtime.selected_provider), "model": result.get("model"), "configured": bool(result.get("success")), "success": bool(result.get("success")), "error": None if result.get("success") else result.get("message")}
+    return {**result, "configured": bool(result.get("success")), "error": None if result.get("success") else result.get("message")}
 
 
 @app.get("/api/settings/vision", response_model=VisionSettingsResponse)
@@ -132,10 +131,21 @@ def put_vision_settings(payload: VisionSettingsPayload) -> VisionSettingsRespons
 
 @app.post("/api/settings/vision/test", response_model=VisionTestResponse)
 def test_vision_settings() -> VisionTestResponse:
-    _require_private_settings_access()
     runtime = load_vision_settings()
     result = VisionRouter(runtime).test_connection()
-    return VisionTestResponse(success=bool(result.get("success")), provider=str(result.get("provider", runtime.selected_provider)), model=str(result.get("model") or ""), message=str(result.get("message", "连接失败")), diagnostics=result.get("diagnostics", {}))
+    return VisionTestResponse(
+        success=bool(result.get("success")),
+        provider=str(result.get("provider", runtime.selected_provider)),
+        model=str(result.get("model") or ""),
+        message=str(result.get("message", "连接失败")),
+        stage=result.get("stage"),
+        statusCode=result.get("statusCode"),
+        errorType=result.get("errorType"),
+        errorCode=result.get("errorCode"),
+        connectionPath=result.get("connectionPath"),
+        latencyMs=result.get("latencyMs"),
+        diagnostics=result.get("diagnostics", {}),
+    )
 
 
 def _require_private_settings_access() -> None:

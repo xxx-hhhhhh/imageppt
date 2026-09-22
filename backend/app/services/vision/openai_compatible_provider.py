@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
+import logging
 import mimetypes
-import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -16,10 +16,34 @@ from .schemas import extract_json, validate_json
 from .test_assets import cleanup_test_image, create_test_image
 
 
+logger = logging.getLogger(__name__)
+_PROXY_UNSET = object()
+NETWORK_ERROR_TYPES = {"connection_timeout", "connect_error", "tls_error", "network_error"}
+
+
 class VisionProviderError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        *,
+        stage: str = "request",
+        error_type: str = "request_error",
+        error_code: str | None = None,
+        connection_path: str | None = None,
+        latency_ms: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.stage = stage
+        self.error_type = error_type
+        self.error_code = error_code
+        self.connection_path = connection_path
+        self.latency_ms = latency_ms
+
+    @property
+    def network_failure(self) -> bool:
+        return self.error_type in NETWORK_ERROR_TYPES
 
 
 def image_to_data_url(path: Path) -> str:
@@ -31,14 +55,17 @@ def image_to_data_url(path: Path) -> str:
 
 
 class OpenAICompatibleVisionProvider(VisionProvider):
-    def __init__(self, *, provider_name: str, api_key: str, base_url: str, model: str, timeout: int = 120, max_retries: int = 1, proxy_url: str | None = None) -> None:
+    def __init__(self, *, provider_name: str, api_key: str, base_url: str, model: str, timeout: int = 120, max_retries: int = 1, proxy_url: str | None | object = _PROXY_UNSET) -> None:
         self.name = provider_name
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
-        self.proxy_url = proxy_url if proxy_url is not None else resolve_proxy().url
+        self.proxy_url = resolve_proxy().url if proxy_url is _PROXY_UNSET else proxy_url
+        self.connection_path = _connection_path(self.proxy_url)
+        self.last_status_code: int | None = None
+        self.last_latency_ms: int | None = None
         self._reset_scene_diagnostics()
         if not api_key:
             raise VisionProviderError(f"{provider_name} API Key 未配置")
@@ -48,8 +75,20 @@ class OpenAICompatibleVisionProvider(VisionProvider):
             from openai import OpenAI
         except ImportError as exc:
             raise VisionProviderError("openai package 未安装") from exc
-        http_client = httpx.Client(proxy=self.proxy_url, timeout=timeout, trust_env=False) if self.proxy_url else httpx.Client(timeout=timeout, trust_env=False)
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0, http_client=http_client)
+        self._openai_type = OpenAI
+        self._configure_client(self.proxy_url)
+
+    def _configure_client(self, proxy_url: str | None) -> None:
+        old_http_client = getattr(self, "http_client", None)
+        self.proxy_url = proxy_url
+        self.connection_path = _connection_path(proxy_url)
+        self.http_client = httpx.Client(proxy=proxy_url, timeout=self.timeout, trust_env=False)
+        self.client = self._openai_type(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout, max_retries=0, http_client=self.http_client)
+        if old_http_client is not None:
+            try:
+                old_http_client.close()
+            except Exception:
+                pass
 
     def status(self) -> dict[str, Any]:
         return {"provider": self.name, "configured": True, "model": self.model, "baseUrlConfigured": bool(self.base_url)}
@@ -58,19 +97,40 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         request_messages = [*messages, {"role": "user", "content": repair_prompt}] if repair_prompt else messages
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            started = time.perf_counter()
             try:
                 response = self.client.chat.completions.create(model=self.model, messages=request_messages)
+                self.last_status_code = 200
+                self.last_latency_ms = round((time.perf_counter() - started) * 1000)
+                logger.info(
+                    "vision_request provider=%s model=%s base_url=%s connection_path=%s status_code=200 latency_ms=%s error_type=none",
+                    self.name,
+                    self.model,
+                    self.base_url,
+                    self.connection_path,
+                    self.last_latency_ms,
+                )
                 return str(response.choices[0].message.content or "")
             except Exception as exc:
                 last_error = exc
-                code = _status_code(exc)
-                if code in {401, 403}:
-                    raise VisionProviderError(f"{self.name} API Key 无效", code) from exc
-                if attempt < self.max_retries and (code in {408, 429, 500, 502, 503, 504} or code is None):
+                error = classify_vision_error(self.name, exc, self.connection_path, round((time.perf_counter() - started) * 1000))
+                self.last_status_code = error.status_code
+                self.last_latency_ms = error.latency_ms
+                logger.warning(
+                    "vision_request provider=%s model=%s base_url=%s connection_path=%s status_code=%s latency_ms=%s error_type=%s",
+                    self.name,
+                    self.model,
+                    self.base_url,
+                    self.connection_path,
+                    error.status_code,
+                    error.latency_ms,
+                    error.error_type,
+                )
+                if attempt < self.max_retries and (error.network_failure or error.status_code in {408, 500, 502, 503, 504}):
                     time.sleep(min(2, 2**attempt))
                     continue
-                raise VisionProviderError(_safe_error_message(self.name, exc, code), code) from exc
-        raise VisionProviderError(_safe_error_message(self.name, last_error, None))
+                raise error from exc
+        raise classify_vision_error(self.name, last_error or RuntimeError("request failed"), self.connection_path, self.last_latency_ms)
 
     def _messages(self, image_path: Path, context: dict | None) -> list[dict[str, Any]]:
         return [{"role": "system", "content": SCENE_SYSTEM_PROMPT}, {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}}, {"type": "text", "text": scene_user_prompt((context or {}).get("ocr_elements", []), context)}]}]
@@ -144,7 +204,20 @@ class OpenAICompatibleVisionProvider(VisionProvider):
                 test_path = create_test_image()
             messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_to_data_url(test_path)}}, {"type": "text", "text": "Reply exactly with: VISION_OK"}]}]
             answer = self._request(messages)
-            return {"success": "VISION_OK" in answer.upper(), "provider": self.name, "model": self.model, "message": "连接成功" if "VISION_OK" in answer.upper() else "模型未返回 VISION_OK", "proxyUrl": self.proxy_url}
+            success = "VISION_OK" in answer.upper()
+            return {
+                "success": success,
+                "provider": self.name,
+                "model": self.model,
+                "message": "连接成功" if success else "模型未返回 VISION_OK",
+                "proxyUrl": self.proxy_url,
+                "connectionPath": self.connection_path,
+                "latencyMs": self.last_latency_ms,
+                "statusCode": self.last_status_code or 200,
+                "stage": "request",
+                "errorType": None if success else "unexpected_response",
+                "errorCode": None if success else "vision_ok_missing",
+            }
         except RuntimeError as exc:
             if str(exc) == "本地测试图片创建失败":
                 raise VisionProviderError(str(exc)) from exc
@@ -159,12 +232,85 @@ def _status_code(exc: Exception) -> int | None:
     return int(value) if isinstance(value, int) else None
 
 
-def _safe_error_message(provider: str, exc: Exception | None, code: int | None) -> str:
-    if code == 429:
-        return f"{provider} 额度或频率已达到限制"
-    if code == 400:
-        return f"{provider} 请求格式错误"
-    return f"{provider} 请求失败: {type(exc).__name__}" if exc else f"{provider} 请求失败"
+def classify_vision_error(provider: str, exc: Exception, connection_path: str | None = None, latency_ms: int | None = None) -> VisionProviderError:
+    if isinstance(exc, VisionProviderError):
+        if not exc.connection_path:
+            exc.connection_path = connection_path
+        if exc.latency_ms is None:
+            exc.latency_ms = latency_ms
+        return exc
+    status = _status_code(exc)
+    error_code = _error_code(exc)
+    detail = (" ".join(_exception_text(exc)) + " " + str(error_code or "") + " " + str(getattr(exc, "body", ""))).lower()
+    if status == 401:
+        return VisionProviderError("Qwen API Key 无效", status, stage="auth", error_type="authentication_error", error_code=error_code or "invalid_api_key", connection_path=connection_path, latency_ms=latency_ms)
+    if status == 403:
+        return VisionProviderError("Qwen 无访问权限，请检查区域或模型权限", status, stage="auth", error_type="permission_denied", error_code=error_code or "permission_denied", connection_path=connection_path, latency_ms=latency_ms)
+    if status == 404:
+        return VisionProviderError("Qwen 模型不可用或端点错误", status, stage="model", error_type="model_not_found", error_code=error_code or "model_not_found", connection_path=connection_path, latency_ms=latency_ms)
+    if status == 429:
+        quota = "insufficient_quota" in detail or "quota" in detail or "余额" in detail
+        return VisionProviderError("当前 API Key 额度不足" if quota else "Qwen 请求过于频繁", status, stage="request", error_type="insufficient_quota" if quota else "rate_limit", error_code=error_code or ("insufficient_quota" if quota else "rate_limit"), connection_path=connection_path, latency_ms=latency_ms)
+    if status == 400:
+        return VisionProviderError("Qwen 请求格式或模型参数错误", status, stage="request", error_type="invalid_request", error_code=error_code or "bad_request", connection_path=connection_path, latency_ms=latency_ms)
+    if status is not None and status >= 500:
+        return VisionProviderError("DashScope 服务暂时不可用", status, stage="request", error_type="server_error", error_code=error_code or "dashscope_server_error", connection_path=connection_path, latency_ms=latency_ms)
+    if "ssl" in detail or "tls" in detail or "certificate" in detail:
+        return VisionProviderError("DashScope TLS 连接失败", None, stage="network", error_type="tls_error", error_code="tls_error", connection_path=connection_path, latency_ms=latency_ms)
+    if "timeout" in detail or "timed out" in detail or "deadline" in detail:
+        return VisionProviderError("直连 DashScope 超时", None, stage="network", error_type="connection_timeout", error_code="connection_timeout", connection_path=connection_path, latency_ms=latency_ms)
+    if "connect" in detail or "network" in detail or "connection" in detail:
+        return VisionProviderError("无法连接 DashScope", None, stage="network", error_type="connect_error", error_code="connect_error", connection_path=connection_path, latency_ms=latency_ms)
+    return VisionProviderError(f"{provider} API 请求失败", status, stage="request", error_type="request_error", error_code=error_code, connection_path=connection_path, latency_ms=latency_ms)
 
 
-__all__ = ["OpenAICompatibleVisionProvider", "VisionProviderError", "image_to_data_url"]
+def classify_http_status(status: int, body: str = "") -> tuple[str, str, str, str]:
+    detail = body.lower()
+    if status == 401:
+        return "auth", "authentication_error", "invalid_api_key", "Qwen API Key 无效"
+    if status == 403:
+        return "auth", "permission_denied", "permission_denied", "Qwen 无访问权限，请检查区域或模型权限"
+    if status == 404:
+        return "model", "model_not_found", "model_not_found", "Qwen 模型不可用或端点错误"
+    if status == 429:
+        quota = "insufficient_quota" in detail or "quota" in detail or "余额" in detail
+        return "request", "insufficient_quota" if quota else "rate_limit", "insufficient_quota" if quota else "rate_limit", "当前 API Key 额度不足" if quota else "Qwen 请求过于频繁"
+    if status == 400:
+        return "request", "invalid_request", "bad_request", "Qwen 请求格式或模型参数错误"
+    if status >= 500:
+        return "request", "server_error", "dashscope_server_error", "DashScope 服务暂时不可用"
+    return "request", "http_error", f"http_{status}", f"DashScope 返回 HTTP {status}"
+
+
+def _error_code(exc: Exception) -> str | None:
+    code = getattr(exc, "code", None)
+    if code:
+        return str(code)
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        nested = body.get("error")
+        value = nested.get("code") if isinstance(nested, dict) else body.get("code")
+        return str(value) if value else None
+    return None
+
+
+def _exception_text(exc: Exception) -> list[str]:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.extend((type(current).__name__, str(current)))
+        current = current.__cause__ or current.__context__
+    return parts
+
+
+def _connection_path(proxy_url: object) -> str:
+    if isinstance(proxy_url, str) and proxy_url:
+        from .proxy import display_proxy_url
+
+        return f"PROXY {display_proxy_url(proxy_url)}"
+    return "DIRECT"
+
+
+__all__ = ["NETWORK_ERROR_TYPES", "OpenAICompatibleVisionProvider", "VisionProviderError", "classify_http_status", "classify_vision_error", "image_to_data_url"]

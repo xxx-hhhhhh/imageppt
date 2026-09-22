@@ -40,4 +40,10 @@ class VisionTestResponse(BaseModel):
     provider: str
     model: str
     message: str
+    stage: str | None = None
+    statusCode: int | None = None
+    errorType: str | None = None
+    errorCode: str | None = None
+    connectionPath: str | None = None
+    latencyMs: int | None = None
     diagnostics: dict = {}

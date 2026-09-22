@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
+QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3-vl-flash"
+
+
 def _settings_path() -> Path:
     if platform.system().lower() == "windows":
         root = Path(os.getenv("LOCALAPPDATA", Path.home()))
@@ -142,10 +146,8 @@ def load_vision_settings() -> VisionSettings:
                 value.providers["qwen"].enabled = value.providers["qwen"].enabled and value.selected_provider == "qwen"
     except (OSError, ValueError, TypeError):
         pass
-    if not value.providers["qwen"].base_url:
-        value.providers["qwen"].base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    if not value.providers["qwen"].model:
-        value.providers["qwen"].model = "qwen3-vl-flash"
+    value.providers["qwen"].base_url = normalize_qwen_base_url(value.providers["qwen"].base_url)
+    value.providers["qwen"].model = QWEN_MODEL
     value.providers["qwen"].enabled = value.selected_provider == "qwen"
     return value
 
@@ -168,18 +170,21 @@ def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSett
             current.providers["qwen"].api_key = ""
         # Empty API keys preserve an existing secret; masked values are never
         # accepted as replacements.
-        if "apiKey" in raw and (not raw["apiKey"] or str(raw["apiKey"]).startswith(("sk-****", "AIza****"))):
+        if "apiKey" in raw and (not raw["apiKey"] or _masked_secret(raw["apiKey"])):
             raw.pop("apiKey")
-        if "api_key" in raw and not raw["api_key"]:
+        if "api_key" in raw and (not raw["api_key"] or _masked_secret(raw["api_key"])):
             raw.pop("api_key")
         current.providers["qwen"] = ProviderSettings.from_dict(raw, current.providers["qwen"])
     # Accept the old flat payload while migrating callers.
     if any(key in incoming for key in ("api_key", "apiKey", "base_url", "baseUrl")):
         raw = dict(incoming)
-        if not raw.get("api_key", raw.get("apiKey", "")):
+        incoming_key = raw.get("api_key", raw.get("apiKey", ""))
+        if not incoming_key or _masked_secret(incoming_key):
             raw.pop("api_key", None); raw.pop("apiKey", None)
         current.providers["qwen"] = ProviderSettings.from_dict(raw, current.providers["qwen"])
     current.providers["qwen"].enabled = current.selected_provider == "qwen"
+    current.providers["qwen"].base_url = normalize_qwen_base_url(current.providers["qwen"].base_url)
+    current.providers["qwen"].model = QWEN_MODEL
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"vision": current.to_dict()}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -192,6 +197,21 @@ def mask_api_key(value: str) -> str:
     if len(value) <= 8:
         return value[:2] + "*" * max(1, len(value) - 3) + value[-1:]
     return f"{value[:5]}{'*' * max(4, len(value) - 8)}{value[-3:]}"
+
+
+def normalize_qwen_base_url(value: str | None) -> str:
+    candidate = str(value or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/models"):
+        if candidate.lower().endswith(suffix):
+            candidate = candidate[: -len(suffix)].rstrip("/")
+    if candidate != QWEN_BASE_URL:
+        return QWEN_BASE_URL
+    return candidate
+
+
+def _masked_secret(value: object) -> bool:
+    text = str(value or "")
+    return "*" in text or text.lower().startswith("masked:")
 
 
 def settings_path() -> Path:
