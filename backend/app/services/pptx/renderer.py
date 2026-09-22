@@ -93,6 +93,8 @@ class PPTXRenderer:
     def _add_element(self, slide: Any, element: dict[str, Any], sx: float, sy: float) -> None:
         kind = element.get("type")
         metadata = element.get("metadata") or {}
+        if metadata.get("suppressRender") or metadata.get("ownedBy"):
+            return
         strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
         if strategy == "group":
             return
@@ -117,6 +119,9 @@ class PPTXRenderer:
             frame = shape.text_frame
             frame.clear()
             frame.margin_left = frame.margin_right = frame.margin_top = frame.margin_bottom = 0
+            original_line_count = int(metadata.get("originalLineCount") or max(1, len(element.get("lines") or [])) or 1)
+            preserve_line_count = bool(metadata.get("preserveOriginalLineCount"))
+            frame.word_wrap = not (preserve_line_count and original_line_count == 1)
             vertical = style.get("verticalAlign", "top")
             frame.vertical_anchor = {"top": MSO_ANCHOR.TOP, "bottom": MSO_ANCHOR.BOTTOM, "middle": MSO_ANCHOR.MIDDLE}.get(vertical, MSO_ANCHOR.TOP)
             paragraph = frame.paragraphs[0]
@@ -125,7 +130,14 @@ class PPTXRenderer:
             run = paragraph.add_run()
             lines = element.get("lines") or []
             text = "\n".join(str(line.get("text", "")) for line in lines) if lines else (element.get("text") or "")
-            fit = fit_textbox(text, float(element.get("width", 1)), float(element.get("height", 1)), float(style.get("fontSize", 24)))
+            fit = fit_textbox(
+                text,
+                float(element.get("width", 1)),
+                float(element.get("height", 1)),
+                float(style.get("fontSize", 24)),
+                original_line_count=original_line_count,
+                preserve_line_count=preserve_line_count,
+            )
             run.text = str(fit["text"])
             font = run.font
             _set_font_family(font, style.get("fontFamily", "Microsoft YaHei"))

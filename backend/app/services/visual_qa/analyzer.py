@@ -33,7 +33,10 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
     draw = ImageDraw.Draw(base, "RGBA")
     for element in sorted(layout.get("elements", []), key=lambda item: item.get("zIndex", 0)):
         kind = element.get("type")
-        strategy = (element.get("metadata") or {}).get("reconstructionStrategy") or _default_strategy(kind)
+        metadata = element.get("metadata") or {}
+        if metadata.get("suppressRender") or metadata.get("ownedBy"):
+            continue
+        strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
         if strategy == "group":
             continue
         x, y = float(element.get("x", 0)), float(element.get("y", 0))
@@ -81,15 +84,105 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     original = cv2.imread(str(original_path), cv2.IMREAD_COLOR)
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     if original is None or preview is None:
-        score = {"overall": 0.0, "layout": 0.0, "text": 0.0, "color": 0.0, "structure": 0.0, "pixelSimilarity": 0.0, "ssim": 0.0, "edgeSimilarity": 0.0, "regions": []}
+        score = {"overall": 0.0, "textRegionScore": 0.0, "layoutScore": 0.0, "componentScore": 0.0, "colorSimilarity": 0.0, "backgroundScore": 0.0, "ghostingPenalty": 0.0, "duplicatePenalty": 0.0, "regions": []}
         return score
+    original = cv2.resize(original, (preview.shape[1], preview.shape[0]))
     pixel, edge, ssim_like = _similarity(original, preview)
-    text_count = sum(1 for item in layout.get("elements", []) if item.get("type") == "text")
-    shape_count = sum(1 for item in layout.get("elements", []) if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"})
-    image_count = sum(1 for item in layout.get("elements", []) if item.get("type") == "image")
-    structural = min(1.0, (text_count + shape_count + image_count) / max(1.0, len(layout.get("elements", []))))
-    score = {"overall": round((pixel * 0.42 + edge * 0.22 + ssim_like * 0.2 + structural * 0.16), 4), "layout": round(structural, 4), "text": round(min(1.0, text_count / max(1, len([i for i in layout.get("elements", []) if i.get("type") == "text"]))), 4), "color": round(pixel, 4), "structure": round(structural, 4), "pixelSimilarity": round(pixel, 4), "ssim": round(ssim_like, 4), "edgeSimilarity": round(edge, 4), "regions": []}
+    text_mask = _element_mask(preview.shape[:2], layout, {"text"})
+    component_mask = _element_mask(preview.shape[:2], layout, {"image", "ellipse", "rectangle", "roundedRectangle", "line", "arrow"})
+    layout_mask = cv2.bitwise_or(text_mask, component_mask)
+    background_mask = cv2.bitwise_not(layout_mask)
+    text_pixel, text_edge = _masked_similarity(original, preview, text_mask)
+    component_pixel, component_edge = _masked_similarity(original, preview, component_mask)
+    layout_pixel, layout_edge = _masked_similarity(original, preview, layout_mask)
+    background_pixel, background_edge = _masked_similarity(original, preview, background_mask)
+    text_region = text_pixel * 0.35 + text_edge * 0.65
+    layout_score = layout_pixel * 0.25 + layout_edge * 0.75
+    component_score = component_pixel * 0.45 + component_edge * 0.55
+    background_score = background_pixel * 0.7 + background_edge * 0.3
+    color_similarity = _color_similarity(original, preview, layout_mask)
+    ghosting_penalty = _ghosting_penalty(original, preview, text_mask)
+    duplicate_penalty = _duplicate_penalty(layout)
+    overall = (
+        0.30 * text_region
+        + 0.25 * layout_score
+        + 0.20 * component_score
+        + 0.15 * color_similarity
+        + 0.10 * background_score
+        - ghosting_penalty
+        - duplicate_penalty
+    )
+    score = {
+        "overall": round(max(0.0, min(1.0, overall)), 4),
+        "textRegionScore": round(text_region, 4),
+        "layoutScore": round(layout_score, 4),
+        "componentScore": round(component_score, 4),
+        "colorSimilarity": round(color_similarity, 4),
+        "backgroundScore": round(background_score, 4),
+        "ghostingPenalty": round(ghosting_penalty, 4),
+        "duplicatePenalty": round(duplicate_penalty, 4),
+        "layout": round(layout_score, 4),
+        "text": round(text_region, 4),
+        "color": round(color_similarity, 4),
+        "structure": round(component_score, 4),
+        "pixelSimilarity": round(pixel, 4),
+        "ssim": round(ssim_like, 4),
+        "edgeSimilarity": round(edge, 4),
+        "regions": [],
+    }
     output_dir.mkdir(parents=True, exist_ok=True)
     difference = cv2.absdiff(cv2.resize(original, (preview.shape[1], preview.shape[0])), preview)
     cv2.imwrite(str(output_dir / "difference.png"), difference)
     return score
+
+
+def _element_mask(shape: tuple[int, int], layout: dict[str, Any], kinds: set[str]) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for item in layout.get("elements", []):
+        metadata = item.get("metadata") or {}
+        if item.get("type") not in kinds or metadata.get("suppressRender") or metadata.get("ownedBy"):
+            continue
+        x1, y1 = int(max(0, float(item.get("x", 0)))), int(max(0, float(item.get("y", 0))))
+        x2 = int(min(width, np.ceil(float(item.get("x", 0)) + float(item.get("width", 0)))))
+        y2 = int(min(height, np.ceil(float(item.get("y", 0)) + float(item.get("height", 0)))))
+        if x2 > x1 and y2 > y1:
+            cv2.rectangle(mask, (x1, y1), (x2 - 1, y2 - 1), 255, -1)
+    return mask
+
+
+def _masked_similarity(original: np.ndarray, preview: np.ndarray, mask: np.ndarray) -> tuple[float, float]:
+    selected = mask > 0
+    if not np.any(selected):
+        return 1.0, 1.0
+    pixel = max(0.0, 1.0 - float(np.mean(cv2.absdiff(original, preview)[selected])) / 255.0)
+    original_edges = cv2.Canny(original, 60, 160)
+    preview_edges = cv2.Canny(preview, 60, 160)
+    edge = max(0.0, 1.0 - float(np.mean(cv2.absdiff(original_edges, preview_edges)[selected])) / 255.0)
+    return pixel, edge
+
+
+def _color_similarity(original: np.ndarray, preview: np.ndarray, mask: np.ndarray) -> float:
+    selected = mask > 0
+    if not np.any(selected):
+        selected = np.ones(mask.shape, dtype=bool)
+    mean_a = np.mean(original[selected].astype(np.float32), axis=0)
+    mean_b = np.mean(preview[selected].astype(np.float32), axis=0)
+    return max(0.0, 1.0 - float(np.linalg.norm(mean_a - mean_b)) / (255.0 * math.sqrt(3)))
+
+
+def _ghosting_penalty(original: np.ndarray, preview: np.ndarray, text_mask: np.ndarray) -> float:
+    selected = text_mask > 0
+    if not np.any(selected):
+        return 0.0
+    original_edges = cv2.Canny(original, 45, 135)[selected] > 0
+    preview_edges = cv2.Canny(preview, 45, 135)[selected] > 0
+    excess = max(0.0, float(preview_edges.mean()) - float(original_edges.mean()))
+    return min(0.3, excess * 1.8)
+
+
+def _duplicate_penalty(layout: dict[str, Any]) -> float:
+    active = [item for item in layout.get("elements", []) if not (item.get("metadata") or {}).get("suppressRender") and not (item.get("metadata") or {}).get("ownedBy")]
+    whole_badge_groups = {item.get("groupId") for item in active if (item.get("metadata") or {}).get("wholeBadgeAsset")}
+    duplicates = sum(1 for item in active if item.get("groupId") in whole_badge_groups and item.get("type") == "ellipse")
+    return min(0.25, duplicates * 0.05)

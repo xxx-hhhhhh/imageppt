@@ -129,7 +129,17 @@ def normalize_critic_payload(payload: Any, diagnostics: dict[str, Any] | None = 
         _warning(diag, "critic: invalid root -> {}")
         payload = {}
     normalized = dict(payload)
-    normalized["issues"] = _dict_array(normalized.get("issues"), "issues", diag)
+    issues = _dict_array(normalized.get("issues"), "issues", diag)
+    normalized_issues = []
+    for index, issue in enumerate(issues):
+        item = dict(issue)
+        if not item.get("elementId") and item.get("element_id"):
+            item["elementId"] = str(item["element_id"])
+            _warning(diag, f"issues[{index}].element_id -> elementId")
+        if "oldTextGhosting" in item:
+            item["oldTextGhosting"] = _normalize_bool(item["oldTextGhosting"], f"issues[{index}].oldTextGhosting", diag)
+        normalized_issues.append(item)
+    normalized["issues"] = normalized_issues
     assessment = normalized.get("overallAssessment")
     if not isinstance(assessment, dict):
         if assessment is not None:
@@ -220,7 +230,7 @@ def _normalize_probability(value: Any, default: float, path: str, diagnostics: d
 
 
 def _normalize_font_weight(value: Any, path: str, diagnostics: dict[str, Any]) -> int:
-    aliases = {"normal": 400, "regular": 400, "medium": 500, "semibold": 600, "bold": 700, "black": 900}
+    aliases = {"normal": 400, "regular": 400, "sans": 400, "serif": 400, "medium": 500, "semibold": 600, "bold": 700, "bold-sans": 700, "bold sans": 700, "black": 900}
     original = value
     if isinstance(value, str) and value.strip().lower() in aliases:
         normalized = aliases[value.strip().lower()]

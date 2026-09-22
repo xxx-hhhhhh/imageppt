@@ -84,7 +84,79 @@ def detect_simple_shapes(image_path: Path, text_regions: list[OCRResult]) -> lis
             "confidence": round(max(0.42, min(0.9, 0.45 + circularity * 0.35 + fill_ratio * 0.2)), 3),
         })
         next_id += 1
+    # Closed badge outlines are sometimes interrupted by a white icon and do
+    # not survive contour approximation. Hough candidates recover those full
+    # circular components, then strict edge support and deduplication keep the
+    # detector generic.
+    for x, y, w, h, support in _hough_badges(image, gray, edges):
+        if any(_box_iou((x, y, w, h), (item["x"], item["y"], item["width"], item["height"])) > 0.65 for item in elements):
+            continue
+        fill = _sample_shape_fill(image, x, y, w, h, text_regions)
+        elements.append({
+            "id": f"shape_{next_id:03d}",
+            "type": "ellipse",
+            "x": float(x), "y": float(y), "width": float(w), "height": float(h),
+            "rotation": 0, "zIndex": 10,
+            "style": {"fill": fill, "stroke": fill, "strokeWidth": 1, "opacity": 1},
+            "confidence": round(min(0.88, 0.62 + support * 0.25), 3),
+        })
+        next_id += 1
     return elements
+
+
+def _hough_badges(image: np.ndarray, gray: np.ndarray, edges: np.ndarray) -> list[tuple[int, int, int, int, float]]:
+    height, width = gray.shape[:2]
+    minimum = max(24, int(min(width, height) * 0.04))
+    maximum = max(minimum + 2, int(min(width, height) * 0.09))
+    blurred = cv2.GaussianBlur(gray, (9, 9), 1.8)
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.35,
+        minDist=max(36, minimum * 2),
+        param1=100,
+        param2=42,
+        minRadius=minimum,
+        maxRadius=maximum,
+    )
+    if circles is None:
+        return []
+    result: list[tuple[int, int, int, int, float]] = []
+    for cx, cy, radius in np.round(circles[0]).astype(int):
+        samples = 96
+        hits = 0
+        valid = 0
+        for angle in np.linspace(0, 2 * np.pi, samples, endpoint=False):
+            px, py = int(round(cx + radius * np.cos(angle))), int(round(cy + radius * np.sin(angle)))
+            if 2 <= px < width - 2 and 2 <= py < height - 2:
+                valid += 1
+                if np.any(edges[py - 2:py + 3, px - 2:px + 3] > 0):
+                    hits += 1
+        support = hits / max(1, valid)
+        if support < 0.28:
+            continue
+        x, y = max(0, cx - radius), max(0, cy - radius)
+        x2, y2 = min(width, cx + radius), min(height, cy + radius)
+        crop = image[y:y2, x:x2]
+        if crop.size == 0:
+            continue
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        yy, xx = np.ogrid[:crop.shape[0], :crop.shape[1]]
+        local_cx, local_cy = cx - x, cy - y
+        disk = (xx - local_cx) ** 2 + (yy - local_cy) ** 2 <= (radius * 0.88) ** 2
+        saturation = hsv[:, :, 1][disk]
+        if len(saturation) == 0 or float((saturation > 70).mean()) < 0.42 or float(np.mean(saturation)) < 75:
+            continue
+        result.append((x, y, x2 - x, y2 - y, support))
+    return result
+
+
+def _box_iou(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    overlap = max(0.0, min(lx + lw, rx + rw) - max(lx, rx)) * max(0.0, min(ly + lh, ry + rh) - max(ly, ry))
+    union = lw * lh + rw * rh - overlap
+    return overlap / max(1.0, union)
 
 
 def _sample_shape_fill(image: np.ndarray, x: int, y: int, width: int, height: int, text_regions: list[OCRResult]) -> str:

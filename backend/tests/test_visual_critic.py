@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from app.services.fusion.adjustment_validator import apply_safe_adjustments
+from app.services.visual_qa.analyzer import run_visual_qa
+
+import cv2
+import numpy as np
 
 
 def test_critic_adjustments_are_bounded():
@@ -12,3 +16,18 @@ def test_critic_adjustments_are_bounded():
     assert item["bbox"]["top"] == 50
     assert item["bbox"]["width"] == 240
     assert item["style"]["fontSize"] == 28
+
+
+def test_visual_qa_weights_regions_and_reports_penalties(tmp_path):
+    original = np.full((120, 240, 3), 255, dtype=np.uint8)
+    preview = original.copy()
+    cv2.putText(original, "A", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(preview, "A", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(preview, "A", (24, 59), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    original_path, preview_path = tmp_path / "original.png", tmp_path / "preview.png"
+    cv2.imwrite(str(original_path), original)
+    cv2.imwrite(str(preview_path), preview)
+    layout = {"slide": {"width": 240, "height": 120}, "elements": [{"id": "text", "type": "text", "x": 10, "y": 20, "width": 60, "height": 50, "metadata": {}}]}
+    score = run_visual_qa(original_path, preview_path, tmp_path, layout)
+    assert {"textRegionScore", "layoutScore", "componentScore", "backgroundScore", "ghostingPenalty", "duplicatePenalty"}.issubset(score)
+    assert score["ghostingPenalty"] > 0

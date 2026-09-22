@@ -55,20 +55,46 @@ def _sample_fill(image: np.ndarray, bounds: tuple[float, float, float, float]) -
     return f"#{r:02X}{g:02X}{b:02X}"
 
 
-def _extract_alpha_crop(image: np.ndarray, item: dict[str, Any], destination: Path) -> bool:
+def _extract_alpha_crop(image: np.ndarray, item: dict[str, Any], destination: Path) -> tuple[int, int, int, int] | None:
     x, y, w, h = [int(max(0, item[key])) for key in ("x", "y", "width", "height")]
+    padding = max(2, int(round(min(w, h) * 0.04)))
+    x, y = max(0, x - padding), max(0, y - padding)
+    x2, y2 = min(image.shape[1], x + w + padding * 2), min(image.shape[0], y + h + padding * 2)
+    w, h = x2 - x, y2 - y
     crop = image[y:min(image.shape[0], y + h), x:min(image.shape[1], x + w)]
     if crop.size == 0:
-        return False
+        return None
     background = np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]], axis=0), axis=0)
     distance = np.linalg.norm(crop.astype(np.float32) - background.astype(np.float32), axis=2)
     alpha = np.uint8(np.clip((distance - 8) * 12, 0, 255))
     if int((alpha > 32).sum()) < max(20, crop.shape[0] * crop.shape[1] // 50):
-        return False
+        return None
+    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     rgba = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
     rgba[:, :, 3] = alpha
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return bool(cv2.imwrite(str(destination), rgba))
+    return (x, y, w, h) if cv2.imwrite(str(destination), rgba) else None
+
+
+def _complex_badge(image: np.ndarray, item: dict[str, Any]) -> bool:
+    x, y, w, h = [int(max(0, item[key])) for key in ("x", "y", "width", "height")]
+    crop = image[y:min(image.shape[0], y + h), x:min(image.shape[1], x + w)]
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    mask = np.zeros(gray.shape, dtype=np.uint8)
+    cv2.ellipse(mask, (gray.shape[1] // 2, gray.shape[0] // 2), (max(1, gray.shape[1] // 2 - 2), max(1, gray.shape[0] // 2 - 2)), 0, 0, 360, 255, -1)
+    edges = cv2.Canny(gray, 45, 135)
+    edge_ratio = float((edges[mask > 0] > 0).mean()) if np.any(mask) else 0.0
+    color_variance = float(np.mean(np.var(crop[mask > 0].astype(np.float32), axis=0))) if np.any(mask) else 0.0
+    return edge_ratio >= 0.018 and color_variance >= 100
+
+
+def _inside_shape(text: dict[str, Any], shape: dict[str, Any]) -> bool:
+    tx, ty = _center(text)
+    sx, sy = _center(shape)
+    rx, ry = max(1.0, float(shape["width"]) / 2), max(1.0, float(shape["height"]) / 2)
+    return ((tx - sx) / rx) ** 2 + ((ty - sy) / ry) ** 2 <= 0.82
 
 
 def detect_label_groups(image_path: Path, image_width: int, image_height: int, ocr_results: list[Any], elements: list[dict[str, Any]], asset_dir: Path | None, project_id: str | None) -> list[dict[str, Any]]:
@@ -109,21 +135,29 @@ def detect_label_groups(image_path: Path, image_width: int, image_height: int, o
         role = "iconWithText" if horizontal else "badge"
         _mark(shape, group_id, role, "iconCircle")
         _mark(text, group_id, role, "titleText")
+        raw_text_box = (text.get("metadata") or {}).get("rawOCRBBox")
+        if isinstance(raw_text_box, list) and len(raw_text_box) == 4:
+            right_edge = text["x"] + text["width"]
+            bottom_edge = text["y"] + text["height"]
+            if horizontal:
+                text["x"] = max(float(text["x"]), float(raw_text_box[0]) - 2.0, float(shape["x"] + shape["width"]) + 4.0)
+                text["width"] = max(4.0, right_edge - text["x"])
+            else:
+                text["y"] = max(float(text["y"]), float(raw_text_box[1]) - 2.0, float(shape["y"] + shape["height"]) + 3.0)
+                text["height"] = max(4.0, bottom_edge - text["y"])
         members = [shape, text]
-        if horizontal:
-            left = min(shape["x"], text["x"]) - min(shape["width"], shape["height"]) * 0.35
-            top = min(shape["y"], text["y"]) - min(shape["width"], shape["height"]) * 0.28
-            right = max(shape["x"] + shape["width"], text["x"] + text["width"]) + min(shape["width"], shape["height"]) * 0.35
-            bottom = max(shape["y"] + shape["height"], text["y"] + text["height"]) + min(shape["width"], shape["height"]) * 0.28
-            container = {"id": f"component_container_{next_group:04d}", "type": "roundedRectangle", "x": float(max(0, left)), "y": float(max(0, top)), "width": float(min(image_width, right) - max(0, left)), "height": float(min(image_height, bottom) - max(0, top)), "rotation": 0, "zIndex": 6, "style": {"fill": _sample_fill(image, (left, top, right, bottom)), "stroke": _sample_fill(image, (left, top, right, bottom)), "strokeWidth": 1, "opacity": 0.2}, "confidence": 0.52}
-            _mark(container, group_id, role, "container")
-            additions.append(container)
-            members.append(container)
-        if asset_dir and project_id:
+        if asset_dir and project_id and _complex_badge(image, shape):
             icon_path = asset_dir / f"component_{group_id}.png"
-            if _extract_alpha_crop(image, shape, icon_path):
-                icon = {"id": f"component_asset_{next_group:04d}", "type": "image", "x": shape["x"], "y": shape["y"], "width": shape["width"], "height": shape["height"], "rotation": 0, "zIndex": 16, "src": f"/media/assets/{project_id}/{icon_path.name}", "style": {"opacity": 1}, "confidence": 0.5}
-                _mark(icon, group_id, role, "optionalIconImage")
+            crop_bounds = _extract_alpha_crop(image, shape, icon_path)
+            if crop_bounds:
+                crop_x, crop_y, crop_w, crop_h = crop_bounds
+                icon = {"id": f"component_asset_{next_group:04d}", "type": "image", "x": float(crop_x), "y": float(crop_y), "width": float(crop_w), "height": float(crop_h), "rotation": 0, "zIndex": 16, "src": f"/media/assets/{project_id}/{icon_path.name}", "style": {"opacity": 1}, "confidence": 0.82}
+                _mark(icon, group_id, role, "wholeBadgeImage")
+                icon.setdefault("metadata", {}).update({"wholeBadgeAsset": True, "preserveAsImage": True, "doNotVectorize": True, "reconstructionStrategy": "transparent_image", "sourceContentPreserved": True, "owns": [shape["id"]]})
+                shape.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressRender": True, "duplicateSuppressed": True, "reconstructionStrategy": "group", "sourceContentPreserved": False})
+                for contained in texts:
+                    if contained is not text and _inside_shape(contained, shape):
+                        contained.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressRender": True, "duplicateSuppressed": True, "reconstructionStrategy": "group", "sourceContentPreserved": True})
                 additions.append(icon)
         group_box = (min(item["x"] for item in members), min(item["y"] for item in members), max(item["x"] + item["width"] for item in members), max(item["y"] + item["height"] for item in members))
         group = {"id": f"group_{group_id}", "type": "group", "x": group_box[0], "y": group_box[1], "width": group_box[2] - group_box[0], "height": group_box[3] - group_box[1], "rotation": 0, "zIndex": 5, "style": {"opacity": 1}, "confidence": 0.55}

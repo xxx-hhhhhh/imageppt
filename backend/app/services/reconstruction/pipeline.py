@@ -83,7 +83,7 @@ class ReconstructionPipeline:
             item["metadata"] = metadata
             scene_style = scene_item.get("style") or {}
             layout_style = dict(item.get("style") or {})
-            for field in ("fontClass", "fontWeight", "fontSize", "align"):
+            for field in ("fontClass", "fontFamily", "fontWeight", "fontSize", "align"):
                 if field in scene_style:
                     layout_style[field] = copy.deepcopy(scene_style[field])
             item["style"] = layout_style
@@ -107,6 +107,12 @@ class ReconstructionPipeline:
             "aiStrategiesApplied": 0,
             "criticRounds": 0,
             "criticAdjustmentsApplied": 0,
+            "textBlocksMerged": 0,
+            "singleLinePreserved": 0,
+            "ghostingRegionsDetected": 0,
+            "ghostingRegionsRecleaned": 0,
+            "wholeBadgeAssets": 0,
+            "duplicateElementsRemoved": 0,
         }
         for page_index, image in enumerate(record.get("images", []), start=1):
             source_path = Path(image["path"])
@@ -117,9 +123,19 @@ class ReconstructionPipeline:
             shutil.copy2(normalized_path, original_path)
             regions = ocr.recognize(normalized_path)
             background_path = page_output / "backgrounds" / f"page_{page_index}.png"
-            inpainting.restore_background(normalized_path, regions, background_path)
             background_url = f"/media/backgrounds/{project_id}/{background_path.name}"
             layout, _ = self.layout_service.build_layout(normalized_path, width, height, regions, background_url, page_output / "assets")
+            preserve_regions = [
+                [float(item.get("x", 0)), float(item.get("y", 0)), float(item.get("x", 0)) + float(item.get("width", 0)), float(item.get("y", 0)) + float(item.get("height", 0))]
+                for item in layout.get("elements", [])
+                if (item.get("metadata") or {}).get("preserveAsImage")
+            ]
+            inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
+            _apply_preserved_text_ownership(layout, inpainting.last_strategies)
+            for key in ("textBlocksMerged", "singleLinePreserved", "wholeBadgeAssets", "duplicateElementsRemoved"):
+                reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
+            for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
+                reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
             segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
             self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
@@ -152,6 +168,11 @@ class ReconstructionPipeline:
                 for round_index in range(critic_rounds):
                     critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
                     critic_reports.append(critic)
+                    ghost_boxes = _critic_ghosting_boxes(critic, layout)
+                    if ghost_boxes:
+                        recleaned = inpainting.reclean_background(background_path, ghost_boxes)
+                        reconstruction_stats["ghostingRegionsDetected"] += recleaned
+                        reconstruction_stats["ghostingRegionsRecleaned"] += recleaned
                     scene_refined = apply_safe_adjustments(scene_refined, critic)
                     reconstruction_stats["criticRounds"] += 1
                     reconstruction_stats["criticAdjustmentsApplied"] += len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
@@ -170,7 +191,31 @@ class ReconstructionPipeline:
         if slides:
             output_path, validation = PPTXRenderer().render_project(project_id, slides)
             shutil.copy2(output_path, project_output / "output.pptx")
-            self._write_json(project_output / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode, "ocrProvider": ocr.provider_name, "visionProvider": reconstruction_stats["visionProvider"], "visionModel": reconstruction_stats["visionModel"], "aiUsed": reconstruction_stats["aiUsed"], "visionMatchedElements": reconstruction_stats["visionMatchedElements"], "aiStrategiesApplied": reconstruction_stats["aiStrategiesApplied"], "criticRounds": reconstruction_stats["criticRounds"], "criticAdjustmentsApplied": reconstruction_stats["criticAdjustmentsApplied"], "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"), "routing": self.scene_analyzer.vision_routing, "layoutProvider": self.scene_analyzer.layout_provider.name, "segmentationProvider": self.segmentation_provider.name, "slideCount": len(slides), "validation": validation, "warnings": sorted(set(warnings + getattr(self.scene_analyzer.vision_provider, "warnings", [])))})
+            self._write_json(project_output / "conversion_report.json", {
+                "projectId": project_id,
+                "mode": conversion_mode,
+                "ocrProvider": ocr.provider_name,
+                "visionProvider": reconstruction_stats["visionProvider"],
+                "visionModel": reconstruction_stats["visionModel"],
+                "aiUsed": reconstruction_stats["aiUsed"],
+                "visionMatchedElements": reconstruction_stats["visionMatchedElements"],
+                "aiStrategiesApplied": reconstruction_stats["aiStrategiesApplied"],
+                "criticRounds": reconstruction_stats["criticRounds"],
+                "criticAdjustmentsApplied": reconstruction_stats["criticAdjustmentsApplied"],
+                "textBlocksMerged": reconstruction_stats["textBlocksMerged"],
+                "singleLinePreserved": reconstruction_stats["singleLinePreserved"],
+                "ghostingRegionsDetected": reconstruction_stats["ghostingRegionsDetected"],
+                "ghostingRegionsRecleaned": reconstruction_stats["ghostingRegionsRecleaned"],
+                "wholeBadgeAssets": reconstruction_stats["wholeBadgeAssets"],
+                "duplicateElementsRemoved": reconstruction_stats["duplicateElementsRemoved"],
+                "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
+                "routing": self.scene_analyzer.vision_routing,
+                "layoutProvider": self.scene_analyzer.layout_provider.name,
+                "segmentationProvider": self.segmentation_provider.name,
+                "slideCount": len(slides),
+                "validation": validation,
+                "warnings": sorted(set(warnings + getattr(self.scene_analyzer.vision_provider, "warnings", []))),
+            })
         warnings.extend(ocr.warnings)
         warnings.extend(inpainting.warnings)
         return slides, ocr.provider_name, sorted(set(warnings))
@@ -183,3 +228,51 @@ def _redact_debug_text(value: object) -> str:
     message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", message)
     message = re.sub(r"://[^/@\s]+@", "://[redacted]@", message)
     return message[:1000]
+
+
+def _critic_ghosting_boxes(critic: dict, layout: dict) -> list[list[float]]:
+    by_id = {str(item.get("id")): item for item in layout.get("elements", [])}
+    boxes: list[list[float]] = []
+    for issue in critic.get("issues", []) if isinstance(critic, dict) else []:
+        problem = str(issue.get("problem") or "").lower()
+        ghosting = bool(issue.get("oldTextGhosting")) or problem == "oldtextghosting"
+        if not ghosting:
+            continue
+        element = by_id.get(str(issue.get("elementId") or issue.get("element_id") or ""))
+        if not element or element.get("type") != "text":
+            continue
+        metadata = element.get("metadata") or {}
+        raw = metadata.get("rawOCRBBox")
+        if isinstance(raw, list) and len(raw) == 4:
+            boxes.append([float(value) for value in raw])
+        else:
+            x, y = float(element.get("x", 0)), float(element.get("y", 0))
+            boxes.append([x, y, x + float(element.get("width", 0)), y + float(element.get("height", 0))])
+    return boxes
+
+
+def _apply_preserved_text_ownership(layout: dict, strategies: list[dict]) -> None:
+    preserved = [item.get("bbox") for item in strategies if item.get("sourceContentPreserved") and item.get("reconstructionStrategy") == "preserve_complex_text"]
+    for element in layout.get("elements", []):
+        if element.get("type") != "text":
+            continue
+        metadata = element.setdefault("metadata", {})
+        raw = metadata.get("rawOCRBBox")
+        if not isinstance(raw, list) or len(raw) != 4:
+            continue
+        if any(_bbox_overlap_ratio(raw, bbox) >= 0.55 for bbox in preserved if isinstance(bbox, list) and len(bbox) == 4):
+            metadata.update({
+                "preserveAsImage": True,
+                "sourceContentPreserved": True,
+                "willReconstruct": False,
+                "suppressRender": True,
+                "reconstructionStrategy": "group",
+                "reconstructionStrategySource": "background-preservation",
+            })
+
+
+def _bbox_overlap_ratio(left: list[float], right: list[float]) -> float:
+    lx1, ly1, lx2, ly2 = map(float, left)
+    rx1, ry1, rx2, ry2 = map(float, right)
+    overlap = max(0.0, min(lx2, rx2) - max(lx1, rx1)) * max(0.0, min(ly2, ry2) - max(ly1, ry1))
+    return overlap / max(1.0, (lx2 - lx1) * (ly2 - ly1))

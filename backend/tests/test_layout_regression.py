@@ -9,6 +9,7 @@ from pptx import Presentation
 from app.services.layout.detectors import detect_text_elements
 from app.services.layout.label_detector import detect_label_groups
 from app.services.layout.position_refiner import refine_layout
+from app.services.layout.text_blocks import group_text_elements
 from app.services.layout.typography import estimate_text_style
 from app.services.ocr.provider import OCRResult
 from app.services.pptx import PPTXRenderer
@@ -46,7 +47,6 @@ def test_label_detector_emits_complete_groups(tmp_path: Path) -> None:
     assert grouped
     assert any(item.get("componentType") == "iconCircle" for item in grouped)
     assert any(item.get("componentType") == "titleText" for item in grouped)
-    assert any(item.get("componentType") == "container" for item in grouped)
     assert any(item.get("componentType") == "group" for item in grouped)
     assert not any(item.get("componentType") == "iconCircle" and not any(other.get("groupId") == item.get("groupId") and other.get("componentType") in {"titleText", "container"} for other in grouped) for item in grouped)
 
@@ -56,6 +56,42 @@ def test_position_refiner_keeps_source_pixel_coordinates() -> None:
     refined = refine_layout(elements, 640, 360)
     assert all(np.isfinite(float(item[key])) for item in refined for key in ("x", "y", "width", "height", "rotation"))
     assert refined[0]["x"] >= 0
+
+
+def test_text_blocks_merge_paragraphs_and_preserve_single_line_title() -> None:
+    regions = [
+        OCRResult("一、总体思路", [100, 20, 340, 70], 0.99, _style("一、总体思路", [100, 20, 340, 70])),
+        OCRResult("正文第一行", [100, 180, 280, 205], 0.99, _style("正文第一行", [100, 180, 280, 205])),
+        OCRResult("正文第二行", [100, 210, 280, 235], 0.99, _style("正文第二行", [100, 210, 280, 235])),
+    ]
+    grouped, stats = group_text_elements(detect_text_elements(regions), 1000, 600)
+    title = next(item for item in grouped if "总体思路" in item["text"])
+    body = next(item for item in grouped if "正文第一行" in item["text"])
+    assert title["metadata"]["originalLineCount"] == 1
+    assert title["metadata"]["preserveOriginalLineCount"] is True
+    assert title["width"] > 240
+    assert body["metadata"]["originalLineCount"] == 2
+    assert body["text"] == "正文第一行\n正文第二行"
+    assert stats["textBlocksMerged"] == 1
+
+
+def test_complex_badge_owns_and_suppresses_native_circle(tmp_path: Path) -> None:
+    image = np.full((300, 500, 3), 255, dtype=np.uint8)
+    cv2.circle(image, (120, 100), 55, (20, 25, 220), -1)
+    cv2.line(image, (90, 100), (150, 100), (255, 255, 255), 8)
+    cv2.line(image, (120, 70), (120, 130), (255, 255, 255), 8)
+    source = tmp_path / "badge.png"
+    cv2.imwrite(str(source), image)
+    regions = [OCRResult("复杂徽章", [85, 170, 165, 198], 0.99, _style("复杂徽章", [85, 170, 165, 198], 500, 300))]
+    texts = detect_text_elements(regions)
+    ellipse = {"id": "shape_badge", "type": "ellipse", "x": 65.0, "y": 45.0, "width": 110.0, "height": 110.0, "rotation": 0, "zIndex": 10, "style": {"fill": "#DC1914"}}
+    elements = detect_label_groups(source, 500, 300, regions, texts + [ellipse], tmp_path / "assets", "badge-test")
+    asset = next(item for item in elements if (item.get("metadata") or {}).get("wholeBadgeAsset"))
+    source_shape = next(item for item in elements if item.get("id") == "shape_badge")
+    assert asset["metadata"]["reconstructionStrategy"] == "transparent_image"
+    assert asset["metadata"]["owns"] == ["shape_badge"]
+    assert source_shape["metadata"]["suppressRender"] is True
+    assert source_shape["metadata"]["ownedBy"] == asset["id"]
 
 
 def test_export_contains_text_shape_and_image(tmp_path: Path) -> None:

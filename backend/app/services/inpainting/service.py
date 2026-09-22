@@ -7,6 +7,7 @@ import numpy as np
 
 from app.services.inpainting.provider import create_inpainting_provider
 from app.services.ocr.provider import OCRResult
+from app.services.background.strategy import reclean_background as reclean_with_strategy
 from app.services.background.strategy import restore_background as restore_with_strategy
 
 
@@ -14,6 +15,7 @@ class InpaintingService:
     def __init__(self, preferred: str = "opencv") -> None:
         self.provider, self.warnings = create_inpainting_provider(preferred)
         self.last_strategies: list[dict] = []
+        self.last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
 
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
@@ -31,6 +33,16 @@ class InpaintingService:
             mask = cv2.dilate(mask, kernel, iterations=1)
         return mask
 
-    def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path) -> Path:
-        restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path)
+    def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
+        restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions)
+        self.last_stats = {
+            "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
+            "ghostingRegionsRecleaned": sum(1 for item in self.last_strategies if item.get("ghostingRecleaned")),
+        }
         return restored
+
+    def reclean_background(self, background_path: Path, bboxes: list[list[float]]) -> int:
+        count = reclean_with_strategy(background_path, bboxes)
+        self.last_stats["ghostingRegionsDetected"] += count
+        self.last_stats["ghostingRegionsRecleaned"] += count
+        return count

@@ -36,10 +36,14 @@ class FakeOCR:
 class FakeInpainting:
     warnings: list[str] = []
     last_strategies: list[dict] = []
+    last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
 
-    def restore_background(self, image_path: Path, regions: list, output_path: Path) -> None:
+    def restore_background(self, image_path: Path, regions: list, output_path: Path, preserve_regions=None) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(image_path, output_path)
+
+    def reclean_background(self, background_path: Path, bboxes: list) -> int:
+        return len(bboxes)
 
 
 class FakeLayoutService:

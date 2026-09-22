@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.typography.font_matcher import match_font
+
 
 def fuse_scene(layout: dict[str, Any], ocr_results: list[Any], vision: dict[str, Any]) -> dict[str, Any]:
     """Fuse semantic vision output into CV/OCR geometry without trusting model bboxes."""
@@ -30,7 +32,17 @@ def fuse_scene(layout: dict[str, Any], ocr_results: list[Any], vision: dict[str,
             metadata["visualComplexity"] = _confidence(match.get("visualComplexity", 0.0))
             fused["metadata"] = metadata
             if match.get("fontClass") and fused.get("type") == "text":
-                fused.setdefault("style", {})["fontClass"] = match["fontClass"]
+                style = fused.setdefault("style", {})
+                selected_font_class = _select_font_class(style.get("fontClass"), match.get("fontClass"), fused.get("role"))
+                style["fontClass"] = selected_font_class
+                text = str(fused.get("text") or "")
+                is_cjk = any("\u3400" <= char <= "\u9fff" for char in text)
+                style["fontFamily"] = match_font(
+                    selected_font_class,
+                    bold=selected_font_class == "bold-sans" or _font_weight(match.get("fontWeight", 400)) >= 600,
+                    calligraphic=selected_font_class == "calligraphy",
+                    cjk=is_cjk,
+                )
             if match.get("fontWeight") is not None and fused.get("type") == "text":
                 fused.setdefault("style", {})["fontWeight"] = _font_weight(match["fontWeight"])
             if match.get("alignment") and fused.get("type") == "text":
@@ -119,6 +131,15 @@ def _font_weight(value: Any) -> int:
         return max(100, min(900, int(float(value))))
     except (TypeError, ValueError):
         return 400
+
+
+def _select_font_class(existing: Any, vision: Any, role: Any) -> str:
+    local_class = str(existing or "unknown")
+    vision_class = str(vision or "unknown")
+    heading_roles = {"main_title", "section_title", "subtitle", "card_title"}
+    if str(role) in heading_roles and local_class in {"serif", "display", "calligraphy"} and vision_class in {"sans", "bold-sans", "unknown"}:
+        return local_class
+    return vision_class if vision_class != "unknown" else local_class
 
 
 def _fuse_groups(groups: list[dict[str, Any]], elements: list[dict[str, Any]]) -> list[dict[str, Any]]:

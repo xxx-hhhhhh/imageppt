@@ -17,8 +17,9 @@ SCENE_REPAIR_PROMPT = "上一条输出不是有效 JSON。只修复 JSON 格式�
 
 CRITIC_PROMPT = """你是视觉重建质量检查器。
 图片1是原始参考图，图片2是程序重新生成的页面。不要评价设计好坏，只比较视觉差异。
-检查元素位置、尺寸、标题位置、字号、字体视觉类别、换行、行距、卡片大小、图标缺失、标签缺失、图层错误、元素越界、背景差异、颜色差异和对齐关系。
-返回可执行 JSON，不要自然语言。issues 中的 adjustment 只能使用 moveX、moveY、widthScale、heightScale、fontSizeScale 字段。"""
+重点检查 oldTextGhosting、duplicateElement、wrongLineBreak、wrongTextboxWidth、fontTooLarge、fontTooSmall、fontClassMismatch、badgeBackgroundMismatch、duplicateBadgeLayer，以及元素位置、尺寸、图标缺失、标签缺失、越界、颜色和对齐关系。
+如果新文字后面仍可见原图旧文字，issue 必须返回 oldTextGhosting=true，problem="oldTextGhosting"，并提供对应 elementId。
+返回可执行 JSON，不要自然语言。issues 中使用 elementId 和 problem；adjustment 只能使用 moveX、moveY、widthScale、heightScale、fontSizeScale 字段。"""
 
 
 def scene_user_prompt(ocr_elements: list[dict], context: dict | None = None) -> str:
