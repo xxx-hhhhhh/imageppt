@@ -18,6 +18,7 @@ from app.services.segmentation.segmentation_provider import create_segmentation_
 from app.services.preprocessing.service import preprocess_image
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 from app.services.reconstruction.router import ReconstructionRouter
+from app.services.refinement import TypographyLayoutRefiner
 
 
 class ReconstructionPipeline:
@@ -27,6 +28,7 @@ class ReconstructionPipeline:
         self.scene_analyzer = SceneAnalyzer(LAYOUT_PROVIDER, VISION_PROVIDER)
         self.segmentation_provider, self.segmentation_warnings = create_segmentation_provider(SEGMENTATION_PROVIDER)
         self.reconstruction_router = ReconstructionRouter()
+        self.typography_layout_refiner = TypographyLayoutRefiner()
 
     def _write_json(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +118,15 @@ class ReconstructionPipeline:
             "badgeForegroundTransparentExtractions": 0,
             "badgeSyntheticBackgroundsSuppressed": 0,
             "duplicateBadgeLayersRemoved": 0,
+            "typographyRefined": False,
+            "fontRoleAssignments": 0,
+            "fontFamilyAdjustments": 0,
+            "fontSizeAdjustments": 0,
+            "textPositionAdjustments": 0,
+            "textboxResizeAdjustments": 0,
+            "pageAlignmentAdjustments": 0,
         }
+        typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         for page_index, image in enumerate(record.get("images", []), start=1):
             source_path = Path(image["path"])
             page_output = project_output
@@ -135,7 +145,7 @@ class ReconstructionPipeline:
             ]
             inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
             _apply_preserved_text_ownership(layout, inpainting.last_strategies)
-            for key in ("textBlocksMerged", "singleLinePreserved", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
+            for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
             for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
                 reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
@@ -158,7 +168,11 @@ class ReconstructionPipeline:
                 if (item.get("metadata") or {}).get("reconstructionStrategySource") == "vision"
             )
             layout = self._apply_refined_scene(layout, scene_refined)
-            layout["metadata"] = {"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies}
+            layout, typography_stats = typography_layout_refiner.refine(layout)
+            reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
+            for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
+                reconstruction_stats[key] += int(typography_stats[key])
+            layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats})
             self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
             self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", routing)
@@ -180,6 +194,7 @@ class ReconstructionPipeline:
                     reconstruction_stats["criticRounds"] += 1
                     reconstruction_stats["criticAdjustmentsApplied"] += len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
                     layout = self._apply_refined_scene(layout, scene_refined)
+                    layout, _ = typography_layout_refiner.refine(layout)
                     render_preview(background_path, layout, preview_path)
                     self._write_json(page_output / f"visual_critic_{round_index + 1}.json", critic)
             if critic_reports:
@@ -214,6 +229,13 @@ class ReconstructionPipeline:
                 "badgeForegroundTransparentExtractions": reconstruction_stats["badgeForegroundTransparentExtractions"],
                 "badgeSyntheticBackgroundsSuppressed": reconstruction_stats["badgeSyntheticBackgroundsSuppressed"],
                 "duplicateBadgeLayersRemoved": reconstruction_stats["duplicateBadgeLayersRemoved"],
+                "typographyRefined": reconstruction_stats["typographyRefined"],
+                "fontRoleAssignments": reconstruction_stats["fontRoleAssignments"],
+                "fontFamilyAdjustments": reconstruction_stats["fontFamilyAdjustments"],
+                "fontSizeAdjustments": reconstruction_stats["fontSizeAdjustments"],
+                "textPositionAdjustments": reconstruction_stats["textPositionAdjustments"],
+                "textboxResizeAdjustments": reconstruction_stats["textboxResizeAdjustments"],
+                "pageAlignmentAdjustments": reconstruction_stats["pageAlignmentAdjustments"],
                 "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
                 "routing": self.scene_analyzer.vision_routing,
                 "layoutProvider": self.scene_analyzer.layout_provider.name,

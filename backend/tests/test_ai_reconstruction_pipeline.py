@@ -205,15 +205,19 @@ def test_standard_mode_applies_qwen_strategy_and_one_critic_round(monkeypatch, t
     assert element["groupId"] == "hero"
     assert element["visionConfidence"] == 0.92
     assert element["metadata"]["reconstructionStrategy"] == "editable_text"
-    assert element["style"]["fontClass"] == "display"
+    assert element["style"]["fontClass"] == "serif"
+    assert element["style"]["fontRole"] == "main_title"
     assert element["style"]["fontWeight"] == 700
-    assert element["x"] == 12
-    assert element["style"]["fontSize"] == pytest.approx(25.2)
+    assert 0 <= element["x"] <= slides[0]["slide"]["width"] - element["width"]
+    assert element["style"]["refinedFontSize"] == element["style"]["fontSize"]
+    assert abs(element["style"]["fontSizeAdjustment"]) <= element["style"]["estimatedFontSize"] * 0.15
     assert report["aiUsed"] is True
     assert report["visionMatchedElements"] == 1
     assert report["aiStrategiesApplied"] == 1
     assert report["criticRounds"] == 1
     assert report["criticAdjustmentsApplied"] == 1
+    assert report["typographyRefined"] is True
+    assert report["fontRoleAssignments"] == 1
     assert debug == {
         "provider": "qwen",
         "model": "qwen3-vl-flash",
