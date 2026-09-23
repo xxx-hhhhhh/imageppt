@@ -25,7 +25,7 @@ export function Toolbar({ busy, conversionMode, viewMode, visionStatus, onModeCh
     <button className="toolbar-button" disabled={busy} onClick={onAnalyze}>AI解析</button>
     <button className="toolbar-button ai-settings-button" onClick={onOpenSettings}>AI设置 / API Key</button>
     <select className="mode-select" value={conversionMode} onChange={(event) => onModeChange(event.target.value as Props['conversionMode'])} disabled={busy} aria-label="转换模式"><option value="maximum">最高质量</option><option value="high_quality">高精度</option><option value="standard">标准</option><option value="fast">快速</option></select>
-    <span className="vision-status" title={visionStatus?.error || ''}>AI视觉理解：{visionStatus?.configured ? '● 已连接' : '○ 未配置'}{visionStatus?.configured ? ` · ${visionStatus.model || '视觉模型'}` : ''}</span>
+    <span className="vision-status" title={visionStatus?.error || ''}>AI视觉理解：{visionStatus?.configured ? '● 已配置' : '○ 未配置'}{visionStatus?.configured ? ` · ${visionStatus.model || '视觉模型'}` : ''}</span>
     <div className="view-switch" role="group" aria-label="对照视图"><button className={viewMode === 'reconstruction' ? 'selected' : ''} onClick={() => onViewChange('reconstruction')}>重建</button><button className={viewMode === 'original' ? 'selected' : ''} onClick={() => onViewChange('original')}>原图</button><button className={viewMode === 'difference' ? 'selected' : ''} onClick={() => onViewChange('difference')}>对比</button></div>
     <button className="toolbar-button export" disabled={busy} onClick={onExport}>导出PPT</button>
     <span className="toolbar-divider" />

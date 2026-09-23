@@ -9,6 +9,7 @@ from typing import Any
 
 
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_CLOUD_BASE_URL = "https://maas.qwencloudapi.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3-vl-flash"
 
 
@@ -146,7 +147,7 @@ def load_vision_settings() -> VisionSettings:
                 value.providers["qwen"].enabled = value.providers["qwen"].enabled and value.selected_provider == "qwen"
     except (OSError, ValueError, TypeError):
         pass
-    value.providers["qwen"].base_url = normalize_qwen_base_url(value.providers["qwen"].base_url)
+    value.providers["qwen"].base_url = normalize_qwen_base_url(value.providers["qwen"].base_url, value.providers["qwen"].api_key)
     value.providers["qwen"].model = QWEN_MODEL
     value.providers["qwen"].enabled = value.selected_provider == "qwen"
     return value
@@ -183,7 +184,7 @@ def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSett
             raw.pop("api_key", None); raw.pop("apiKey", None)
         current.providers["qwen"] = ProviderSettings.from_dict(raw, current.providers["qwen"])
     current.providers["qwen"].enabled = current.selected_provider == "qwen"
-    current.providers["qwen"].base_url = normalize_qwen_base_url(current.providers["qwen"].base_url)
+    current.providers["qwen"].base_url = normalize_qwen_base_url(current.providers["qwen"].base_url, current.providers["qwen"].api_key)
     current.providers["qwen"].model = QWEN_MODEL
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,13 +200,15 @@ def mask_api_key(value: str) -> str:
     return f"{value[:5]}{'*' * max(4, len(value) - 8)}{value[-3:]}"
 
 
-def normalize_qwen_base_url(value: str | None) -> str:
+def normalize_qwen_base_url(value: str | None, api_key: str = "") -> str:
     candidate = str(value or "").strip().rstrip("/")
     for suffix in ("/chat/completions", "/models"):
         if candidate.lower().endswith(suffix):
             candidate = candidate[: -len(suffix)].rstrip("/")
-    if candidate != QWEN_BASE_URL:
-        return QWEN_BASE_URL
+    if api_key.startswith("sk-ws-") and candidate == QWEN_BASE_URL:
+        return QWEN_CLOUD_BASE_URL
+    if candidate not in {QWEN_BASE_URL, QWEN_CLOUD_BASE_URL}:
+        return QWEN_CLOUD_BASE_URL if api_key.startswith("sk-ws-") else QWEN_BASE_URL
     return candidate
 
 
