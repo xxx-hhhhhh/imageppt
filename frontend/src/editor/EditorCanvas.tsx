@@ -12,6 +12,8 @@ interface Props {
 }
 
 const objectId = (object: any): string | undefined => object?.elementId;
+const isVisibleElement = (element: LayoutElement): boolean =>
+  element.type !== 'group' && !element.metadata?.suppressed && !element.metadata?.suppressRender && !element.metadata?.ownedBy;
 
 function colorWithOpacity(color: string | undefined, opacity = 1): string {
   if (!color || opacity >= 1) return color || '#17365D';
@@ -50,7 +52,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
 
     let disposed = false;
     (async () => {
-      for (const element of [...page.elements].sort((a, b) => a.zIndex - b.zIndex)) {
+      for (const element of page.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex)) {
         if (disposed) return;
         let object: any = null;
         try {
@@ -87,7 +89,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
     };
   }, [page, onChange, onSelection]);
 
-  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter((element) => element.type !== 'group').sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div>;
+  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div>;
 }
 
 function VisualElement({ element, selected, onSelect, onChange, page }: { element: LayoutElement; selected: boolean; onSelect: (ids: string[]) => void; onChange: (layout: LayoutJSON) => void; page: LayoutJSON }) {

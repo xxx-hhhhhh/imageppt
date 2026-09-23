@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 from PIL import Image
@@ -65,6 +66,29 @@ def test_qwen_provider_retries_json_repair(monkeypatch, tmp_path):
     assert calls[0] is None
     assert calls[1] is not None
     assert provider.vision_debug()["repairUsed"] is True
+
+
+def test_qwen_page_plan_precedes_semantic_scene_and_survives_scene_failure(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (64, 64), "white").save(image_path)
+    requests = []
+    plan = {"modules": [{"id": "visual", "role": "chart", "bbox": {"left": 0.1, "top": 0.1, "width": 0.5, "height": 0.5}, "strategy": "whole_image", "confidence": 0.9}]}
+
+    def fake_request(messages, repair_prompt=None):
+        requests.append(messages[0]["content"])
+        if len(requests) == 1:
+            return json.dumps(plan)
+        raise RuntimeError("semantic request timed out")
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+    result = provider.analyze_scene(image_path, {"candidate_elements": [{"id": "chart", "type": "image", "bbox": {"left": 6, "top": 6, "width": 32, "height": 32}}]})
+    assert len(requests) >= 2
+    assert "信息图重建规划器" in requests[0]
+    assert result["aiUsed"] is True
+    assert result["reconstructionPlan"]["modules"][0]["id"] == "visual"
 
 
 def test_scene_payload_normalizes_common_qwen_aliases():

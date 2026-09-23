@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,6 +25,8 @@ from .openai_compatible_provider import (
     image_to_data_url,
 )
 from .proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
+from .prompts import RECONSTRUCTION_PLAN_PROMPT, SCENE_REPAIR_PROMPT, reconstruction_plan_user_prompt
+from .schemas import extract_json, validate_json
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,42 @@ logger = logging.getLogger(__name__)
 
 class QwenProvider(OpenAICompatibleVisionProvider):
     name = "qwen"
+
+    def plan_reconstruction(self, image_path: Path, context: dict | None = None) -> dict[str, Any]:
+        messages = [
+            {"role": "system", "content": RECONSTRUCTION_PLAN_PROMPT},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
+                {"type": "text", "text": reconstruction_plan_user_prompt(context)},
+            ]},
+        ]
+        raw = self._request(messages)
+        try:
+            payload = extract_json(raw)
+        except (TypeError, ValueError):
+            payload = extract_json(self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT))
+        if "reconstructionPlan" in payload:
+            payload = payload["reconstructionPlan"]
+        plan = validate_json({"reconstructionPlan": payload}, "scene")["reconstructionPlan"]
+        return plan
+
+    def analyze_scene(self, image_path: Path, context: dict | None = None, mode: str = "standard") -> dict[str, Any]:
+        plan: dict[str, Any] | None = None
+        if (context or {}).get("candidate_elements"):
+            try:
+                plan = self.plan_reconstruction(image_path, context)
+            except Exception as exc:
+                logger.warning("qwen_reconstruction_plan_failed error_type=%s", type(exc).__name__)
+        try:
+            scene = super().analyze_scene(image_path, context, mode)
+        except Exception:
+            if not plan or not plan.get("modules"):
+                raise
+            logger.warning("qwen_scene_analysis_failed_using_page_plan")
+            scene = {"provider": self.name, "model": self.model, "aiUsed": True, "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.5}
+        if plan and plan.get("modules"):
+            scene["reconstructionPlan"] = plan
+        return scene
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None, vision_settings: VisionSettings | None = None) -> None:
         runtime = vision_settings or load_vision_settings()

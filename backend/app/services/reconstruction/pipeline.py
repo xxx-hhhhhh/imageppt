@@ -18,6 +18,7 @@ from app.services.segmentation.segmentation_provider import create_segmentation_
 from app.services.preprocessing.service import preprocess_image
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 from app.services.reconstruction.router import ReconstructionRouter
+from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -28,6 +29,7 @@ class ReconstructionPipeline:
         self.scene_analyzer = SceneAnalyzer(LAYOUT_PROVIDER, VISION_PROVIDER)
         self.segmentation_provider, self.segmentation_warnings = create_segmentation_provider(SEGMENTATION_PROVIDER)
         self.reconstruction_router = ReconstructionRouter()
+        self.reconstruction_planner = AIReconstructionPlanner()
         self.typography_layout_refiner = TypographyLayoutRefiner()
 
     def _write_json(self, path: Path, payload: dict) -> None:
@@ -63,6 +65,10 @@ class ReconstructionPipeline:
     def _apply_refined_scene(self, layout: dict, scene: dict) -> dict:
         by_id = {item["id"]: item for item in scene.get("elements", [])}
         refined = copy.deepcopy(layout)
+        existing_ids = {item["id"] for item in refined.get("elements", [])}
+        for scene_item in scene.get("elements", []):
+            if scene_item["id"] not in existing_ids and scene_item.get("type") == "image" and scene_item.get("src"):
+                refined.setdefault("elements", []).append({"id": scene_item["id"], "type": "image", "src": scene_item["src"], "rotation": 0, "style": copy.deepcopy(scene_item.get("style") or {}), "metadata": {}})
         for item in refined.get("elements", []):
             scene_item = by_id.get(item["id"])
             if not scene_item:
@@ -78,7 +84,7 @@ class ReconstructionPipeline:
                     item[field] = copy.deepcopy(scene_item[field])
             scene_metadata = scene_item.get("metadata") or {}
             metadata = dict(item.get("metadata") or {})
-            for field in ("reconstructionStrategy", "visionSemanticType", "doNotVectorize", "visualComplexity", "visionMatched", "reconstructionStrategySource"):
+            for field in ("reconstructionStrategy", "visionSemanticType", "doNotVectorize", "visualComplexity", "visionMatched", "reconstructionStrategySource", "suppressed", "suppressRender", "ownedBy", "plannerModuleId", "preserveWholeAsset"):
                 if field in scene_metadata:
                     metadata[field] = copy.deepcopy(scene_metadata[field])
             metadata["sceneId"] = scene_item["id"]
@@ -125,6 +131,12 @@ class ReconstructionPipeline:
             "textPositionAdjustments": 0,
             "textboxResizeAdjustments": 0,
             "pageAlignmentAdjustments": 0,
+            "plannedModules": 0,
+            "wholeImageRegions": 0,
+            "plannerSuppressedElements": 0,
+            "plannerDuplicateTexts": 0,
+            "plannerSnappedRegions": 0,
+            "plannerCvVisualRegions": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         for page_index, image in enumerate(record.get("images", []), start=1):
@@ -143,16 +155,24 @@ class ReconstructionPipeline:
                 for item in layout.get("elements", [])
                 if (item.get("metadata") or {}).get("preserveAsImage")
             ]
+            segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
+            scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
+            scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
+            planner = getattr(self, "reconstruction_planner", None) or AIReconstructionPlanner()
+            planner_stats = planner.apply(scene_refined, normalized_path, page_output / "assets", project_id, page_index)
+            for key, value in planner_stats.items():
+                reconstruction_stats[key] += value
+            for item in scene_refined.get("elements", []):
+                if (item.get("metadata") or {}).get("reconstructionStrategySource") == "planner" and item.get("type") == "image":
+                    box = item["bbox"]
+                    preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
             inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
             _apply_preserved_text_ownership(layout, inpainting.last_strategies)
             for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
             for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
                 reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
-            segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
-            scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
-            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
-            scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
             self.reconstruction_router.apply(scene_refined.get("elements", []))
             routing = self.scene_analyzer.vision_routing
             reconstruction_stats["aiUsed"] = reconstruction_stats["aiUsed"] or bool(routing.get("aiUsed"))
@@ -172,7 +192,7 @@ class ReconstructionPipeline:
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
                 reconstruction_stats[key] += int(typography_stats[key])
-            layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "layoutProvider": self.scene_analyzer.layout_provider.name, "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats})
+            layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "layoutProvider": self.scene_analyzer.layout_provider.name, "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats, "reconstructionPlan": scene_refined.get("reconstructionPlan", {})})
             self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
             self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", routing)
@@ -236,6 +256,12 @@ class ReconstructionPipeline:
                 "textPositionAdjustments": reconstruction_stats["textPositionAdjustments"],
                 "textboxResizeAdjustments": reconstruction_stats["textboxResizeAdjustments"],
                 "pageAlignmentAdjustments": reconstruction_stats["pageAlignmentAdjustments"],
+                "plannedModules": reconstruction_stats["plannedModules"],
+                "wholeImageRegions": reconstruction_stats["wholeImageRegions"],
+                "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
+                "plannerDuplicateTexts": reconstruction_stats["plannerDuplicateTexts"],
+                "plannerSnappedRegions": reconstruction_stats["plannerSnappedRegions"],
+                "plannerCvVisualRegions": reconstruction_stats["plannerCvVisualRegions"],
                 "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
                 "routing": self.scene_analyzer.vision_routing,
                 "layoutProvider": self.scene_analyzer.layout_provider.name,

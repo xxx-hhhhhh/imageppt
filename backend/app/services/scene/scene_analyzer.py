@@ -41,7 +41,11 @@ class SceneAnalyzer:
         ocr_payload = [{"id": f"ocr_{index + 1}", "text": item.text, "bbox": item.bbox, "confidence": item.confidence} for index, item in enumerate(ocr_results)]
         if enable_vision:
             try:
-                vision = self.vision_provider.analyze_scene(image_path, {"ocr_elements": ocr_payload, "layout_regions": provider_regions, "width": width, "height": height}, mode)
+                candidates = [
+                    {"id": item["id"], "type": item["type"], "bbox": item["bbox"], "text": str(item.get("text") or "")[:80]}
+                    for item in elements if item.get("type") != "background"
+                ]
+                vision = self.vision_provider.analyze_scene(image_path, {"ocr_elements": ocr_payload, "layout_regions": provider_regions, "candidate_elements": candidates[:160], "width": width, "height": height}, mode)
                 self.ai_used = self.ai_used or bool(vision.get("aiUsed"))
                 self.vision_routing = vision.get("routing") or {"requestedProvider": self.vision_provider.provider_name, "usedProvider": vision.get("provider"), "usedModel": vision.get("model"), "fallbackCount": 0, "aiUsed": self.ai_used, "attempts": []}
             except Exception as exc:

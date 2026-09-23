@@ -34,6 +34,29 @@ class QwenSceneElement(BaseModel):
     visionConfidence: float = Field(default=0.5, ge=0, le=1)
 
 
+class QwenPlanBox(BaseModel):
+    left: float = Field(ge=0, le=1)
+    top: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+
+class QwenPlanModule(BaseModel):
+    id: str
+    role: str = "component"
+    bbox: QwenPlanBox
+    strategy: Literal["editable", "whole_image", "hybrid"]
+    memberIds: list[str] = Field(default_factory=list)
+    editableIds: list[str] = Field(default_factory=list)
+    ignoreIds: list[str] = Field(default_factory=list)
+    preserveRegions: list[QwenPlanBox] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class QwenReconstructionPlan(BaseModel):
+    modules: list[QwenPlanModule] = Field(default_factory=list)
+
+
 class QwenScene(BaseModel):
     model_config = ConfigDict(extra="allow")
     page: dict[str, Any] = Field(default_factory=dict)
@@ -44,6 +67,7 @@ class QwenScene(BaseModel):
     repeatedComponents: list[dict[str, Any]] = Field(default_factory=list)
     layers: list[str] = Field(default_factory=lambda: ["background", "containers", "images", "icons", "text"])
     confidence: float = Field(default=0.5, ge=0, le=1)
+    reconstructionPlan: QwenReconstructionPlan = Field(default_factory=QwenReconstructionPlan)
 
 
 class QwenCritic(BaseModel):
@@ -89,6 +113,17 @@ def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = N
     for field in ("groups", "relations", "repeatedComponents", "regions"):
         normalized[field] = _dict_array(normalized.get(field), field, diag)
     normalized["layers"] = _normalize_layers(normalized.get("layers"), diag)
+    raw_plan = normalized.get("reconstructionPlan")
+    raw_modules = raw_plan.get("modules", []) if isinstance(raw_plan, dict) else []
+    if not isinstance(raw_modules, list):
+        raw_modules = []
+    modules = []
+    for index, module in enumerate(raw_modules[:40]):
+        try:
+            modules.append(QwenPlanModule.model_validate(module).model_dump(mode="json"))
+        except (TypeError, ValueError, ValidationError):
+            _warning(diag, f"reconstructionPlan.modules[{index}]: invalid module ignored")
+    normalized["reconstructionPlan"] = {"modules": modules}
     diag["normalizedPayload"] = normalized
     return normalized
 

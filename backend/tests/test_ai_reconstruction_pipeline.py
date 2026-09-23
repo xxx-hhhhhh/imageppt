@@ -159,7 +159,7 @@ class FakePPTXRenderer:
         return output, {"valid": True}
 
 
-def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool) -> tuple[list[dict], dict, dict]:
+def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False) -> tuple[list[dict], dict, dict]:
     image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
     fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
     shutil.copy2(fixture_path, image_path)
@@ -188,6 +188,23 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool) -> tuple[list[d
     pipeline.store = FakeStore(image_path)
     pipeline.layout_service = FakeLayoutService()
     pipeline.scene_analyzer = FakeSceneAnalyzer(ai_enabled)
+    if with_plan:
+        original_build = pipeline.layout_service.build_layout
+        original_analyze = pipeline.scene_analyzer.analyze
+
+        def build_with_fragment(*args):
+            layout, warnings = original_build(*args)
+            layout["elements"].append({"id": "chart_fragment", "type": "rectangle", "x": 12, "y": 50, "width": 40, "height": 30, "zIndex": 2, "style": {"fillColor": "#123456"}, "metadata": {}})
+            return layout, warnings
+
+        def analyze_with_plan(*args, **kwargs):
+            scene, warnings = original_analyze(*args, **kwargs)
+            scene["elements"].append({"id": "chart_fragment", "type": "rectangle", "bbox": {"left": 12, "top": 50, "width": 40, "height": 30}, "zIndex": 2, "style": {}, "metadata": {}})
+            scene["vision"] = {"aiUsed": True, "reconstructionPlan": {"modules": [{"id": "chart_panel", "role": "chart", "strategy": "whole_image", "bbox": {"left": 0.1, "top": 0.5, "width": 0.5, "height": 0.42}, "confidence": 0.95}]}}
+            return scene, warnings
+
+        pipeline.layout_service.build_layout = build_with_fragment
+        pipeline.scene_analyzer.analyze = analyze_with_plan
     pipeline.segmentation_provider = FakeSegmentationProvider()
     pipeline.segmentation_warnings = []
     pipeline.reconstruction_router = ReconstructionRouter()
@@ -242,3 +259,16 @@ def test_local_mode_reports_no_ai_strategy_or_critic_round(monkeypatch, tmp_path
     assert report["criticAdjustmentsApplied"] == 0
     assert debug["provider"] == "local"
     assert debug["rawResponseAvailable"] is False
+
+
+def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, tmp_path: Path) -> None:
+    slides, report, _ = _run_pipeline(monkeypatch, tmp_path, True, with_plan=True)
+    elements = {item["id"]: item for item in slides[0]["elements"]}
+    assert report["plannedModules"] == 1
+    assert report["wholeImageRegions"] == 1
+    assert report["plannerSuppressedElements"] >= 1
+    assert elements["chart_fragment"]["metadata"]["suppressed"] is True
+    asset = next(item for item in elements.values() if item["id"].startswith("planner_page_1_region_"))
+    assert asset["metadata"]["reconstructionStrategy"] == "local_image"
+    assert asset["groupId"] == "chart_panel"
+    assert elements["text_001"]["text"] == "OCR original text"
