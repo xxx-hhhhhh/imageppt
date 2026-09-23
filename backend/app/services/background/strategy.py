@@ -15,6 +15,8 @@ def restore_background(
     regions: list[OCRResult],
     output_path: Path,
     preserve_regions: list[list[float]] | None = None,
+    allow_complex_text_preservation: bool = True,
+    prefer_inpaint: bool = False,
 ) -> tuple[Path, list[dict]]:
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
@@ -41,7 +43,7 @@ def restore_background(
         clean_bbox = _expanded_bbox(region.bbox, [item.bbox for item in active], image.shape, 1.0)
         clean_bbox = _clip_against_preserved(clean_bbox, region.bbox, preserved)
         profile = analyze_background(image, region.bbox)
-        if _prefer_source_preservation(profile):
+        if allow_complex_text_preservation and _prefer_source_preservation(profile):
             strategies.append({
                 "text": region.text,
                 "bbox": region.bbox,
@@ -55,13 +57,13 @@ def restore_background(
                 "cleanPasses": 0,
             })
             continue
-        _clean_region(result, clean_bbox, profile)
+        _clean_region(result, clean_bbox, profile, force_inpaint=prefer_inpaint)
         strategy = {
             "text": region.text,
             "bbox": region.bbox,
             "cleanBBox": clean_bbox,
             "category": profile["category"],
-            "reconstructionStrategy": "native_fill" if profile["category"] == "solid" else "gradient_fill" if profile["category"] == "gradient" else "full_bbox_inpaint",
+            "reconstructionStrategy": "full_bbox_inpaint" if prefer_inpaint else "native_fill" if profile["category"] == "solid" else "gradient_fill" if profile["category"] == "gradient" else "full_bbox_inpaint",
             "willReconstruct": True,
             "sourceContentPreserved": False,
             "ghostingDetected": False,

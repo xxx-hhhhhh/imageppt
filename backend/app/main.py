@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 import uuid
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
 from app.schemas.vision import VisionSettingsPayload, VisionSettingsResponse, VisionTestResponse
 from app.services.pptx import PPTXRenderer
 from app.services.reconstruction import ReconstructionPipeline
+from app.services.reconstruction.pipeline import AIUnavailableError
+from app.services.reconstruction.downgrade import downgrade_problem_regions
 from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
 from app.services.vision.router import VisionRouter
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
@@ -86,19 +89,46 @@ async def upload_images(project_id: str, files: list[UploadFile] = File(...)) ->
 
 
 @app.post("/api/projects/{project_id}/analyze", response_model=AnalyzeResponse)
-def analyze_project(project_id: str, mode: str = Query("standard", pattern="^(fast|standard|high_quality|maximum)$")) -> AnalyzeResponse:
+def analyze_project(project_id: str, mode: str = Query("maximum", pattern="^(fast|standard|high_quality|maximum)$"), page: int = Query(1, ge=1), allow_fallback: bool = False) -> AnalyzeResponse:
     record = _get_project(project_id)
     if not record.get("images"):
         raise HTTPException(status_code=400, detail="Upload at least one image before analysis")
+    if page > len(record["images"]):
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page > 1 and page - 1 not in record.get("approvedPages", []):
+        raise HTTPException(status_code=409, detail={"code": "PREVIOUS_PAGE_NOT_APPROVED", "message": "请先确认上一页的重建结果。"})
     try:
         pipeline = ReconstructionPipeline(store)
-        slides, provider, warnings = pipeline.analyze_project(project_id, mode)
+        slides, provider, warnings = pipeline.analyze_project(project_id, mode, page, allow_fallback)
+    except AIUnavailableError as exc:
+        raise HTTPException(status_code=409, detail={"code": "AI_UNAVAILABLE", "message": str(exc)}) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="页面重建失败，请重试。") from exc
     routing = pipeline.scene_analyzer.vision_routing
     runtime = load_vision_settings()
     vision_warning = next((item for item in warnings if any(name in item for name in ("Qwen", "Vision", "vision"))), None)
     return AnalyzeResponse(project=project_response(record), slides=slides, provider=provider, ocrProvider=provider, visionProvider=routing.get("usedProvider", "none"), aiUsed=bool(routing.get("aiUsed")), visionModel=routing.get("usedModel"), requestedVisionProvider=routing.get("requestedProvider"), fallbackCount=int(routing.get("fallbackCount", 0)), visionWarning=vision_warning, warnings=warnings)
+
+
+@app.post("/api/projects/{project_id}/pages/{page}/approve")
+def approve_page(project_id: str, page: int) -> dict:
+    record = _get_project(project_id)
+    if page < 1 or page > len(record.get("images", [])):
+        raise HTTPException(status_code=404, detail="Page not found")
+    try:
+        store.approve_page(project_id, page)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Analyze this page before approval") from exc
+    return {"page": page, "approved": True, "nextPage": page + 1 if page < len(record["images"]) else None}
+
+
+@app.post("/api/projects/{project_id}/pages/{page}/downgrade", response_model=LayoutJSON)
+def downgrade_page(project_id: str, page: int) -> LayoutJSON:
+    _get_project(project_id)
+    try:
+        return LayoutJSON.model_validate(downgrade_problem_regions(store, project_id, page))
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/vision/status")
@@ -212,7 +242,9 @@ def update_slide(project_id: str, page: int, layout: LayoutJSON) -> LayoutJSON:
 
 @app.post("/api/projects/{project_id}/export/pptx")
 def export_pptx(project_id: str) -> dict:
-    _get_project(project_id)
+    record = _get_project(project_id)
+    if any(page not in record.get("approvedPages", []) for page in range(1, len(record.get("images", [])) + 1)):
+        raise HTTPException(status_code=409, detail="请先逐页确认全部重建结果。")
     layouts = store.list_slides(project_id)
     if not layouts:
         raise HTTPException(status_code=400, detail="Analyze images before exporting")
@@ -250,8 +282,9 @@ def asset_media(project_id: str, file_name: str) -> FileResponse:
 @app.get("/api/projects/{project_id}/artifacts/{file_name}")
 def project_artifact(project_id: str, file_name: str) -> FileResponse:
     _get_project(project_id)
-    allowed = {"original.png", "background.png", "reconstructed_preview.png", "difference.png", "visual_score.json", "visual_validation.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
-    if file_name not in allowed:
+    allowed = {"original.png", "background.png", "reconstructed_preview.png", "initial_preview.png", "final_preview.png", "source.png", "clean_background.png", "reconstruction_plan.json", "vision_debug.json", "difference.png", "visual_score.json", "visual_validation.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
+    page_artifact = re.fullmatch(r"(?:original|reconstructed_preview|difference|visual_score|visual_validation)_[1-9][0-9]*\.(?:png|json)", file_name)
+    if file_name not in allowed and not page_artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return _media_file(OUTPUTS_DIR / project_id / file_name)
 

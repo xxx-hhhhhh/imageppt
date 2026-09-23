@@ -43,9 +43,16 @@ class QwenPlanBox(BaseModel):
 
 class QwenPlanModule(BaseModel):
     id: str
+    moduleId: str | None = None
     role: str = "component"
     bbox: QwenPlanBox
-    strategy: Literal["editable", "whole_image", "hybrid"]
+    strategy: Literal["editable", "whole_image", "hybrid", "ignore"] = "editable"
+    reconstructionStrategy: Literal["editable_text", "native_shape", "whole_image", "mixed_component", "ignore"] | None = None
+    visualComplexity: float = Field(default=0.5, ge=0, le=1)
+    editablePriority: float = Field(default=0.5, ge=0, le=1)
+    preserveWhole: bool = False
+    children: list[dict[str, Any]] = Field(default_factory=list)
+    ownership: dict[str, Any] = Field(default_factory=dict)
     memberIds: list[str] = Field(default_factory=list)
     editableIds: list[str] = Field(default_factory=list)
     ignoreIds: list[str] = Field(default_factory=list)
@@ -54,6 +61,10 @@ class QwenPlanModule(BaseModel):
 
 
 class QwenReconstructionPlan(BaseModel):
+    page: dict[str, Any] = Field(default_factory=dict)
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    textRegions: list[dict[str, Any]] = Field(default_factory=list)
+    visualRegions: list[dict[str, Any]] = Field(default_factory=list)
     modules: list[QwenPlanModule] = Field(default_factory=list)
 
 
@@ -120,10 +131,13 @@ def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = N
     modules = []
     for index, module in enumerate(raw_modules[:40]):
         try:
-            modules.append(QwenPlanModule.model_validate(module).model_dump(mode="json"))
+            candidate = dict(module)
+            candidate.setdefault("id", candidate.get("moduleId"))
+            modules.append(QwenPlanModule.model_validate(candidate).model_dump(mode="json"))
         except (TypeError, ValueError, ValidationError):
             _warning(diag, f"reconstructionPlan.modules[{index}]: invalid module ignored")
-    normalized["reconstructionPlan"] = {"modules": modules}
+    plan_fields = {key: raw_plan.get(key, {} if key == "page" else []) for key in ("page", "sections", "textRegions", "visualRegions")} if isinstance(raw_plan, dict) else {}
+    normalized["reconstructionPlan"] = {**plan_fields, "modules": modules}
     diag["normalizedPayload"] = normalized
     return normalized
 

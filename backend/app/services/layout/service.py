@@ -28,7 +28,7 @@ class LayoutService:
         background_url: str | None,
         asset_dir: Path | None,
     ) -> tuple[dict, list[OCRResult]]:
-        texts, text_stats = group_text_elements(detect_text_elements(ocr_results), width, height)
+        texts, text_stats = group_text_elements(detect_text_elements(ocr_results), width, height, merge_paragraphs=False)
         shapes = detect_simple_shapes(image_path, ocr_results)
         project_id = asset_dir.parent.name if asset_dir else None
         elements = detect_label_groups(image_path, width, height, ocr_results, texts + shapes, asset_dir, project_id)

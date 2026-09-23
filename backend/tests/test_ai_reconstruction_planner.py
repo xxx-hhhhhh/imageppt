@@ -38,17 +38,17 @@ def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: P
         _element("copy_b", "text", (251, 121, 100, 25), "Same text", 0.7),
     ]}
     stats = AIReconstructionPlanner().apply(scene, source_path, tmp_path / "assets", "test-project", 1)
-    assert stats == {"plannedModules": 2, "wholeImageRegions": 1, "plannerSuppressedElements": 3, "plannerDuplicateTexts": 1, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
+    assert stats == {"plannedModules": 2, "wholeImageRegions": 1, "plannerSuppressedElements": 2, "plannerDuplicateTexts": 1, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
     by_id = {item["id"]: item for item in scene["elements"]}
     asset = by_id["planner_page_1_region_001"]
     assert by_id["title"]["groupId"] == "heading"
     assert not by_id["title"]["metadata"].get("suppressed")
-    assert by_id["chart_label"]["metadata"]["ownedBy"] == asset["id"]
+    assert by_id["chart_label"]["metadata"]["textCleanedFromAsset"] == asset["id"]
     assert by_id["wrong_block"]["metadata"]["ownedBy"] == asset["id"]
     assert by_id["copy_b"]["metadata"]["ownedBy"] == "copy_a"
     with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as crop, Image.open(source_path) as original:
         assert crop.mode == "RGB"
-        assert crop.tobytes() == original.crop((20, 90, 200, 240)).tobytes()
+        assert crop.tobytes() != original.crop((20, 90, 200, 240)).tobytes()
 
     base_layout = {"slide": {"width": 400, "height": 300}, "elements": [
         {"id": item["id"], "type": item["type"], "x": item["bbox"]["left"], "y": item["bbox"]["top"], "width": item["bbox"]["width"], "height": item["bbox"]["height"], "zIndex": item["zIndex"], "text": item.get("text"), "style": item.get("style"), "metadata": {}}
@@ -63,7 +63,7 @@ def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: P
     visible_text = [shape.text for shape in slide.shapes if shape.has_text_frame]
     assert visible_text.count("Editable title") == 1
     assert visible_text.count("Same text") == 1
-    assert "42%" not in visible_text
+    assert visible_text.count("42%") == 1
     assert len([shape for shape in slide.shapes if shape.shape_type == 13]) == 1
 
 
@@ -105,6 +105,6 @@ def test_hybrid_chart_snaps_to_cv_figure_and_ignores_hallucinated_members(tmp_pa
     assert stats["plannerSnappedRegions"] == 1
     by_id = {item["id"]: item for item in scene["elements"]}
     assert by_id["planner_page_1_region_001"]["bbox"] == {"left": 120, "top": 105, "width": 100, "height": 110}
-    assert by_id["chart_label"]["metadata"]["suppressed"] is True
+    assert by_id["chart_label"]["metadata"]["textCleanedFromAsset"] == "planner_page_1_region_001"
     assert by_id["old_crop"]["metadata"]["suppressed"] is True
     assert not by_id["heading"]["metadata"].get("suppressed")

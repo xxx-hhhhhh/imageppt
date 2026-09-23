@@ -1,10 +1,11 @@
 :root { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #14213d; background: #f7f9fc; font-synthesis: none; }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 1100px; height: 100vh; overflow: hidden; }
+body { margin: 0; min-width: 0; height: 100vh; overflow: hidden; }
 button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 .app-shell { height: 100vh; display: flex; flex-direction: column; }
-.toolbar { height: 62px; background: #fff; border-bottom: 1px solid #dfe6f0; display: flex; align-items: center; gap: 8px; padding: 0 18px; box-shadow: 0 1px 6px #17365d0d; }
+.toolbar { min-height: 62px; background: #fff; border-bottom: 1px solid #dfe6f0; display: flex; align-items: center; gap: 8px; padding: 0 18px; box-shadow: 0 1px 6px #17365d0d; overflow-x: auto; flex: none; }
+.toolbar > * { flex-shrink: 0; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; color: #17365d; margin-right: 14px; white-space: nowrap; }
 .brand-mark { display: grid; place-items: center; width: 29px; height: 29px; color: #fff; background: #17365d; border-radius: 7px; }
 .toolbar-button, .icon-button { border: 1px solid #d5dfeb; background: #fff; border-radius: 6px; color: #17365d; padding: 7px 12px; font-size: 13px; white-space: nowrap; }
@@ -65,4 +66,8 @@ button { cursor: pointer; }
 .field { display: flex; flex-direction: column; gap: 5px; color: #718096; font-size: 11px; margin: 13px 0; }
 .field input, .field textarea { border: 1px solid #dce4ee; border-radius: 4px; background: #fbfcfe; padding: 7px; color: #23395d; min-width: 0; }.field textarea { min-height: 64px; resize: vertical; }
 .segmented { display: flex; border: 1px solid #dce4ee; border-radius: 4px; overflow: hidden; margin: 11px 0; }.segmented button { flex: 1; border: 0; border-right: 1px solid #dce4ee; background: #fff; color: #65758a; padding: 6px; font-size: 11px; }.segmented button:last-child { border-right: 0; }.segmented button.selected { background: #e7eff8; color: #17365d; font-weight: 700; }
-@media (max-width: 1200px) { body { min-width: 900px; }.workspace { grid-template-columns: 150px minmax(500px, 1fr) 225px; }.toolbar { gap: 4px; padding: 0 10px; }.icon-button { padding: 6px 7px; } }
+@media (max-width: 1200px) { .workspace { grid-template-columns: 150px minmax(0, 1fr) 225px; }.toolbar { gap: 4px; padding: 0 10px; }.icon-button { padding: 6px 7px; } }
+@media (max-width: 850px) { .workspace { grid-template-columns: 125px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 190px; }.property-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #dfe6f0; }.page-list { padding: 12px 8px; }.editor-footer { padding: 0 8px; gap: 8px; }.editor-footer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
+.review-actions { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #fff8e9; border-bottom: 1px solid #e9d7ad; flex-wrap: wrap; }
+.review-actions button { min-height: 36px; border: 1px solid #bcc9d9; border-radius: 6px; background: #fff; padding: 0 12px; cursor: pointer; }
+.review-actions button:focus-visible { outline: 2px solid #1f63c4; outline-offset: 2px; }

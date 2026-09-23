@@ -11,11 +11,11 @@ _PARAGRAPH_ROLES = {"body", "body_text", "caption", "footer"}
 _SINGLE_LINE_ROLES = {"main_title", "subtitle", "section_title", "card_title", "label", "label_text", "slogan", "badge"}
 
 
-def group_text_elements(elements: list[dict[str, Any]], image_width: int, image_height: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def group_text_elements(elements: list[dict[str, Any]], image_width: int, image_height: int, *, merge_paragraphs: bool = True) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Merge OCR fragments into visual text blocks while retaining source geometry."""
     source = [copy.deepcopy(item) for item in elements]
     same_line = _merge_same_line(source)
-    blocks = _merge_paragraph_lines(same_line)
+    blocks = _merge_paragraph_lines(same_line) if merge_paragraphs else same_line
     merged = sum(max(0, len(_source_ids(item)) - 1) for item in blocks)
     single_line = 0
     for item in blocks:

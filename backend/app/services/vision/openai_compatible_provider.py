@@ -252,6 +252,8 @@ def classify_vision_error(provider: str, exc: Exception, connection_path: str | 
         quota = "insufficient_quota" in detail or "quota" in detail or "余额" in detail
         return VisionProviderError("当前 API Key 额度不足" if quota else "Qwen 请求过于频繁", status, stage="request", error_type="insufficient_quota" if quota else "rate_limit", error_code=error_code or ("insufficient_quota" if quota else "rate_limit"), connection_path=connection_path, latency_ms=latency_ms)
     if status == 400:
+        if "arrearage" in detail or "account balance" in detail:
+            return VisionProviderError("Qwen 账户欠费，请充值后重试", status, stage="request", error_type="insufficient_quota", error_code=error_code or "Arrearage", connection_path=connection_path, latency_ms=latency_ms)
         return VisionProviderError("Qwen 请求格式或模型参数错误", status, stage="request", error_type="invalid_request", error_code=error_code or "bad_request", connection_path=connection_path, latency_ms=latency_ms)
     if status is not None and status >= 500:
         return VisionProviderError("DashScope 服务暂时不可用", status, stage="request", error_type="server_error", error_code=error_code or "dashscope_server_error", connection_path=connection_path, latency_ms=latency_ms)
@@ -276,6 +278,8 @@ def classify_http_status(status: int, body: str = "") -> tuple[str, str, str, st
         quota = "insufficient_quota" in detail or "quota" in detail or "余额" in detail
         return "request", "insufficient_quota" if quota else "rate_limit", "insufficient_quota" if quota else "rate_limit", "当前 API Key 额度不足" if quota else "Qwen 请求过于频繁"
     if status == 400:
+        if "arrearage" in detail:
+            return "request", "insufficient_quota", "Arrearage", "Qwen 账户欠费，请充值后重试"
         return "request", "invalid_request", "bad_request", "Qwen 请求格式或模型参数错误"
     if status >= 500:
         return "request", "server_error", "dashscope_server_error", "DashScope 服务暂时不可用"

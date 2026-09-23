@@ -34,6 +34,8 @@ backend/tests/tmp_debug.png
 .paddleocr/
 .cache/
 models/
+!backend/app/models/
+!backend/app/models/*.py
 *.onnx
 *.pt
 *.pdparams

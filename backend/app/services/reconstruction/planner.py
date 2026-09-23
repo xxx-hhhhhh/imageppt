@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 from PIL import Image
 
 
@@ -23,7 +25,8 @@ class AIReconstructionPlanner:
     ) -> dict[str, int]:
         stats = {"plannedModules": 0, "wholeImageRegions": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
         vision = scene.get("vision") or {}
-        modules = ((vision.get("reconstructionPlan") or {}).get("modules") or []) if vision.get("aiUsed") else []
+        original_plan = vision.get("reconstructionPlan") or {}
+        modules = (original_plan.get("modules") or []) if vision.get("aiUsed") else []
         if not isinstance(modules, list) or not modules:
             return stats
 
@@ -49,11 +52,12 @@ class AIReconstructionPlanner:
                 member_ids = {str(value) for value in module.get("memberIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 editable_ids = {str(value) for value in module.get("editableIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 ignore_ids = {str(value) for value in module.get("ignoreIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
-                strategy = module.get("strategy")
-                if strategy not in {"editable", "whole_image", "hybrid"}:
+                strategy = module.get("reconstructionStrategy") or module.get("strategy")
+                strategy = {"mixed_component": "hybrid", "editable_text": "editable", "native_shape": "editable"}.get(strategy, strategy)
+                if strategy not in {"editable", "whole_image", "hybrid", "ignore"}:
                     continue
                 stats["plannedModules"] += 1
-                normalized_modules.append({"id": module_id, "role": module.get("role"), "strategy": strategy, "bboxPixels": list(module_box)})
+                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "reconstructionStrategy": module.get("reconstructionStrategy") or {"editable": "editable_text", "hybrid": "mixed_component"}.get(strategy, strategy), "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", strategy == "whole_image"))})
 
                 for item_id in member_ids | editable_ids:
                     item = by_id[item_id]
@@ -82,13 +86,47 @@ class AIReconstructionPlanner:
                         continue
                     x1, y1, x2, y2 = box
                     asset_dir.mkdir(parents=True, exist_ok=True)
+                    module_dir = asset_dir.parent / "module_assets" / f"page_{page_index}"
+                    clean_dir = asset_dir.parent / "text_clean_assets" / f"page_{page_index}"
+                    module_dir.mkdir(parents=True, exist_ok=True)
+                    clean_dir.mkdir(parents=True, exist_ok=True)
                     asset_id = f"planner_page_{page_index}_region_{len(planned_assets) + 1:03d}"
                     asset_path = asset_dir / f"{asset_id}.png"
-                    source.crop(box).convert("RGB").save(asset_path, format="PNG")
                     covered = [
                         item for item in elements
                         if item.get("type") not in {"background", "group"} and _covered_by_asset(item, box)
                     ]
+                    editable_text = [
+                        item for item in covered
+                        if item.get("type") == "text" and item.get("id") not in ignore_ids
+                        and item.get("role") not in {"logo", "decorative_text"}
+                        and str(item.get("text") or "").strip()
+                    ]
+                    source.crop(box).convert("RGB").save(module_dir / f"{asset_id}.png", format="PNG")
+                    crop = np.asarray(source.crop(box).convert("RGB"))[:, :, ::-1].copy()
+                    mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+                    for text_item in editable_text:
+                        bounds = text_item.get("bbox") or {}
+                        raw = (text_item.get("metadata") or {}).get("rawOCRBBox")
+                        if isinstance(raw, list) and len(raw) == 4:
+                            left, top, right, bottom = map(float, raw)
+                        else:
+                            left, top = float(bounds.get("left", 0)), float(bounds.get("top", 0))
+                            right, bottom = left + float(bounds.get("width", 0)), top + float(bounds.get("height", 0))
+                        tx1 = max(0, round(left - x1))
+                        ty1 = max(0, round(top - y1))
+                        tx2 = min(x2 - x1, round(right - x1))
+                        ty2 = min(y2 - y1, round(bottom - y1))
+                        if tx2 > tx1 and ty2 > ty1:
+                            pad_x = max(2, round((tx2 - tx1) * 0.05))
+                            pad_y = max(2, round((ty2 - ty1) * 0.20))
+                            cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
+                    text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
+                    safe_to_clean = text_area_ratio <= 0.20
+                    if np.any(mask) and safe_to_clean:
+                        crop = cv2.inpaint(crop, mask, 4, cv2.INPAINT_TELEA)
+                    cv2.imwrite(str(asset_path), crop)
+                    cv2.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
                     z_index = max((int(item.get("zIndex") or 0) for item in covered), default=1) + 1
                     planned_assets.append({
                         "id": asset_id,
@@ -100,7 +138,7 @@ class AIReconstructionPlanner:
                         "zIndex": z_index,
                         "src": f"/media/assets/{project_id}/{asset_path.name}",
                         "style": {"opacity": 1},
-                        "metadata": {"reconstructionStrategy": "local_image", "reconstructionStrategySource": "planner", "preserveWholeAsset": True, "doNotVectorize": True, "plannerModuleId": module_id},
+                        "metadata": {"reconstructionStrategy": "local_image", "reconstructionStrategySource": "planner", "preserveWholeAsset": True, "doNotVectorize": True, "plannerModuleId": module_id, "textCleaned": bool(np.any(mask)) and safe_to_clean, "editableTextIds": [item["id"] for item in editable_text] if safe_to_clean else [], "fallbackReason": "text_area_too_large" if not safe_to_clean else None},
                     })
                     used_boxes.append(box)
                     stats["wholeImageRegions"] += 1
@@ -108,6 +146,10 @@ class AIReconstructionPlanner:
                     stats["plannerCvVisualRegions"] += int(from_cv)
                     for item in covered:
                         metadata = item.setdefault("metadata", {})
+                        if item in editable_text and np.any(mask) and safe_to_clean:
+                            metadata.update({"plannerModuleId": module_id, "reconstructionStrategy": "editable_text", "reconstructionStrategySource": "planner", "textCleanedFromAsset": asset_id})
+                            item["zIndex"] = z_index + 1
+                            continue
                         if not metadata.get("suppressed"):
                             stats["plannerSuppressedElements"] += 1
                         metadata.update({"suppressed": True, "ownedBy": asset_id, "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
@@ -125,7 +167,7 @@ class AIReconstructionPlanner:
             stats["plannerDuplicateTexts"] = _suppress_duplicate_text(elements)
             stats["plannerSuppressedElements"] += stats["plannerDuplicateTexts"]
         elements.extend(planned_assets)
-        scene["reconstructionPlan"] = {"modules": normalized_modules, "assets": [item["id"] for item in planned_assets]}
+        scene["reconstructionPlan"] = {**original_plan, "modules": normalized_modules, "assets": [item["id"] for item in planned_assets]}
         return stats
 
 

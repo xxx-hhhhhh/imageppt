@@ -121,7 +121,7 @@ class PPTXRenderer:
             frame.margin_left = frame.margin_right = frame.margin_top = frame.margin_bottom = 0
             original_line_count = int(metadata.get("originalLineCount") or max(1, len(element.get("lines") or [])) or 1)
             preserve_line_count = bool(metadata.get("preserveOriginalLineCount"))
-            frame.word_wrap = not (preserve_line_count and original_line_count == 1)
+            frame.word_wrap = True
             vertical = style.get("verticalAlign", "top")
             frame.vertical_anchor = {"top": MSO_ANCHOR.TOP, "bottom": MSO_ANCHOR.BOTTOM, "middle": MSO_ANCHOR.MIDDLE}.get(vertical, MSO_ANCHOR.TOP)
             paragraph = frame.paragraphs[0]

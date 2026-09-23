@@ -16,6 +16,8 @@ class InpaintingService:
         self.provider, self.warnings = create_inpainting_provider(preferred)
         self.last_strategies: list[dict] = []
         self.last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
+        self.force_clean = False
+        self.prefer_inpaint = False
 
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
@@ -34,7 +36,7 @@ class InpaintingService:
         return mask
 
     def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
-        restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions)
+        restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions, allow_complex_text_preservation=not self.force_clean, prefer_inpaint=self.prefer_inpaint)
         self.last_stats = {
             "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
             "ghostingRegionsRecleaned": sum(1 for item in self.last_strategies if item.get("ghostingRecleaned")),

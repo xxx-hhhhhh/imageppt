@@ -21,8 +21,17 @@ export async function uploadImages(projectId: string, files: File[]): Promise<Pr
   return response.data.project;
 }
 
-export async function analyzeProject(projectId: string, mode: 'fast' | 'standard' | 'high_quality' | 'maximum' = 'standard'): Promise<AnalyzeResponse> {
-  const response = await api.post<AnalyzeResponse>(`/projects/${projectId}/analyze`, null, { params: { mode } });
+export async function analyzeProject(projectId: string, mode: 'fast' | 'standard' | 'high_quality' | 'maximum' = 'maximum', page = 1, allowFallback = false): Promise<AnalyzeResponse> {
+  const response = await api.post<AnalyzeResponse>(`/projects/${projectId}/analyze`, null, { params: { mode, page, allow_fallback: allowFallback } });
+  return response.data;
+}
+
+export async function approvePage(projectId: string, page: number): Promise<void> {
+  await api.post(`/projects/${projectId}/pages/${page}/approve`);
+}
+
+export async function downgradePage(projectId: string, page: number): Promise<LayoutJSON> {
+  const response = await api.post<LayoutJSON>(`/projects/${projectId}/pages/${page}/downgrade`);
   return response.data;
 }
 
@@ -102,8 +111,9 @@ export async function testVisionSettings(): Promise<VisionTestResult> {
   return response.data;
 }
 
-export async function getVisualScore(projectId: string): Promise<{ overall?: number }> {
-  const response = await api.get<{ overall?: number }>(`/projects/${projectId}/artifacts/visual_score.json`);
+export async function getVisualScore(projectId: string, page = 1): Promise<{ overall?: number; revisionStatus?: string; issues?: { problem?: string }[] }> {
+  const file = page === 1 ? 'visual_validation.json' : `visual_validation_${page}.json`;
+  const response = await api.get<{ overall?: number; revisionStatus?: string; issues?: { problem?: string }[] }>(`/projects/${projectId}/artifacts/${file}`);
   return response.data;
 }
 

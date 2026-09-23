@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 from app.services.pptx.renderer import _default_strategy, _path_from_src
 
 
-def _font(style: dict[str, Any], size_scale: float = 0.75) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _font(style: dict[str, Any], size_scale: float = 1.0) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     size = max(8, int(float(style.get("fontSize", 20)) * size_scale))
     family = style.get("fontFamily", "Microsoft YaHei")
     candidates = [
@@ -103,14 +103,19 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     color_similarity = _color_similarity(original, preview, layout_mask)
     ghosting_penalty = _ghosting_penalty(original, preview, text_mask)
     duplicate_penalty = _duplicate_penalty(layout)
+    regions, issues = _critical_regions(original, preview, layout)
+    critical_score = sum(item["score"] * item["weight"] for item in regions) / max(1.0, sum(item["weight"] for item in regions)) if regions else layout_score
+    overlap_penalty = min(0.2, sum(0.04 for issue in issues if issue["problem"] == "textOverlap"))
     overall = (
-        0.30 * text_region
-        + 0.25 * layout_score
+        0.30 * critical_score
+        + 0.25 * text_region
         + 0.20 * component_score
-        + 0.15 * color_similarity
-        + 0.10 * background_score
+        + 0.15 * layout_score
+        + 0.07 * color_similarity
+        + 0.03 * background_score
         - ghosting_penalty
         - duplicate_penalty
+        - overlap_penalty
     )
     score = {
         "overall": round(max(0.0, min(1.0, overall)), 4),
@@ -128,12 +133,46 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
         "pixelSimilarity": round(pixel, 4),
         "ssim": round(ssim_like, 4),
         "edgeSimilarity": round(edge, 4),
-        "regions": [],
+        "criticalRegionScore": round(critical_score, 4),
+        "textOverlapPenalty": round(overlap_penalty, 4),
+        "regions": regions,
+        "issues": issues,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     difference = cv2.absdiff(cv2.resize(original, (preview.shape[1], preview.shape[0])), preview)
     cv2.imwrite(str(output_dir / "difference.png"), difference)
     return score
+
+
+def _critical_regions(original: np.ndarray, preview: np.ndarray, layout: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    height, width = preview.shape[:2]
+    active = [item for item in layout.get("elements", []) if item.get("type") != "background" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    regions: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    text_boxes: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
+    for item in active:
+        x1 = max(0, min(width, round(float(item.get("x", 0)))))
+        y1 = max(0, min(height, round(float(item.get("y", 0)))))
+        x2 = max(x1, min(width, round(float(item.get("x", 0)) + float(item.get("width", 0)))))
+        y2 = max(y1, min(height, round(float(item.get("y", 0)) + float(item.get("height", 0)))))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            continue
+        kind = item.get("type")
+        pixel, edge = _similarity(original[y1:y2, x1:x2], preview[y1:y2, x1:x2])[:2]
+        score = pixel * 0.35 + edge * 0.65
+        weight = 3.0 if item.get("role") == "main_title" else 2.0 if kind == "text" else 1.5 if kind == "image" else 1.0
+        regions.append({"elementId": item.get("id"), "kind": kind, "role": item.get("role"), "bbox": [x1, y1, x2, y2], "score": round(score, 4), "weight": weight})
+        if score < 0.6 and kind in {"text", "image"}:
+            issues.append({"elementId": item.get("id"), "problem": "criticalRegionMismatch", "score": round(score, 4)})
+        if kind == "text":
+            text_boxes.append((item, (x1, y1, x2, y2)))
+    for index, (left_item, left) in enumerate(text_boxes):
+        for right_item, right in text_boxes[index + 1:]:
+            overlap = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
+            smaller = min((left[2] - left[0]) * (left[3] - left[1]), (right[2] - right[0]) * (right[3] - right[1]))
+            if overlap / max(1, smaller) > 0.25:
+                issues.append({"elementId": left_item.get("id"), "otherElementId": right_item.get("id"), "problem": "textOverlap"})
+    return regions, issues
 
 
 def _element_mask(shape: tuple[int, int], layout: dict[str, Any], kinds: set[str]) -> np.ndarray:
