@@ -22,6 +22,7 @@ from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.quality_guard import preserve_bad_text_regions
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
+from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -152,6 +153,8 @@ class ReconstructionPipeline:
             "suppressedDuplicates": 0,
             "visualTextFallbacks": 0,
             "restoredModules": 0,
+            "backgroundTextErased": 0,
+            "assetTextErased": 0,
             "detectedTextCount": 0,
             "editableTextCount": 0,
             "nonEditableTextCount": 0,
@@ -230,6 +233,9 @@ class ReconstructionPipeline:
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
             reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []))
+            erasure_stats = erase_editable_text_sources(background_path, layout)
+            for key, value in erasure_stats.items():
+                reconstruction_stats[key] += value
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
@@ -397,6 +403,8 @@ class ReconstructionPipeline:
                 "suppressedDuplicates": reconstruction_stats["suppressedDuplicates"],
                 "visualTextFallbacks": reconstruction_stats["visualTextFallbacks"],
                 "restoredModules": reconstruction_stats["restoredModules"],
+                "backgroundTextErased": reconstruction_stats["backgroundTextErased"],
+                "assetTextErased": reconstruction_stats["assetTextErased"],
                 "revisionStatus": revision_status,
                 "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
                 "routing": self.scene_analyzer.vision_routing,
