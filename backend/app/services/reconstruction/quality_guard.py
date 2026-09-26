@@ -8,7 +8,7 @@ import numpy as np
 
 
 def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_path: Path, layout: dict, asset_dir: Path, page: int, minimum_f1: float | None = None) -> dict[str, int]:
-    """Restore source pixels when an editable text line visibly loses fidelity.
+    """Preserve a mismatched source line as an independently movable image.
 
     The decision is recorded per element so the user can see why that line was
     preserved as an image. A whole cleaned module is restored together when
@@ -37,14 +37,38 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
         metadata["visualTextF1"] = round(fidelity, 4)
         asset_id = metadata.get("textCleanedFromAsset")
         source_retained = not asset_id and float(np.mean(cv2.absdiff(source[y1:y2, x1:x2], background[y1:y2, x1:x2]))) < 3.0
+        owner = _source_asset_owner((x1, y1, x2, y2), elements) if not asset_id else None
+        if owner:
+            if source_retained:
+                mask = np.zeros(background.shape[:2], dtype=np.uint8)
+                mask[y1:y2, x1:x2] = 255
+                background = cv2.inpaint(background, mask, 4, cv2.INPAINT_TELEA)
+            metadata.update({"suppressRender": True, "sourceTextPreserved": True, "ownedBy": owner, "fallbackReason": "source_asset_owns_text"})
+            preserved += 1
+            continue
         threshold = minimum_f1 if minimum_f1 is not None else (0.62 if item.get("role") in {"main_title", "section_title", "subtitle"} else 0.55)
         if fidelity >= threshold and not source_retained:
             continue
         if asset_id:
             bad_assets.add(str(asset_id))
             continue
-        background[y1:y2, x1:x2] = source[y1:y2, x1:x2]
-        metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch"})
+        if source_retained:
+            mask = np.zeros(background.shape[:2], dtype=np.uint8)
+            mask[y1:y2, x1:x2] = 255
+            background = cv2.inpaint(background, mask, 4, cv2.INPAINT_TELEA)
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        cutout_id = f"fallback_{page}_{item['id']}"
+        cutout_path = asset_dir / f"{cutout_id}.png"
+        cv2.imwrite(str(cutout_path), source[y1:y2, x1:x2])
+        elements.append({
+            "id": cutout_id, "type": "image", "x": x1, "y": y1,
+            "width": x2 - x1, "height": y2 - y1,
+            "zIndex": int(item.get("zIndex") or 0) + 1,
+            "src": f"/media/assets/{asset_dir.parent.name}/{cutout_path.name}",
+            "style": {"opacity": 1},
+            "metadata": {"reconstructionStrategy": "cutout_image", "layerRole": "cutout_image", "sourceTextFallback": True, "preserveWholeAsset": True, "backgroundSeparated": True, "ownedTextId": item["id"]},
+        })
+        metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch", "fallbackAssetId": cutout_id})
         preserved += 1
     restored_modules = 0
     for asset_id in bad_assets:
@@ -72,6 +96,23 @@ def _clip_box(box: list[float], shape: tuple[int, ...]) -> tuple[int, int, int, 
     height, width = shape[:2]
     x1, y1, x2, y2 = (round(float(value)) for value in box)
     return max(0, min(width, x1)), max(0, min(height, y1)), max(0, min(width, x2)), max(0, min(height, y2))
+
+
+def _source_asset_owner(box: tuple[int, int, int, int], elements: list[dict]) -> str | None:
+    x1, y1, x2, y2 = box
+    area = max(1, (x2 - x1) * (y2 - y1))
+    for asset in elements:
+        metadata = asset.get("metadata") or {}
+        if asset.get("type") != "image" or not metadata.get("preserveWholeAsset") or metadata.get("textCleaned"):
+            continue
+        if any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        ax1, ay1 = float(asset.get("x") or 0), float(asset.get("y") or 0)
+        ax2, ay2 = ax1 + float(asset.get("width") or 0), ay1 + float(asset.get("height") or 0)
+        overlap = max(0.0, min(x2, ax2) - max(x1, ax1)) * max(0.0, min(y2, ay2) - max(y1, ay1))
+        if overlap / area >= 0.85:
+            return str(asset["id"])
+    return None
 
 
 def _edge_f1(source: np.ndarray, preview: np.ndarray) -> float:

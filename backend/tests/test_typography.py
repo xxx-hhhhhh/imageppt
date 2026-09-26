@@ -33,3 +33,9 @@ def test_typography_keeps_ocr_left_edge():
     layout = {"slide": {"width": 500, "height": 300}, "elements": [{"id": "text", "type": "text", "text": "正文内容", "x": 84, "y": 95, "width": 130, "height": 30, "role": "body_text", "style": {"fontSize": 24, "fontFamily": "Microsoft YaHei"}, "metadata": {"rawOCRBBox": [100, 100, 220, 130]}}]}
     refined, _ = TypographyLayoutRefiner().refine(layout)
     assert refined["elements"][0]["x"] == 100
+
+
+def test_label_cannot_drift_far_from_its_ocr_position():
+    layout = {"slide": {"width": 500, "height": 300}, "elements": [{"id": "label", "type": "text", "text": "EMIT", "x": 165, "y": 100, "width": 80, "height": 25, "role": "label", "style": {"fontSize": 20}, "metadata": {"rawOCRBBox": [100, 100, 155, 125]}}]}
+    refined, _ = TypographyLayoutRefiner().refine(layout)
+    assert refined["elements"][0]["x"] == 100

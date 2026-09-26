@@ -33,6 +33,15 @@ def test_qwen_scene_repairs_malformed_property_separator() -> None:
     assert payload["modules"][0]["id"] == "one"
 
 
+def test_plan_accepts_layered_module_strategies() -> None:
+    modules = [
+        {"id": strategy, "bbox": {"left": 0.1, "top": 0.1, "width": 0.2, "height": 0.2}, "reconstructionStrategy": strategy}
+        for strategy in ("editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore")
+    ]
+    plan = validate_json({"reconstructionPlan": {"modules": modules}}, "scene")["reconstructionPlan"]
+    assert [item["reconstructionStrategy"] for item in plan["modules"]] == [item["reconstructionStrategy"] for item in modules]
+
+
 def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: Path, monkeypatch) -> None:
     source_path = tmp_path / "infographic.png"
     with Image.new("RGB", (400, 300), "white") as image:
@@ -55,9 +64,10 @@ def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: P
         _element("copy_b", "text", (251, 121, 100, 25), "Same text", 0.7),
     ]}
     stats = AIReconstructionPlanner().apply(scene, source_path, tmp_path / "assets", "test-project", 1)
-    assert stats == {"plannedModules": 2, "wholeImageRegions": 1, "plannerSuppressedElements": 2, "plannerDuplicateTexts": 1, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
+    assert stats == {"plannedModules": 2, "wholeImageRegions": 1, "cutoutImages": 1, "nativeShapesPlanned": 0, "plannerSuppressedElements": 2, "plannerDuplicateTexts": 1, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
     by_id = {item["id"]: item for item in scene["elements"]}
     asset = by_id["planner_page_1_region_001"]
+    assert asset["metadata"]["reconstructionStrategy"] == "cutout_image"
     assert by_id["title"]["groupId"] == "heading"
     assert not by_id["title"]["metadata"].get("suppressed")
     assert by_id["chart_label"]["metadata"]["textCleanedFromAsset"] == asset["id"]
@@ -160,3 +170,24 @@ def test_hybrid_chart_snaps_to_cv_figure_and_ignores_hallucinated_members(tmp_pa
     assert by_id["chart_label"]["metadata"]["textCleanedFromAsset"] == "planner_page_1_region_001"
     assert by_id["old_crop"]["metadata"]["suppressed"] is True
     assert not by_id["heading"]["metadata"].get("suppressed")
+
+
+def test_chart_crop_includes_a_nearby_axis_label(tmp_path: Path) -> None:
+    source = tmp_path / "chart.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    label = _element("axis", "text", (140, 176, 50, 18), "X axis")
+    label["metadata"]["rawOCRBBox"] = [140, 176, 190, 194]
+    scene = {"canvas": {"width": 400, "height": 300}, "regions": [{"type": "figure", "bbox": {"left": 100, "top": 100, "width": 120, "height": 80}, "confidence": 0.62}], "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [{"id": "panel", "reconstructionStrategy": "mixed_component", "bbox": {"left": 0.2, "top": 0.2, "width": 0.5, "height": 0.6}, "confidence": 0.9}]}}, "elements": [label]}
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "chart", 1)
+    assert stats["cutoutImages"] == 1
+    asset = next(item for item in scene["elements"] if item.get("type") == "image")
+    assert asset["bbox"]["top"] == 100
+    assert asset["bbox"]["top"] + asset["bbox"]["height"] >= 194
+
+
+def test_small_complex_icon_is_extracted_from_mixed_module(tmp_path: Path) -> None:
+    source = tmp_path / "icon.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    scene = {"canvas": {"width": 400, "height": 300}, "regions": [{"type": "image", "bbox": {"left": 100, "top": 110, "width": 35, "height": 35}, "confidence": 0.68}], "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [{"id": "panel", "reconstructionStrategy": "mixed_component", "bbox": {"left": 0.15, "top": 0.2, "width": 0.45, "height": 0.5}, "confidence": 0.9}]}}, "elements": []}
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "icon", 1)
+    assert stats["cutoutImages"] == 1

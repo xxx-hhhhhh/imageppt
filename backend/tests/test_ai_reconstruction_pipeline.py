@@ -269,6 +269,6 @@ def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, t
     assert report["plannerSuppressedElements"] >= 1
     assert elements["chart_fragment"]["metadata"]["suppressed"] is True
     asset = next(item for item in elements.values() if item["id"].startswith("planner_page_1_region_"))
-    assert asset["metadata"]["reconstructionStrategy"] == "local_image"
+    assert asset["metadata"]["reconstructionStrategy"] == "cutout_image"
     assert asset["groupId"] == "chart_panel"
     assert elements["text_001"]["text"] == "OCR original text"

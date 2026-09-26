@@ -23,7 +23,7 @@ class AIReconstructionPlanner:
         project_id: str,
         page_index: int,
     ) -> dict[str, int]:
-        stats = {"plannedModules": 0, "wholeImageRegions": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
+        stats = {"plannedModules": 0, "wholeImageRegions": 0, "cutoutImages": 0, "nativeShapesPlanned": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
         vision = scene.get("vision") or {}
         original_plan = vision.get("reconstructionPlan") or {}
         modules = (original_plan.get("modules") or []) if vision.get("aiUsed") else []
@@ -34,7 +34,7 @@ class AIReconstructionPlanner:
         width, height = int(canvas.get("width") or 0), int(canvas.get("height") or 0)
         if width < 32 or height < 32:
             return stats
-        elements = scene.get("elements") or []
+        elements = scene.setdefault("elements", [])
         by_id = {str(item.get("id")): item for item in elements}
         planned_assets: list[dict[str, Any]] = []
         used_boxes: list[tuple[int, int, int, int]] = []
@@ -45,19 +45,21 @@ class AIReconstructionPlanner:
             for module in modules[:40]:
                 if not isinstance(module, dict) or float(module.get("confidence") or 0) < 0.65:
                     continue
-                module_box = _pixel_box(module.get("bbox"), width, height)
+                requested = module.get("reconstructionStrategy") or module.get("strategy")
+                strategy = {"editable": "editable_text", "whole_image": "cutout_image", "hybrid": "mixed_component"}.get(requested, requested)
+                if strategy not in {"editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"}:
+                    continue
+                module_box = _pixel_box(module.get("bbox"), width, height, max_area=1.0 if strategy == "background" else 0.80)
                 if module_box is None:
                     continue
                 module_id = str(module.get("id") or f"module_{stats['plannedModules'] + 1}")[:80]
                 member_ids = {str(value) for value in module.get("memberIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 editable_ids = {str(value) for value in module.get("editableIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 ignore_ids = {str(value) for value in module.get("ignoreIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
-                strategy = module.get("reconstructionStrategy") or module.get("strategy")
-                strategy = {"mixed_component": "hybrid", "editable_text": "editable", "native_shape": "editable"}.get(strategy, strategy)
-                if strategy not in {"editable", "whole_image", "hybrid", "ignore"}:
-                    continue
+                if strategy == "ignore":
+                    ignore_ids.update(member_ids)
                 stats["plannedModules"] += 1
-                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "reconstructionStrategy": module.get("reconstructionStrategy") or {"editable": "editable_text", "hybrid": "mixed_component"}.get(strategy, strategy), "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", strategy == "whole_image"))})
+                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
 
                 for item_id in member_ids | editable_ids:
                     item = by_id[item_id]
@@ -65,20 +67,37 @@ class AIReconstructionPlanner:
                         item["groupId"] = module_id
                         item.setdefault("metadata", {})["plannerModuleId"] = module_id
 
-                boxes = [module_box] if strategy == "whole_image" else [
+                if strategy == "native_shape":
+                    for item in elements:
+                        if item.get("type") not in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} or _coverage(item, module_box) < 0.75:
+                            continue
+                        if float(item.get("confidence") or item.get("finalConfidence") or 0) < 0.85 or float((item.get("metadata") or {}).get("visualComplexity") or 0) >= 0.35:
+                            continue
+                        item.setdefault("metadata", {}).update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "planner", "layerRole": "native_shape"})
+                        stats["nativeShapesPlanned"] += 1
+
+                preserve_boxes = [
                     box for raw in module.get("preserveRegions", [])
                     if (box := _pixel_box(raw, width, height)) is not None and _overlap_min(box, module_box) >= 0.25
-                ] if strategy == "hybrid" else []
-                cv_boxes = _cv_visual_boxes(scene.get("regions") or [], module_box, width, height) if strategy == "hybrid" else []
+                ] if strategy in {"cutout_image", "mixed_component"} else []
+                cv_boxes = _cv_visual_boxes(scene.get("regions") or [], module_box, width, height) if strategy in {"cutout_image", "mixed_component"} else []
+                if strategy == "cutout_image":
+                    boxes = [module_box] if requested == "whole_image" or not (preserve_boxes or cv_boxes) else preserve_boxes
+                elif strategy == "mixed_component":
+                    boxes = preserve_boxes
+                else:
+                    boxes = []
                 for box in boxes + cv_boxes:
                     from_cv = box in cv_boxes
                     snapped = _snap_to_layout_region(box, scene.get("regions") or [], width, height)
                     was_snapped = snapped != box
-                    box = snapped
+                    box = _extend_to_text_edges(snapped, elements, width, height)
+                    if box is None:
+                        continue
                     # Source pixels can have only one image owner. Even a narrow
                     # overlap may erase a line in one asset while the other asset
                     # still owns its editable textbox.
-                    if len(planned_assets) >= 24 or any(_overlap_min(box, prior) >= 0.05 for prior in used_boxes) or _cuts_through_text(box, elements):
+                    if len(planned_assets) >= 24 or any(_overlap_min(box, prior) >= 0.05 for prior in used_boxes):
                         continue
                     if any(
                         item.get("type") == "text" and item.get("role") == "main_title"
@@ -141,10 +160,11 @@ class AIReconstructionPlanner:
                         "zIndex": z_index,
                         "src": f"/media/assets/{project_id}/{asset_path.name}",
                         "style": {"opacity": 1},
-                        "metadata": {"reconstructionStrategy": "local_image", "reconstructionStrategySource": "planner", "preserveWholeAsset": True, "doNotVectorize": True, "plannerModuleId": module_id, "textCleaned": bool(np.any(mask)) and safe_to_clean, "editableTextIds": [item["id"] for item in editable_text] if safe_to_clean else [], "fallbackReason": "text_area_too_large" if not safe_to_clean else None},
+                        "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "planner", "layerRole": "cutout_image", "preserveWholeAsset": True, "doNotVectorize": True, "plannerModuleId": module_id, "textCleaned": bool(np.any(mask)) and safe_to_clean, "editableTextIds": [item["id"] for item in editable_text] if safe_to_clean else [], "fallbackReason": "text_area_too_large" if not safe_to_clean else None},
                     })
                     used_boxes.append(box)
                     stats["wholeImageRegions"] += 1
+                    stats["cutoutImages"] += 1
                     stats["plannerSnappedRegions"] += int(was_snapped)
                     stats["plannerCvVisualRegions"] += int(from_cv)
                     for item in covered:
@@ -199,7 +219,7 @@ def _clean_text_from_asset(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return result
 
 
-def _pixel_box(raw: Any, width: int, height: int) -> tuple[int, int, int, int] | None:
+def _pixel_box(raw: Any, width: int, height: int, *, max_area: float = 0.80) -> tuple[int, int, int, int] | None:
     if not isinstance(raw, dict):
         return None
     try:
@@ -208,7 +228,7 @@ def _pixel_box(raw: Any, width: int, height: int) -> tuple[int, int, int, int] |
         return None
     if not (0 <= left < 1 and 0 <= top < 1 and 0 < box_width <= 1 and 0 < box_height <= 1):
         return None
-    if left + box_width > 1.01 or top + box_height > 1.01 or box_width * box_height > 0.80:
+    if left + box_width > 1.01 or top + box_height > 1.01 or box_width * box_height > max_area:
         return None
     x1, y1 = max(0, round(left * width)), max(0, round(top * height))
     x2, y2 = min(width, round((left + box_width) * width)), min(height, round((top + box_height) * height))
@@ -253,7 +273,8 @@ def _snap_to_layout_region(
 def _cv_visual_boxes(regions: list[dict[str, Any]], module_box: tuple[int, int, int, int], width: int, height: int) -> list[tuple[int, int, int, int]]:
     boxes = []
     for region in regions:
-        if region.get("type") not in {"image", "figure", "chart", "table"} or float(region.get("confidence") or 0) < 0.65:
+        kind = region.get("type")
+        if kind not in {"image", "figure", "chart", "table"} or float(region.get("confidence") or 0) < (0.55 if kind == "image" else 0.60 if kind in {"figure", "chart"} else 0.65):
             continue
         raw = region.get("bbox") or {}
         try:
@@ -264,9 +285,11 @@ def _cv_visual_boxes(regions: list[dict[str, Any]], module_box: tuple[int, int, 
         box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
         center_x = (box[0] + box[2]) / 2
         area = (box[2] - box[0]) * (box[3] - box[1])
-        if box[2] - box[0] < 50 or box[3] - box[1] < 50 or area < width * height * 0.008:
+        min_side = 24 if kind == "image" else 50
+        min_area = max(400, width * height * 0.00025) if kind == "image" else width * height * 0.008
+        if box[2] - box[0] < min_side or box[3] - box[1] < min_side or area < min_area:
             continue
-        if not module_box[0] <= center_x <= module_box[2] or box[1] < module_box[1] or box[3] > height * 0.92:
+        if not module_box[0] <= center_x <= module_box[2] or box[1] < module_box[1] or box[3] > height * 0.99:
             continue
         boxes.append(box)
     return boxes[:12]
@@ -323,6 +346,43 @@ def _cuts_through_text(box: tuple[int, int, int, int], elements: list[dict[str, 
         if 0.03 < overlap / area < 0.95:
             return True
     return False
+
+
+def _extend_to_text_edges(box: tuple[int, int, int, int], elements: list[dict[str, Any]], width: int, height: int) -> tuple[int, int, int, int] | None:
+    """Include nearby labels instead of slicing their glyphs at a crop edge."""
+    current = box
+    max_extension = max(12, round(min(box[2] - box[0], box[3] - box[1]) * 0.25))
+    for _ in range(3):
+        if not _cuts_through_text(current, elements):
+            return current
+        left, top, right, bottom = current
+        changed = False
+        for item in elements:
+            if item.get("type") != "text" or not str(item.get("text") or "").strip():
+                continue
+            raw = (item.get("metadata") or {}).get("rawOCRBBox")
+            bounds = item.get("bbox") or {}
+            if isinstance(raw, list) and len(raw) == 4:
+                tx1, ty1, tx2, ty2 = map(float, raw)
+            else:
+                try:
+                    tx1, ty1 = float(bounds["left"]), float(bounds["top"])
+                    tx2, ty2 = tx1 + float(bounds["width"]), ty1 + float(bounds["height"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            area = max(1.0, (tx2 - tx1) * (ty2 - ty1))
+            overlap = max(0.0, min(right, tx2) - max(left, tx1)) * max(0.0, min(bottom, ty2) - max(top, ty1))
+            if not 0.03 < overlap / area < 0.95:
+                continue
+            candidate = (max(0, min(left, int(tx1) - 2)), max(0, min(top, int(ty1) - 2)), min(width, max(right, int(np.ceil(tx2)) + 2)), min(height, max(bottom, int(np.ceil(ty2)) + 2)))
+            if any(abs(candidate[index] - box[index]) > max_extension for index in range(4)):
+                return None
+            left, top, right, bottom = candidate
+            changed = True
+        current = (left, top, right, bottom)
+        if not changed:
+            return None
+    return current if not _cuts_through_text(current, elements) else None
 
 
 def _suppress_duplicate_text(elements: list[dict[str, Any]]) -> int:

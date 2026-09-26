@@ -63,10 +63,12 @@ class TypographyLayoutRefiner:
         stats["pageAlignmentAdjustments"] = page_changes
         stats["textPositionAdjustments"] = int(stats["textPositionAdjustments"]) + page_changes
         for item in texts:
-            if _font_role(item) != "body_text":
-                continue
             raw = (item.get("metadata") or {}).get("rawOCRBBox")
             if isinstance(raw, list) and len(raw) == 4:
+                role = _font_role(item)
+                displacement = abs(float(item.get("x") or 0) - float(raw[0]))
+                if role != "body_text" and displacement <= max(12.0, (float(raw[3]) - float(raw[1])) * 0.5):
+                    continue
                 anchored_x = max(0.0, min(max(0.0, width - float(item["width"])), float(raw[0])))
                 if abs(float(item.get("x") or 0) - anchored_x) > 0.5:
                     item["x"] = anchored_x

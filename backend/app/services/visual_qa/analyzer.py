@@ -42,7 +42,7 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
         x, y = float(element.get("x", 0)), float(element.get("y", 0))
         w, h = max(1.0, float(element.get("width", 1))), max(1.0, float(element.get("height", 1)))
         style = element.get("style") or {}
-        if strategy in {"transparent_image", "local_image", "background_image"}:
+        if strategy in {"transparent_image", "local_image", "cutout_image", "background_image"}:
             image_path = _path_from_src(element.get("src"))
             if image_path and image_path.exists():
                 with Image.open(image_path) as source:

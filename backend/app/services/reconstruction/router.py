@@ -8,6 +8,7 @@ _STRATEGIES = {
     "native_shape",
     "transparent_image",
     "local_image",
+    "cutout_image",
     "background_image",
     "group",
 }
@@ -27,7 +28,7 @@ class ReconstructionRouter:
         if metadata.get("suppressed") or metadata.get("suppressRender") or metadata.get("ownedBy"):
             return "group"
         if metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset"):
-            return "local_image"
+            return "cutout_image" if metadata.get("reconstructionStrategy") == "cutout_image" else "local_image"
         if metadata.get("preserveAsImage") and element.get("src"):
             return "transparent_image" if metadata.get("transparent", True) else "local_image"
         if metadata.get("doNotVectorize") and element_type not in {"text", "background", "group"}:

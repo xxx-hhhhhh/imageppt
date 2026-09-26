@@ -20,6 +20,7 @@ from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 from app.services.reconstruction.router import ReconstructionRouter
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.quality_guard import preserve_bad_text_regions
+from app.services.reconstruction.layered_background import separate_foreground
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -105,7 +106,7 @@ class ReconstructionPipeline:
         record = self.store.get(project_id)
         ocr = OCRService(OCR_PROVIDER)
         inpainting = InpaintingService(INPAINT_PROVIDER)
-        inpainting.force_clean = False
+        inpainting.force_clean = conversion_mode in {"high_quality", "maximum"}
         inpainting.prefer_inpaint = conversion_mode in {"high_quality", "maximum"}
         slides: list[dict] = []
         warnings = list(ocr.warnings) + list(inpainting.warnings) + self.segmentation_warnings + self.scene_analyzer.layout_warnings + self.scene_analyzer.vlm_warnings
@@ -137,6 +138,10 @@ class ReconstructionPipeline:
             "pageAlignmentAdjustments": 0,
             "plannedModules": 0,
             "wholeImageRegions": 0,
+            "cutoutImages": 0,
+            "nativeShapesPlanned": 0,
+            "backgroundSeparatedRegions": 0,
+            "textFallbackCutouts": 0,
             "plannerSuppressedElements": 0,
             "plannerDuplicateTexts": 0,
             "plannerSnappedRegions": 0,
@@ -200,7 +205,7 @@ class ReconstructionPipeline:
             if conversion_mode in {"high_quality", "maximum"}:
                 for item in scene_refined.get("elements", []):
                     metadata = item.setdefault("metadata", {})
-                    if item.get("type") not in {"text", "background"} and not metadata.get("preserveWholeAsset"):
+                    if item.get("type") not in {"text", "background"} and not metadata.get("preserveWholeAsset") and not (metadata.get("reconstructionStrategySource") == "planner" and metadata.get("reconstructionStrategy") == "native_shape"):
                         metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "source_background", "reconstructionStrategySource": "background-ownership"})
             self.reconstruction_router.apply(scene_refined.get("elements", []))
             routing = self.scene_analyzer.vision_routing
@@ -218,6 +223,7 @@ class ReconstructionPipeline:
             )
             layout = self._apply_refined_scene(layout, scene_refined)
             layout, typography_stats = typography_layout_refiner.refine(layout)
+            reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
@@ -319,6 +325,7 @@ class ReconstructionPipeline:
                     shutil.copytree(source_dir, page_archive / directory, dirs_exist_ok=True)
             warnings.extend(scene_warnings)
             reconstruction_stats["editableTextboxes"] += sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
+            reconstruction_stats["textFallbackCutouts"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("sourceTextFallback"))
             self.store.save_slide(project_id, page_index, layout)
             slides.append(layout)
         if slides:
@@ -354,6 +361,10 @@ class ReconstructionPipeline:
                 "pageAlignmentAdjustments": reconstruction_stats["pageAlignmentAdjustments"],
                 "plannedModules": reconstruction_stats["plannedModules"],
                 "wholeImageRegions": reconstruction_stats["wholeImageRegions"],
+                "cutoutImages": reconstruction_stats["cutoutImages"],
+                "nativeShapesPlanned": reconstruction_stats["nativeShapesPlanned"],
+                "backgroundSeparatedRegions": reconstruction_stats["backgroundSeparatedRegions"],
+                "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
                 "plannerDuplicateTexts": reconstruction_stats["plannerDuplicateTexts"],
                 "plannerSnappedRegions": reconstruction_stats["plannerSnappedRegions"],

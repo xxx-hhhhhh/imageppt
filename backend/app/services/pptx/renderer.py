@@ -95,7 +95,9 @@ class PPTXRenderer:
         metadata = element.get("metadata") or {}
         if metadata.get("suppressed") or metadata.get("suppressRender") or metadata.get("ownedBy"):
             return
-        strategy = "local_image" if metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset") else metadata.get("reconstructionStrategy") or _default_strategy(kind)
+        strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
+        if (metadata.get("preserveWholeAsset") or metadata.get("wholeBadgeAsset")) and strategy not in {"cutout_image", "transparent_image"}:
+            strategy = "local_image"
         if strategy == "group":
             return
         x = Inches(element.get("x", 0) * sx)
@@ -103,7 +105,7 @@ class PPTXRenderer:
         width = Inches(max(0.01, element.get("width", 1) * sx))
         height = Inches(max(0.01, element.get("height", 1) * sy))
         style = element.get("style") or {}
-        if strategy in {"transparent_image", "local_image", "background_image"}:
+        if strategy in {"transparent_image", "local_image", "cutout_image", "background_image"}:
             image_path = _path_from_src(element.get("src"))
             if image_path and image_path.exists():
                 picture = slide.shapes.add_picture(str(image_path), x, y, width=width, height=height)

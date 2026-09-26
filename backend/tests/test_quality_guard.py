@@ -21,8 +21,11 @@ def test_preserves_source_text_when_rendered_line_moves(tmp_path: Path) -> None:
 
     assert result == {"preservedTextRegions": 1, "restoredModules": 0}
     assert layout["elements"][0]["metadata"]["suppressRender"] is True
+    assert layout["elements"][1]["metadata"]["sourceTextFallback"] is True
     restored = cv2.imread(str(background_path))
-    np.testing.assert_array_equal(restored[20:48, 18:100], source[20:48, 18:100])
+    np.testing.assert_array_equal(restored[20:48, 18:100], background[20:48, 18:100])
+    cutout = cv2.imread(str(tmp_path / "assets" / "fallback_1_text-1.png"))
+    np.testing.assert_array_equal(cutout, source[20:48, 18:100])
 
 
 def test_suppresses_duplicate_when_original_text_remains_under_overlay(tmp_path: Path) -> None:
@@ -37,3 +40,21 @@ def test_suppresses_duplicate_when_original_text_remains_under_overlay(tmp_path:
 
     assert result["preservedTextRegions"] == 1
     assert layout["elements"][0]["metadata"]["suppressRender"] is True
+    assert layout["elements"][1]["metadata"]["sourceTextFallback"] is True
+    assert np.mean(cv2.imread(str(background_path))[15:45, 8:90]) > np.mean(source[15:45, 8:90])
+
+
+def test_uncleaned_visual_asset_owns_text_without_an_extra_cutout(tmp_path: Path) -> None:
+    source = np.full((80, 140, 3), 255, dtype=np.uint8)
+    cv2.putText(source, "TEXT", (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    paths = [tmp_path / name for name in ("source.png", "background.png", "preview.png")]
+    for path in paths:
+        cv2.imwrite(str(path), source)
+    layout = {"elements": [
+        {"id": "line", "type": "text", "text": "TEXT", "metadata": {"rawOCRBBox": [12, 18, 94, 48]}},
+        {"id": "asset", "type": "image", "x": 0, "y": 0, "width": 110, "height": 60, "metadata": {"preserveWholeAsset": True, "textCleaned": False}},
+    ]}
+    result = preserve_bad_text_regions(*paths, layout, tmp_path / "assets", 1)
+    assert result["preservedTextRegions"] == 1
+    assert len(layout["elements"]) == 2
+    assert layout["elements"][0]["metadata"]["ownedBy"] == "asset"

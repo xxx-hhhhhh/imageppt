@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 ReconstructionStrategy = Literal[
     "editable_text",
     "native_shape",
+    "cutout_image",
     "transparent_image",
     "local_image",
     "background_image",
@@ -46,8 +47,8 @@ class QwenPlanModule(BaseModel):
     moduleId: str | None = None
     role: str = "component"
     bbox: QwenPlanBox
-    strategy: Literal["editable", "whole_image", "hybrid", "ignore"] = "editable"
-    reconstructionStrategy: Literal["editable_text", "native_shape", "whole_image", "mixed_component", "ignore"] | None = None
+    strategy: Literal["editable", "whole_image", "hybrid", "editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"] = "editable"
+    reconstructionStrategy: Literal["editable_text", "native_shape", "cutout_image", "mixed_component", "background", "whole_image", "ignore"] | None = None
     visualComplexity: float = Field(default=0.5, ge=0, le=1)
     editablePriority: float = Field(default=0.5, ge=0, le=1)
     preserveWhole: bool = False
@@ -361,6 +362,7 @@ def _normalize_strategy(value: Any, path: str, diagnostics: dict[str, Any]) -> s
         "transparent_image": "transparent_image",
         "transparent": "transparent_image",
         "local_image": "local_image",
+        "cutout_image": "cutout_image",
         "image": "local_image",
         "background_image": "background_image",
         "background": "background_image",
