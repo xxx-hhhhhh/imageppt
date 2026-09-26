@@ -21,7 +21,10 @@ def foreground_color(crop: np.ndarray) -> str:
     border = np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]], axis=0).astype(np.float32)
     background = np.median(border, axis=0)
     distance = np.linalg.norm(pixels - background, axis=1)
-    selected = pixels[distance >= max(12.0, float(np.percentile(distance, 70)))]
+    # Antialiased glyph edges are far more numerous than the opaque strokes.
+    # Use the strongest foreground pixels so editable text does not inherit a
+    # washed-out gray from dark source lettering.
+    selected = pixels[distance >= max(12.0, float(np.percentile(distance, 90)))]
     if len(selected) < 3:
         selected = pixels
     bgr = np.median(selected, axis=0).astype(int).tolist()

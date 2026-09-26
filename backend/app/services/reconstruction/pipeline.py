@@ -239,7 +239,7 @@ class ReconstructionPipeline:
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
             best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < (0.93 if conversion_mode == "maximum" else 0.85):
+            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < 0.85:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
