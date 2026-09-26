@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { Canvas, Ellipse, FabricImage, Line, Rect, Textbox } from 'fabric';
 import type { LayoutElement, LayoutJSON } from '../types/layout';
@@ -28,6 +28,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
   const wrapper = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const fabricRef = useRef<Canvas | null>(null);
+  const [zoom, setZoom] = useState(1);
 
   useEffect(() => {
     if (!canvasElement.current || !wrapper.current || !page) return;
@@ -36,11 +37,12 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
     const availableWidth = Math.max(480, wrapper.current.clientWidth - 24);
     const availableHeight = Math.max(340, wrapper.current.clientHeight - 24);
     const zoom = Math.min(availableWidth / page.slide.width, availableHeight / page.slide.height, 1);
+    setZoom(zoom);
     fabricCanvas.setDimensions({ width: page.slide.width, height: page.slide.height });
     fabricCanvas.setZoom(1);
     if (stageRef.current) {
       stageRef.current.style.transform = `scale(${zoom})`;
-      stageRef.current.style.transformOrigin = 'center center';
+      stageRef.current.style.transformOrigin = 'top left';
     }
 
     const emitSelection = (event: any) => onSelection((event.selected || []).map(objectId).filter(Boolean) as string[]);
@@ -74,9 +76,10 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
       const width = Math.max(480, wrapper.current.clientWidth - 24);
       const height = Math.max(340, wrapper.current.clientHeight - 24);
       const nextZoom = Math.min(width / page.slide.width, height / page.slide.height, 1);
+      setZoom(nextZoom);
       if (stageRef.current) {
         stageRef.current.style.transform = `scale(${nextZoom})`;
-        stageRef.current.style.transformOrigin = 'center center';
+        stageRef.current.style.transformOrigin = 'top left';
       }
       fabricCanvas.renderAll();
     };
@@ -89,7 +92,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
     };
   }, [page, onChange, onSelection]);
 
-  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div>;
+  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-viewport" style={{ width: (page?.slide.width || 1) * zoom, height: (page?.slide.height || 1) * zoom }}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div></div>;
 }
 
 function VisualElement({ element, selected, onSelect, onChange, page }: { element: LayoutElement; selected: boolean; onSelect: (ids: string[]) => void; onChange: (layout: LayoutJSON) => void; page: LayoutJSON }) {
