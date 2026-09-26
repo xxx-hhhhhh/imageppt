@@ -9,6 +9,7 @@ from app.services.inpainting.provider import create_inpainting_provider
 from app.services.ocr.provider import OCRResult
 from app.services.background.strategy import reclean_background as reclean_with_strategy
 from app.services.background.strategy import restore_background as restore_with_strategy
+from app.services.inpainting.qwen_image_edit import repair_complex_text
 
 
 class InpaintingService:
@@ -18,6 +19,7 @@ class InpaintingService:
         self.last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
         self.force_clean = False
         self.prefer_inpaint = False
+        self.ai_repaired_regions = 0
 
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
@@ -37,6 +39,8 @@ class InpaintingService:
 
     def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
         restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions, allow_complex_text_preservation=not self.force_clean, prefer_inpaint=self.prefer_inpaint)
+        if self.prefer_inpaint:
+            self.ai_repaired_regions = repair_complex_text(image_path, output_path, self.last_strategies)
         self.last_stats = {
             "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
             "ghostingRegionsRecleaned": sum(1 for item in self.last_strategies if item.get("ghostingRecleaned")),

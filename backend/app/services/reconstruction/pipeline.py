@@ -122,6 +122,7 @@ class ReconstructionPipeline:
             "singleLinePreserved": 0,
             "ghostingRegionsDetected": 0,
             "ghostingRegionsRecleaned": 0,
+            "aiBackgroundRepairs": 0,
             "wholeBadgeAssets": 0,
             "duplicateElementsRemoved": 0,
             "badgeForegroundTransparentExtractions": 0,
@@ -190,6 +191,7 @@ class ReconstructionPipeline:
                     box = item["bbox"]
                     preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
             inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
+            reconstruction_stats["aiBackgroundRepairs"] += int(getattr(inpainting, "ai_repaired_regions", 0))
             _apply_preserved_text_ownership(layout, inpainting.last_strategies)
             for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
@@ -337,6 +339,7 @@ class ReconstructionPipeline:
                 "singleLinePreserved": reconstruction_stats["singleLinePreserved"],
                 "ghostingRegionsDetected": reconstruction_stats["ghostingRegionsDetected"],
                 "ghostingRegionsRecleaned": reconstruction_stats["ghostingRegionsRecleaned"],
+                "aiBackgroundRepairs": reconstruction_stats["aiBackgroundRepairs"],
                 "wholeBadgeAssets": reconstruction_stats["wholeBadgeAssets"],
                 "duplicateElementsRemoved": reconstruction_stats["duplicateElementsRemoved"],
                 "badgeForegroundTransparentExtractions": reconstruction_stats["badgeForegroundTransparentExtractions"],
