@@ -34,7 +34,7 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
     for element in sorted(layout.get("elements", []), key=lambda item: item.get("zIndex", 0)):
         kind = element.get("type")
         metadata = element.get("metadata") or {}
-        if metadata.get("suppressRender") or metadata.get("ownedBy"):
+        if metadata.get("suppressed") or metadata.get("suppressRender") or metadata.get("ownedBy"):
             continue
         strategy = metadata.get("reconstructionStrategy") or _default_strategy(kind)
         if strategy == "group":

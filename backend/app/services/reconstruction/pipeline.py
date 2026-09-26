@@ -21,6 +21,7 @@ from app.services.reconstruction.router import ReconstructionRouter
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.quality_guard import preserve_bad_text_regions
 from app.services.reconstruction.layered_background import separate_foreground
+from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -151,6 +152,9 @@ class ReconstructionPipeline:
             "suppressedDuplicates": 0,
             "visualTextFallbacks": 0,
             "restoredModules": 0,
+            "detectedTextCount": 0,
+            "editableTextCount": 0,
+            "nonEditableTextCount": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
@@ -223,6 +227,8 @@ class ReconstructionPipeline:
             )
             layout = self._apply_refined_scene(layout, scene_refined)
             layout, typography_stats = typography_layout_refiner.refine(layout)
+            fit_text_to_ocr_lines(layout)
+            suppress_text_like_assets(layout)
             reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
@@ -240,7 +246,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"]:
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in layout.get("elements", [])):
                     render_preview(background_path, layout, preview_path)
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
@@ -249,7 +255,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"]:
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in layout.get("elements", [])):
                     render_preview(background_path, layout, preview_path)
                     best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             stagnation = 0
@@ -271,6 +277,8 @@ class ReconstructionPipeline:
                     reconstruction_stats["criticAdjustmentsApplied"] += applied
                     layout = self._apply_refined_scene(layout, scene_refined)
                     layout, _ = typography_layout_refiner.refine(layout)
+                    fit_text_to_ocr_lines(layout)
+                    suppress_text_like_assets(layout)
                     render_preview(background_path, layout, preview_path)
                     candidate_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
                     improvement = float(candidate_score.get("overall", 0)) - float(best_score.get("overall", 0))
@@ -293,6 +301,17 @@ class ReconstructionPipeline:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
                 self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            text_coverage = measure_text_coverage(layout, len(regions))
+            for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
+                reconstruction_stats[key] += int(text_coverage[key])
+            score.update(text_coverage)
+            if conversion_mode in {"high_quality", "maximum"} and text_coverage["editableTextCoverage"] < 0.8:
+                revision_status = "stagnated"
+                score["coverageGate"] = "review_required"
+                warnings.append("普通文字可编辑覆盖率偏低，需复核未转换的文字。")
+            if conversion_mode in {"high_quality", "maximum"} and float(score.get("overall", 0)) < 0.85:
+                revision_status = "stagnated"
+                score["visualGate"] = "review_required"
             if page_index > 1 and (page_output / "difference.png").is_file():
                 shutil.copy2(page_output / "difference.png", page_output / f"difference_{page_index}.png")
             score["revisionStatus"] = revision_status
@@ -371,6 +390,10 @@ class ReconstructionPipeline:
                 "plannerCvVisualRegions": reconstruction_stats["plannerCvVisualRegions"],
                 "mixedModules": reconstruction_stats["mixedModules"],
                 "editableTextboxes": reconstruction_stats["editableTextboxes"],
+                "detectedTextCount": reconstruction_stats["detectedTextCount"],
+                "editableTextCount": reconstruction_stats["editableTextCount"],
+                "nonEditableTextCount": reconstruction_stats["nonEditableTextCount"],
+                "editableTextCoverage": round(reconstruction_stats["editableTextCount"] / reconstruction_stats["detectedTextCount"], 4) if reconstruction_stats["detectedTextCount"] else 1.0,
                 "suppressedDuplicates": reconstruction_stats["suppressedDuplicates"],
                 "visualTextFallbacks": reconstruction_stats["visualTextFallbacks"],
                 "restoredModules": reconstruction_stats["restoredModules"],

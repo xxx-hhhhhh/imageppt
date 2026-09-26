@@ -8,7 +8,7 @@ import numpy as np
 
 
 def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_path: Path, layout: dict, asset_dir: Path, page: int, minimum_f1: float | None = None) -> dict[str, int]:
-    """Preserve a mismatched source line as an independently movable image.
+    """Keep OCR text editable when it is present in the rendered line region.
 
     The decision is recorded per element so the user can see why that line was
     preserved as an image. A whole cleaned module is restored together when
@@ -46,16 +46,18 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             metadata.update({"suppressRender": True, "sourceTextPreserved": True, "ownedBy": owner, "fallbackReason": "source_asset_owns_text"})
             preserved += 1
             continue
-        threshold = minimum_f1 if minimum_f1 is not None else (0.62 if item.get("role") in {"main_title", "section_title", "subtitle"} else 0.55)
-        if fidelity >= threshold and not source_retained:
-            continue
-        if asset_id:
-            bad_assets.add(str(asset_id))
-            continue
+        rendered = _rendered_text_present(source[y1:y2, x1:x2], background[y1:y2, x1:x2], preview[y1:y2, x1:x2])
+        metadata["renderedTextPresent"] = rendered
         if source_retained:
             mask = np.zeros(background.shape[:2], dtype=np.uint8)
             mask[y1:y2, x1:x2] = 255
             background = cv2.inpaint(background, mask, 4, cv2.INPAINT_TELEA)
+            metadata["sourceTextRecleaned"] = True
+        if rendered:
+            continue
+        if asset_id:
+            bad_assets.add(str(asset_id))
+            continue
         asset_dir.mkdir(parents=True, exist_ok=True)
         cutout_id = f"fallback_{page}_{item['id']}"
         cutout_path = asset_dir / f"{cutout_id}.png"
@@ -87,7 +89,7 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             if metadata.get("textCleanedFromAsset") == asset_id:
                 metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch"})
                 preserved += 1
-    if preserved:
+    if preserved or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in elements):
         cv2.imwrite(str(background_path), background)
     return {"preservedTextRegions": preserved, "restoredModules": restored_modules}
 
@@ -126,3 +128,19 @@ def _edge_f1(source: np.ndarray, preview: np.ndarray) -> float:
     precision = float(np.count_nonzero(preview_edges & source_near)) / max(1, np.count_nonzero(preview_edges))
     recall = float(np.count_nonzero(source_edges & preview_near)) / max(1, np.count_nonzero(source_edges))
     return 2 * precision * recall / max(1e-9, precision + recall)
+
+
+def _rendered_text_present(source: np.ndarray, background: np.ndarray, preview: np.ndarray) -> bool:
+    if background.size == 0:
+        return False
+    difference = cv2.absdiff(background, preview)
+    changed = np.max(difference, axis=2) > 12
+    if np.count_nonzero(changed) < max(3, int(changed.size * 0.003)):
+        return False
+    source_ink = np.max(cv2.absdiff(source, background), axis=2) > 12
+    if np.count_nonzero(source_ink) < 3:
+        return True
+    source_y, source_x = np.where(source_ink)
+    render_y, render_x = np.where(changed)
+    return (abs(float(np.median(source_x)) - float(np.median(render_x))) <= max(4, changed.shape[1] * 0.18)
+            and abs(float(np.median(source_y)) - float(np.median(render_y))) <= max(3, changed.shape[0] * 0.25))
