@@ -34,7 +34,10 @@ def repair_complex_text(source_path: Path, background_path: Path, strategies: li
             break
         if not strategy.get("willReconstruct") or strategy.get("category") not in {"complex", "texture"}:
             continue
-        box = strategy.get("cleanBBox") or strategy.get("bbox")
+        # The model can invent glyph fragments just outside its target. Keep
+        # those pixels out of the page even when the traditional cleaner used
+        # a larger working box.
+        box = strategy.get("bbox")
         if not box or len(box) != 4:
             continue
         x1, y1, x2, y2 = (int(value) for value in box)

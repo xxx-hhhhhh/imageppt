@@ -46,11 +46,13 @@ def test_complex_text_repair_is_bounded_to_ocr_box(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qwen_image_edit.requests, "post", post)
     monkeypatch.setattr(qwen_image_edit.requests, "get", get)
-    strategies = [{"bbox": [180, 215, 310, 275], "cleanBBox": [180, 215, 310, 275], "category": "complex", "willReconstruct": True}]
+    strategies = [{"bbox": [180, 215, 310, 275], "cleanBBox": [175, 210, 315, 280], "category": "complex", "willReconstruct": True}]
     assert qwen_image_edit.repair_complex_text(source, background, strategies) == 1
     result = cv2.imread(str(background))
     assert np.array_equal(result[:215], image[:215])
     assert np.array_equal(result[275:], image[275:])
+    assert np.array_equal(result[:, :180], image[:, :180])
+    assert np.array_equal(result[:, 310:], image[:, 310:])
     assert np.mean(result[215:275, 180:310]) > np.mean(image[215:275, 180:310])
     assert strategies[0]["aiRepair"] == "accepted"
     assert calls == ["qwen-image-edit-plus"]
