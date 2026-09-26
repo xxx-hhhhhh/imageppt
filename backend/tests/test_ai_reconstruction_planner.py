@@ -42,6 +42,29 @@ def test_plan_accepts_layered_module_strategies() -> None:
     assert [item["reconstructionStrategy"] for item in plan["modules"]] == [item["reconstructionStrategy"] for item in modules]
 
 
+def test_detected_visual_outside_ai_plan_becomes_editable_image_asset(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    with Image.new("RGB", (400, 300), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((30, 70, 170, 200), fill="#174aa3")
+        draw.text((45, 90), "MAP", fill="white")
+        image.save(source)
+    scene = {
+        "canvas": {"width": 400, "height": 300},
+        "vision": {"aiUsed": False},
+        "regions": [{"id": "map-region", "type": "image", "bbox": {"left": 30, "top": 70, "width": 140, "height": 130}, "confidence": 0.9}],
+        "elements": [_element("map-label", "text", (45, 90, 45, 15), "MAP")],
+    }
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1)
+    assert stats["wholeImageRegions"] == 1
+    asset = next(item for item in scene["elements"] if item.get("id", "").startswith("planner_page_1_region_"))
+    assert asset["type"] == "image"
+    assert asset["metadata"]["textCleaned"] is True
+    assert scene["elements"][0]["metadata"]["textCleanedFromAsset"] == asset["id"]
+    with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as crop:
+        assert crop.size == (140, 130)
+
+
 def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: Path, monkeypatch) -> None:
     source_path = tmp_path / "infographic.png"
     with Image.new("RGB", (400, 300), "white") as image:

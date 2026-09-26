@@ -27,13 +27,14 @@ class AIReconstructionPlanner:
         vision = scene.get("vision") or {}
         original_plan = vision.get("reconstructionPlan") or {}
         modules = (original_plan.get("modules") or []) if vision.get("aiUsed") else []
-        if not isinstance(modules, list) or not modules:
-            return stats
+        if not isinstance(modules, list):
+            modules = []
 
         canvas = scene.get("canvas") or {}
         width, height = int(canvas.get("width") or 0), int(canvas.get("height") or 0)
         if width < 32 or height < 32:
             return stats
+        modules = list(modules) + _unplanned_visual_modules(scene.get("regions") or [], scene.get("elements") or [], width, height)
         elements = scene.setdefault("elements", [])
         by_id = {str(item.get("id")): item for item in elements}
         planned_assets: list[dict[str, Any]] = []
@@ -42,7 +43,7 @@ class AIReconstructionPlanner:
 
         with Image.open(source_path) as source:
             source.load()
-            for module in modules[:40]:
+            for module in modules[:80]:
                 if not isinstance(module, dict) or float(module.get("confidence") or 0) < 0.65:
                     continue
                 requested = module.get("reconstructionStrategy") or module.get("strategy")
@@ -84,7 +85,7 @@ class AIReconstructionPlanner:
                 if strategy == "cutout_image":
                     boxes = [module_box] if requested == "whole_image" or not (preserve_boxes or cv_boxes) else preserve_boxes
                 elif strategy == "mixed_component":
-                    boxes = preserve_boxes
+                    boxes = preserve_boxes if preserve_boxes or cv_boxes else [module_box]
                 else:
                     boxes = []
                 for box in boxes + cv_boxes:
@@ -97,7 +98,7 @@ class AIReconstructionPlanner:
                     # Source pixels can have only one image owner. Even a narrow
                     # overlap may erase a line in one asset while the other asset
                     # still owns its editable textbox.
-                    if len(planned_assets) >= 24 or any(_overlap_min(box, prior) >= 0.05 for prior in used_boxes):
+                    if len(planned_assets) >= 40 or any(_overlap_min(box, prior) >= 0.05 for prior in used_boxes):
                         continue
                     if any(
                         item.get("type") == "text" and item.get("role") == "main_title"
@@ -122,9 +123,9 @@ class AIReconstructionPlanner:
                         item for item in covered
                         if item.get("type") == "text" and item.get("id") not in ignore_ids
                         and item.get("role") not in {"logo", "decorative_text"}
+                        and float(item.get("confidence") or 0) >= 0.5
                         and str(item.get("text") or "").strip()
                     ]
-                    source.crop(box).convert("RGB").save(module_dir / f"{asset_id}.png", format="PNG")
                     crop = np.asarray(source.crop(box).convert("RGB"))[:, :, ::-1].copy()
                     mask = np.zeros(crop.shape[:2], dtype=np.uint8)
                     for text_item in editable_text:
@@ -144,7 +145,10 @@ class AIReconstructionPlanner:
                             pad_y = max(2, round((ty2 - ty1) * 0.20))
                             cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
+                    if text_area_ratio > 0.20 and (module_id.startswith("detected_visual_") or strategy == "mixed_component"):
+                        continue
                     safe_to_clean = text_area_ratio <= 0.20
+                    source.crop(box).convert("RGB").save(module_dir / f"{asset_id}.png", format="PNG")
                     if np.any(mask) and safe_to_clean:
                         crop = _clean_text_from_asset(crop, mask)
                     cv2.imwrite(str(asset_path), crop)
@@ -293,6 +297,45 @@ def _cv_visual_boxes(regions: list[dict[str, Any]], module_box: tuple[int, int, 
             continue
         boxes.append(box)
     return boxes[:12]
+
+
+def _unplanned_visual_modules(regions: list[dict[str, Any]], elements: list[dict[str, Any]], width: int, height: int) -> list[dict[str, Any]]:
+    """Promote detected photos, charts and figures outside AI module bounds."""
+    modules = []
+    for index, region in enumerate(regions):
+        kind = region.get("type")
+        confidence = float(region.get("confidence") or 0)
+        if kind not in {"image", "figure", "chart", "table"} or confidence < (0.55 if kind == "image" else 0.60):
+            continue
+        raw = region.get("bbox") or {}
+        try:
+            x, y = float(raw["left"]), float(raw["top"])
+            w, h = float(raw["width"]), float(raw["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for item in elements:
+            if item.get("type") != "text" or float(item.get("confidence") or 0) < 0.5:
+                continue
+            text_box = item.get("bbox") or {}
+            tx, ty = float(text_box.get("left") or 0), float(text_box.get("top") or 0)
+            tw = float(text_box.get("width") or 0)
+            if ty > y + h * 0.55 and ty < y + h and max(0, min(x + w, tx + tw) - max(x, tx)) > w * 0.65:
+                h = min(h, ty - y - 2)
+        if w < 24 or h < 24 or w * h < width * height * 0.00025 or w * h > width * height * 0.35:
+            continue
+        bbox = {"left": max(0, x / width), "top": max(0, y / height), "width": min(w, width - x) / width, "height": min(h, height - y) / height}
+        if bbox["width"] <= 0 or bbox["height"] <= 0:
+            continue
+        modules.append({
+            "id": f"detected_visual_{index + 1}",
+            "role": kind,
+            "bbox": bbox,
+            "confidence": confidence,
+            "reconstructionStrategy": "cutout_image",
+            "preserveRegions": [bbox],
+            "editablePriority": "normal",
+        })
+    return modules[:32]
 
 
 def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
