@@ -35,10 +35,11 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             continue
         fidelity = _edge_f1(source[y1:y2, x1:x2], preview[y1:y2, x1:x2])
         metadata["visualTextF1"] = round(fidelity, 4)
-        threshold = minimum_f1 if minimum_f1 is not None else (0.62 if item.get("role") in {"main_title", "section_title", "subtitle"} else 0.55)
-        if fidelity >= threshold:
-            continue
         asset_id = metadata.get("textCleanedFromAsset")
+        source_retained = not asset_id and float(np.mean(cv2.absdiff(source[y1:y2, x1:x2], background[y1:y2, x1:x2]))) < 3.0
+        threshold = minimum_f1 if minimum_f1 is not None else (0.62 if item.get("role") in {"main_title", "section_title", "subtitle"} else 0.55)
+        if fidelity >= threshold and not source_retained:
+            continue
         if asset_id:
             bad_assets.add(str(asset_id))
             continue

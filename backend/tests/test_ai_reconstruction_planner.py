@@ -7,13 +7,30 @@ from pptx import Presentation
 
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
-from app.services.vision.schemas import validate_json
+from app.services.vision.schemas import extract_json, validate_json
 from app.services.pptx import renderer as renderer_module
 
 
 def _element(element_id: str, kind: str, box: tuple[int, int, int, int], text: str = "", confidence: float = 0.9) -> dict:
     x, y, width, height = box
     return {"id": element_id, "type": kind, "bbox": {"left": x, "top": y, "width": width, "height": height}, "zIndex": 2, "text": text, "confidence": confidence, "style": {"fontSize": 18}, "metadata": {}}
+
+
+def test_qwen_plan_accepts_observed_array_boxes_and_missing_bracket() -> None:
+    raw = '{"modules":[{"moduleId":"panel","bbox":[0.1,0.2,0.5,0.7],"visualComplexity":"high","editablePriority":2,"ownership":"user","preserveRegions":[{"bbox":[0.2,0.3,0.4,0.6}]}]}'
+    payload = extract_json(raw)
+    plan = validate_json({"reconstructionPlan": payload}, "scene")["reconstructionPlan"]
+    assert len(plan["modules"]) == 1
+    panel = plan["modules"][0]
+    assert panel["bbox"] == {"left": 0.1, "top": 0.2, "width": 0.4, "height": 0.5}
+    assert panel["visualComplexity"] == 0.8
+    assert panel["ownership"] == {"owner": "user"}
+    assert panel["preserveRegions"][0]["width"] == 0.2
+
+
+def test_qwen_scene_repairs_malformed_property_separator() -> None:
+    payload = extract_json('{"page":{"role":"slide"}, "modules":[{"id":"one" "bbox":{"left":0.1,"top":0.1,"width":0.3,"height":0.3}}]}')
+    assert payload["modules"][0]["id"] == "one"
 
 
 def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: Path, monkeypatch) -> None:
@@ -55,6 +72,9 @@ def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: P
         for item in scene["elements"] if not item["id"].startswith("planner_")
     ]}
     layout = ReconstructionPipeline._apply_refined_scene(None, base_layout, scene)
+    layout_by_id = {item["id"]: item for item in layout["elements"]}
+    assert layout_by_id["chart_label"]["metadata"]["textCleanedFromAsset"] == asset["id"]
+    assert layout_by_id[asset["id"]]["metadata"]["textCleaned"] is True
     monkeypatch.setattr(renderer_module, "OUTPUTS_DIR", tmp_path)
     (tmp_path / "test-project" / "assets").mkdir(parents=True)
     (tmp_path / "assets" / f"{asset['id']}.png").replace(tmp_path / "test-project" / "assets" / f"{asset['id']}.png")
@@ -80,6 +100,38 @@ def test_invalid_plan_is_ignored_and_local_mode_does_not_apply_it(tmp_path: Path
     stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "local", 1)
     assert stats["wholeImageRegions"] == 0
     assert scene["elements"][0]["text"] == "Keep me"
+
+
+def test_overlapping_whole_modules_do_not_claim_the_same_text(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    scene = {
+        "canvas": {"width": 400, "height": 300},
+        "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+            {"id": "upper", "role": "card", "strategy": "whole_image", "bbox": {"left": 0.1, "top": 0.1, "width": 0.7, "height": 0.5}, "confidence": 0.9},
+            {"id": "lower", "role": "card", "strategy": "whole_image", "bbox": {"left": 0.1, "top": 0.55, "width": 0.7, "height": 0.35}, "confidence": 0.9},
+        ]}},
+        "elements": [_element("shared_text", "text", (70, 140, 180, 30), "Shared line")],
+    }
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "overlap", 1)
+    assert stats["wholeImageRegions"] == 1
+    assert len([item for item in scene["elements"] if item["id"].startswith("planner_page_")]) == 1
+
+
+def test_image_crop_that_slices_a_text_line_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    scene = {
+        "canvas": {"width": 400, "height": 300},
+        "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [{
+            "id": "visual", "role": "mixed", "strategy": "whole_image",
+            "bbox": {"left": 0.1, "top": 0.2, "width": 0.4, "height": 0.4}, "confidence": 0.9,
+        }]}},
+        "elements": [_element("line", "text", (175, 100, 130, 25), "Important line")],
+    }
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "cut", 1)
+    assert stats["wholeImageRegions"] == 0
+    assert not scene["elements"][0]["metadata"].get("suppressed")
 
 
 def test_hybrid_chart_snaps_to_cv_figure_and_ignores_hallucinated_members(tmp_path: Path) -> None:

@@ -16,8 +16,11 @@ def test_runtime_settings_stay_outside_project_and_mask_key(tmp_path, monkeypatc
     assert path.exists()
 
 
-def test_qwen_cloud_workspace_key_uses_its_own_official_endpoint(tmp_path, monkeypatch):
+def test_qwen_endpoint_selection_is_explicit_even_with_workspace_key(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_settings, "_settings_path", lambda: tmp_path / "settings.json")
-    saved = runtime_settings.save_vision_settings({"api_key": "sk-ws-example-placeholder", "base_url": runtime_settings.QWEN_BASE_URL})
-    assert saved.base_url == runtime_settings.QWEN_CLOUD_BASE_URL
+    key = "sk-ws-example-placeholder"
+    china = runtime_settings.save_vision_settings({"api_key": key, "base_url": runtime_settings.QWEN_BASE_URL})
+    assert china.base_url == runtime_settings.QWEN_BASE_URL
+    international = runtime_settings.save_vision_settings({"base_url": runtime_settings.QWEN_CLOUD_BASE_URL})
+    assert international.base_url == runtime_settings.QWEN_CLOUD_BASE_URL
     assert runtime_settings.load_vision_settings().base_url == runtime_settings.QWEN_CLOUD_BASE_URL

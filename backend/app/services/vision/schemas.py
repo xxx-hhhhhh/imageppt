@@ -96,7 +96,22 @@ def extract_json(value: str | dict[str, Any]) -> dict[str, Any]:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("No JSON object found in vision response")
-    return json.loads(text[start:end + 1])
+    candidate = text[start:end + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        # Qwen occasionally omits the closing bracket in a four-number bbox,
+        # while the rest of its plan is valid. Repair only this narrow case.
+        repaired = re.sub(r'("bbox"\s*:\s*\[[^\[\]{}]*)(?=\})', r'\1]', candidate)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            from json_repair import loads as repair_json
+
+            payload = repair_json(candidate)
+            if not isinstance(payload, dict):
+                raise ValueError("Vision response could not be repaired into a JSON object")
+            return payload
 
 
 def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -133,6 +148,17 @@ def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = N
         try:
             candidate = dict(module)
             candidate.setdefault("id", candidate.get("moduleId"))
+            candidate["bbox"] = _normalize_plan_box(candidate.get("bbox"))
+            candidate["preserveRegions"] = [
+                _normalize_plan_box(region.get("bbox", region) if isinstance(region, dict) else region)
+                for region in candidate.get("preserveRegions", []) if isinstance(region, (dict, list, tuple))
+            ]
+            candidate["visualComplexity"] = _normalize_plan_score(candidate.get("visualComplexity"), 0.5)
+            candidate["editablePriority"] = _normalize_plan_score(candidate.get("editablePriority"), 0.5)
+            if isinstance(candidate.get("ownership"), str):
+                candidate["ownership"] = {"owner": candidate["ownership"]}
+            elif not isinstance(candidate.get("ownership", {}), dict):
+                candidate["ownership"] = {}
             modules.append(QwenPlanModule.model_validate(candidate).model_dump(mode="json"))
         except (TypeError, ValueError, ValidationError):
             _warning(diag, f"reconstructionPlan.modules[{index}]: invalid module ignored")
@@ -140,6 +166,29 @@ def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = N
     normalized["reconstructionPlan"] = {**plan_fields, "modules": modules}
     diag["normalizedPayload"] = normalized
     return normalized
+
+
+def _normalize_plan_box(value: Any) -> dict[str, float]:
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        left, top, right, bottom = (float(item) for item in value)
+        return {"left": left, "top": top, "width": round(right - left, 6), "height": round(bottom - top, 6)}
+    if isinstance(value, dict):
+        return value
+    raise ValueError("invalid plan bbox")
+
+
+def _normalize_plan_score(value: Any, default: float) -> float:
+    if isinstance(value, str):
+        labels = {"low": 0.2, "medium": 0.5, "high": 0.8}
+        if value.lower() in labels:
+            return labels[value.lower()]
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number > 1 and number <= 3:
+        number /= 3
+    return max(0.0, min(1.0, number))
 
 
 def normalize_scene_element(element: Any, diagnostics: dict[str, Any] | None = None, path: str = "element") -> dict[str, Any]:

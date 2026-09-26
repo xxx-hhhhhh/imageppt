@@ -26,7 +26,7 @@ class InpaintingService:
         mask = np.zeros_like(image, dtype=np.uint8)
         for region in regions:
             x1, y1, x2, y2 = region.bbox
-            pad_x = max(2, int((x2 - x1) * 0.06))
+            pad_x = min(12, max(2, int((x2 - x1) * 0.06)))
             pad_y = max(2, int((y2 - y1) * 0.25))
             points = [max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y)), min(image.shape[1] - 1, int(x2 + pad_x)), min(image.shape[0] - 1, int(y2 + pad_y))]
             cv2.rectangle(mask, (points[0], points[1]), (points[2], points[3]), 255, -1)

@@ -34,3 +34,16 @@ def test_preserved_asset_text_is_not_inpainted(tmp_path):
     _, strategies = restore_background(source, [OCRResult("A", [40, 25, 62, 50], 0.9, {})], output, [[30, 15, 75, 60]])
     assert strategies[0]["sourceContentPreserved"] is True
     assert np.array_equal(cv2.imread(str(source)), cv2.imread(str(output)))
+
+
+def test_long_text_removal_keeps_adjacent_icon(tmp_path):
+    image = np.full((120, 800, 3), 245, dtype=np.uint8)
+    cv2.rectangle(image, (40, 45), (85, 85), (0, 0, 220), -1)
+    cv2.putText(image, "long text", (100, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (15, 15, 15), 2)
+    source = tmp_path / "source.png"
+    output = tmp_path / "output.png"
+    cv2.imwrite(str(source), image)
+    _, strategies = restore_background(source, [OCRResult("long text", [100, 50, 700, 80], 0.9, {})], output)
+    cleaned = cv2.imread(str(output))
+    assert strategies[0]["cleanBBox"][0] >= 88
+    assert np.array_equal(cleaned[45:86, 40:86], image[45:86, 40:86])

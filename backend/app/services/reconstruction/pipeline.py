@@ -85,7 +85,7 @@ class ReconstructionPipeline:
                     item[field] = copy.deepcopy(scene_item[field])
             scene_metadata = scene_item.get("metadata") or {}
             metadata = dict(item.get("metadata") or {})
-            for field in ("reconstructionStrategy", "visionSemanticType", "doNotVectorize", "visualComplexity", "visionMatched", "reconstructionStrategySource", "suppressed", "suppressRender", "ownedBy", "plannerModuleId", "preserveWholeAsset"):
+            for field in ("reconstructionStrategy", "visionSemanticType", "doNotVectorize", "visualComplexity", "visionMatched", "reconstructionStrategySource", "suppressed", "suppressRender", "ownedBy", "plannerModuleId", "preserveWholeAsset", "textCleanedFromAsset", "textCleaned", "editableTextIds", "fallbackReason"):
                 if field in scene_metadata:
                     metadata[field] = copy.deepcopy(scene_metadata[field])
             metadata["sceneId"] = scene_item["id"]
@@ -168,6 +168,8 @@ class ReconstructionPipeline:
             ]
             segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
+            self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", self.scene_analyzer.vision_routing)
             if conversion_mode in {"high_quality", "maximum"} and not allow_fallback and not self.scene_analyzer.vision_routing.get("aiUsed"):
                 attempts = self.scene_analyzer.vision_routing.get("attempts") or []
                 reason = str(attempts[-1].get("error") or "Qwen 视觉规划不可用") if attempts else "Qwen 视觉规划不可用"
@@ -235,7 +237,7 @@ class ReconstructionPipeline:
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
             best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < 0.85:
+            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < (0.93 if conversion_mode == "maximum" else 0.85):
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]

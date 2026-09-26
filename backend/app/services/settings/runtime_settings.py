@@ -205,10 +205,8 @@ def normalize_qwen_base_url(value: str | None, api_key: str = "") -> str:
     for suffix in ("/chat/completions", "/models"):
         if candidate.lower().endswith(suffix):
             candidate = candidate[: -len(suffix)].rstrip("/")
-    if api_key.startswith("sk-ws-") and candidate == QWEN_BASE_URL:
-        return QWEN_CLOUD_BASE_URL
     if candidate not in {QWEN_BASE_URL, QWEN_CLOUD_BASE_URL}:
-        return QWEN_CLOUD_BASE_URL if api_key.startswith("sk-ws-") else QWEN_BASE_URL
+        return QWEN_BASE_URL
     return candidate
 
 

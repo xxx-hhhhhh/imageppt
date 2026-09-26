@@ -23,3 +23,17 @@ def test_preserves_source_text_when_rendered_line_moves(tmp_path: Path) -> None:
     assert layout["elements"][0]["metadata"]["suppressRender"] is True
     restored = cv2.imread(str(background_path))
     np.testing.assert_array_equal(restored[20:48, 18:100], source[20:48, 18:100])
+
+
+def test_suppresses_duplicate_when_original_text_remains_under_overlay(tmp_path: Path) -> None:
+    source = np.full((60, 140, 3), 255, dtype=np.uint8)
+    cv2.putText(source, "TEXT", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    source_path, background_path, preview_path = (tmp_path / name for name in ("source.png", "background.png", "preview.png"))
+    for path in (source_path, background_path, preview_path):
+        cv2.imwrite(str(path), source)
+    layout = {"elements": [{"id": "text-1", "type": "text", "text": "TEXT", "metadata": {"rawOCRBBox": [8, 15, 90, 45]}}]}
+
+    result = preserve_bad_text_regions(source_path, background_path, preview_path, layout, tmp_path / "assets", 1)
+
+    assert result["preservedTextRegions"] == 1
+    assert layout["elements"][0]["metadata"]["suppressRender"] is True

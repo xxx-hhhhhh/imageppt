@@ -57,13 +57,13 @@ def restore_background(
                 "cleanPasses": 0,
             })
             continue
-        _clean_region(result, clean_bbox, profile, force_inpaint=prefer_inpaint)
+        _clean_region(result, clean_bbox, profile, force_inpaint=prefer_inpaint and profile["category"] not in {"solid", "gradient"})
         strategy = {
             "text": region.text,
             "bbox": region.bbox,
             "cleanBBox": clean_bbox,
             "category": profile["category"],
-            "reconstructionStrategy": "full_bbox_inpaint" if prefer_inpaint else "native_fill" if profile["category"] == "solid" else "gradient_fill" if profile["category"] == "gradient" else "full_bbox_inpaint",
+            "reconstructionStrategy": "native_fill" if profile["category"] == "solid" else "gradient_fill" if profile["category"] == "gradient" else "full_bbox_inpaint",
             "willReconstruct": True,
             "sourceContentPreserved": False,
             "ghostingDetected": False,
@@ -120,7 +120,7 @@ def _expanded_bbox(bbox: list[float], neighbors: list[list[float]], shape: tuple
     height, width = shape[:2]
     x1, y1, x2, y2 = map(float, bbox)
     box_width, box_height = max(1.0, x2 - x1), max(1.0, y2 - y1)
-    pad_x = max(2.0, box_width * 0.05 * scale)
+    pad_x = min(12.0 * scale, max(2.0, box_width * 0.05 * scale))
     pad_y = max(2.0, box_height * 0.25 * scale)
     left, top, right, bottom = x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y
     for other in neighbors:

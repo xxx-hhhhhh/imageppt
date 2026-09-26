@@ -32,6 +32,40 @@ from .schemas import extract_json, validate_json
 logger = logging.getLogger(__name__)
 
 
+def _plan_covers_text(plan: dict[str, Any] | None, context: dict | None) -> bool:
+    modules = (plan or {}).get("modules") or []
+    if not modules:
+        return False
+    width, height = float((context or {}).get("width") or 0), float((context or {}).get("height") or 0)
+    if width <= 0 or height <= 0:
+        return True
+    centers = []
+    for item in (context or {}).get("candidate_elements", []):
+        if item.get("type") != "text" or not str(item.get("text") or "").strip():
+            continue
+        box = item.get("bbox") or {}
+        try:
+            centers.append(((float(box["left"]) + float(box["width"]) / 2) / width,
+                            (float(box["top"]) + float(box["height"]) / 2) / height))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(centers) < 3:
+        return True
+    covered = 0
+    for x, y in centers:
+        if any(_point_inside_plan_box(x, y, module.get("bbox") or {}) for module in modules):
+            covered += 1
+    return covered / len(centers) >= 0.65
+
+
+def _point_inside_plan_box(x: float, y: float, box: dict[str, Any]) -> bool:
+    try:
+        left, top = float(box["left"]), float(box["top"])
+        return left <= x <= left + float(box["width"]) and top <= y <= top + float(box["height"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 class QwenProvider(OpenAICompatibleVisionProvider):
     name = "qwen"
 
@@ -47,29 +81,37 @@ class QwenProvider(OpenAICompatibleVisionProvider):
         try:
             payload = extract_json(raw)
         except (TypeError, ValueError):
-            payload = extract_json(self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT))
+            repair_messages = [*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": SCENE_REPAIR_PROMPT}]
+            payload = extract_json(self._request(repair_messages))
         if "reconstructionPlan" in payload:
             payload = payload["reconstructionPlan"]
         plan = validate_json({"reconstructionPlan": payload}, "scene")["reconstructionPlan"]
         return plan
 
     def analyze_scene(self, image_path: Path, context: dict | None = None, mode: str = "standard") -> dict[str, Any]:
-        plan: dict[str, Any] | None = None
-        if (context or {}).get("candidate_elements"):
-            try:
-                plan = self.plan_reconstruction(image_path, context)
-            except Exception as exc:
-                logger.warning("qwen_reconstruction_plan_failed error_type=%s", type(exc).__name__)
+        scene: dict[str, Any] | None = None
         try:
             scene = super().analyze_scene(image_path, context, mode)
-        except Exception:
-            if not plan or not plan.get("modules"):
+        except Exception as exc:
+            logger.warning("qwen_scene_analysis_failed error_type=%s", type(exc).__name__)
+            if not (context or {}).get("candidate_elements"):
+                raise
+            plan = self.plan_reconstruction(image_path, context)
+            if not plan.get("modules"):
                 raise
             logger.warning("qwen_scene_analysis_failed_using_page_plan")
-            scene = {"provider": self.name, "model": self.model, "aiUsed": True, "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.5}
-        if plan and plan.get("modules"):
-            scene["reconstructionPlan"] = plan
+            scene = {"provider": self.name, "model": self.model, "aiUsed": True, "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.5, "reconstructionPlan": plan}
+        if not _plan_covers_text(scene.get("reconstructionPlan"), context) and (context or {}).get("candidate_elements"):
+            try:
+                replacement = self.plan_reconstruction(image_path, context)
+                if _plan_covers_text(replacement, context):
+                    scene["reconstructionPlan"] = replacement
+            except Exception as exc:
+                logger.warning("qwen_reconstruction_plan_failed error_type=%s", type(exc).__name__)
+        if mode == "high" and not _plan_covers_text(scene.get("reconstructionPlan"), context):
+            raise VisionProviderError("Qwen reconstruction plan does not cover the page text")
         return scene
+
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None, vision_settings: VisionSettings | None = None) -> None:
         runtime = vision_settings or load_vision_settings()

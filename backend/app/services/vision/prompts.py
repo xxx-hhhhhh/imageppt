@@ -28,12 +28,13 @@ SCENE_REPAIR_PROMPT = "上一条输出不是有效 JSON。只修复 JSON 格式�
 
 RECONSTRUCTION_PLAN_PROMPT = """你是信息图重建规划器。先观察整页，再决定哪些视觉区域必须整块保留。
 只返回 JSON，顶层包含 page、sections、textRegions、visualRegions、modules。每个模块包含 moduleId、id、role、bbox、reconstructionStrategy、visualComplexity、editablePriority、confidence、children、ownership、preserveWhole、memberIds、editableIds、ignoreIds、preserveRegions。
-所有 bbox 使用整页相对坐标 0..1。先列出页面一级模块（通常 3~8 个），再为每个模块选择 editable_text、native_shape、whole_image、mixed_component 或 ignore。
+modules 必须是顶层非空数组，只列页面一级模块（通常 3~8 个），不要把模块只放在 page.children。每个模块选择 editable_text、native_shape、whole_image、mixed_component 或 ignore。
+所有 bbox 和 preserveRegions 都必须是对象 {"left":0.1,"top":0.2,"width":0.3,"height":0.4}，数值为相对整页 0..1；禁止用数组和右下角坐标。visualComplexity、editablePriority、confidence 也必须是 0..1 数字，不能写 low、medium、high。
 含曲线图、卫星图层叠、多个小图拼接、小图表、复杂图标卡片的模块应选 mixed_component，并为每个复杂视觉部分给出 preserveRegions；不要把整张有大量普通文字的卡片当作一个 preserveRegion。整个卡片不可拆时选 whole_image。
 主标题、副标题、模块标题条和主要正文仍应单独留作 editable_text。不要把包含图表的整栏简单标成 editable_text，也不要把整页裁成一个图片。
 reconstructionStrategy 只能是 editable_text、native_shape、whole_image、mixed_component、ignore。复杂图表、照片、地图、插画、渐变、阴影、纹理和图标优先保留图片；简单几何形状才选 native_shape。preserveRegions 必须准确框住视觉图表本身；框内普通文字要从图片中擦除并单独成为 editable text。
 memberIds、editableIds、ignoreIds 只使用输入中真实存在的候选 id。不要忽略背景。不要输出精确文字内容，也不要生成像素坐标。
-输出必须是 JSON，不要 Markdown。"""
+输出必须是可直接解析的完整 JSON，不要 Markdown。不要省略数组的右方括号。"""
 
 CRITIC_PROMPT = """你是视觉重建质量检查器。
 图片1是原始参考图，图片2是程序重新生成的页面。不要评价设计好坏，只比较视觉差异。
@@ -43,9 +44,24 @@ CRITIC_PROMPT = """你是视觉重建质量检查器。
 
 
 def scene_user_prompt(ocr_elements: list[dict], context: dict | None = None) -> str:
-    context_without_ocr = {key: value for key, value in (context or {}).items() if key != "ocr_elements"}
-    payload = {"ocr_elements": ocr_elements, "context": context_without_ocr}
-    return "先输出 reconstructionPlan 的一级模块和复杂视觉区域，再输出元素语义。候选元素 id 可用于模块归属与忽略规则；不要改写 OCR/CV 的精确文字或坐标。\nPAGE_CONTEXT:\n" + json.dumps(payload, ensure_ascii=False)
+    context = context or {}
+    payload = {
+        "width": context.get("width"),
+        "height": context.get("height"),
+        "ocr_elements": [
+            {"id": item.get("id"), "text": str(item.get("text") or "")[:64], "bbox": item.get("bbox")}
+            for item in ocr_elements[:160]
+        ],
+        "candidate_elements": [
+            {"id": item.get("id"), "type": item.get("type"), "bbox": item.get("bbox"), "text": str(item.get("text") or "")[:40]}
+            for item in context.get("candidate_elements", [])[:160]
+        ],
+        "layout_regions": [
+            {"type": item.get("type"), "bbox": item.get("bbox"), "confidence": item.get("confidence")}
+            for item in context.get("layout_regions", [])[:80]
+        ],
+    }
+    return "先输出 reconstructionPlan 的一级模块和复杂视觉区域，再输出元素语义。候选元素 id 可用于模块归属与忽略规则；不要改写 OCR/CV 的精确文字或坐标。\nPAGE_CONTEXT:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def reconstruction_plan_user_prompt(context: dict | None = None) -> str:

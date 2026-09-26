@@ -143,7 +143,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         try:
             payload = extract_json(raw)
         except (TypeError, ValueError):
-            repaired = self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT)
+            repaired = self._request([*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": SCENE_REPAIR_PROMPT}])
             self.last_repaired_response = repaired
             self.repair_used = True
             payload = extract_json(repaired)
@@ -164,7 +164,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         try:
             payload = extract_json(raw)
         except (TypeError, ValueError):
-            repaired = self._request(messages, repair_prompt=SCENE_REPAIR_PROMPT)
+            repaired = self._request([*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": SCENE_REPAIR_PROMPT}])
             payload = extract_json(repaired)
         return {"provider": self.name, "model": self.model, **validate_json(payload, "critic")}
 

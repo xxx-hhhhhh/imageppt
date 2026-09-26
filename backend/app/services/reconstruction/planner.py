@@ -75,7 +75,10 @@ class AIReconstructionPlanner:
                     snapped = _snap_to_layout_region(box, scene.get("regions") or [], width, height)
                     was_snapped = snapped != box
                     box = snapped
-                    if len(planned_assets) >= 24 or any(_overlap_min(box, prior) >= 0.65 for prior in used_boxes):
+                    # Source pixels can have only one image owner. Even a narrow
+                    # overlap may erase a line in one asset while the other asset
+                    # still owns its editable textbox.
+                    if len(planned_assets) >= 24 or any(_overlap_min(box, prior) >= 0.05 for prior in used_boxes) or _cuts_through_text(box, elements):
                         continue
                     if any(
                         item.get("type") == "text" and item.get("role") == "main_title"
@@ -118,13 +121,13 @@ class AIReconstructionPlanner:
                         tx2 = min(x2 - x1, round(right - x1))
                         ty2 = min(y2 - y1, round(bottom - y1))
                         if tx2 > tx1 and ty2 > ty1:
-                            pad_x = max(2, round((tx2 - tx1) * 0.05))
+                            pad_x = min(12, max(2, round((tx2 - tx1) * 0.05)))
                             pad_y = max(2, round((ty2 - ty1) * 0.20))
                             cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
                     safe_to_clean = text_area_ratio <= 0.20
                     if np.any(mask) and safe_to_clean:
-                        crop = cv2.inpaint(crop, mask, 4, cv2.INPAINT_TELEA)
+                        crop = _clean_text_from_asset(crop, mask)
                     cv2.imwrite(str(asset_path), crop)
                     cv2.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
                     z_index = max((int(item.get("zIndex") or 0) for item in covered), default=1) + 1
@@ -169,6 +172,31 @@ class AIReconstructionPlanner:
         elements.extend(planned_assets)
         scene["reconstructionPlan"] = {**original_plan, "modules": normalized_modules, "assets": [item["id"] for item in planned_assets]}
         return stats
+
+
+def _clean_text_from_asset(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Fill text on locally flat colors; inpaint only textured patches."""
+    result = crop.copy()
+    textured = mask.copy()
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    for component in range(1, count):
+        x, y, width, height, _ = (int(value) for value in stats[component])
+        pad = max(4, min(12, height // 3))
+        x1, y1 = max(0, x - pad), max(0, y - pad)
+        x2, y2 = min(crop.shape[1], x + width + pad), min(crop.shape[0], y + height + pad)
+        ring = crop[y1:y2, x1:x2][mask[y1:y2, x1:x2] == 0]
+        if len(ring) < 16:
+            continue
+        median = np.median(ring, axis=0)
+        near_flat = float((np.linalg.norm(ring.astype(np.float32) - median.astype(np.float32), axis=1) < 22).mean())
+        if near_flat < 0.78:
+            continue
+        region = labels[y:y + height, x:x + width] == component
+        result[y:y + height, x:x + width][region] = np.asarray(median, dtype=np.uint8)
+        textured[y:y + height, x:x + width][region] = 0
+    if np.any(textured):
+        result = cv2.inpaint(result, textured, 4, cv2.INPAINT_TELEA)
+    return result
 
 
 def _pixel_box(raw: Any, width: int, height: int) -> tuple[int, int, int, int] | None:
@@ -273,6 +301,27 @@ def _covered_by_asset(item: dict[str, Any], box: tuple[int, int, int, int]) -> b
         return _overlap_min(item_box, box) >= 0.45
     if item.get("type") in {"rectangle", "roundedRectangle", "ellipse"}:
         return _iou(item_box, box) >= 0.45
+    return False
+
+
+def _cuts_through_text(box: tuple[int, int, int, int], elements: list[dict[str, Any]]) -> bool:
+    for item in elements:
+        if item.get("type") != "text" or not str(item.get("text") or "").strip():
+            continue
+        raw = (item.get("metadata") or {}).get("rawOCRBBox")
+        bounds = item.get("bbox") or {}
+        if isinstance(raw, list) and len(raw) == 4:
+            left, top, right, bottom = (float(value) for value in raw)
+        else:
+            try:
+                left, top = float(bounds["left"]), float(bounds["top"])
+                right, bottom = left + float(bounds["width"]), top + float(bounds["height"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        area = max(1.0, (right - left) * (bottom - top))
+        overlap = max(0.0, min(right, box[2]) - max(left, box[0])) * max(0.0, min(bottom, box[3]) - max(top, box[1]))
+        if 0.03 < overlap / area < 0.95:
+            return True
     return False
 
 

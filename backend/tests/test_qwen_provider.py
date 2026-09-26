@@ -6,7 +6,7 @@ import json
 import pytest
 from PIL import Image
 
-from app.services.vision.qwen_provider import QwenProvider, image_to_data_url
+from app.services.vision.qwen_provider import QwenProvider, VisionProviderError, image_to_data_url
 from app.services.vision.schemas import extract_json, normalize_scene_payload, validate_json
 
 
@@ -56,19 +56,19 @@ def test_qwen_provider_retries_json_repair(monkeypatch, tmp_path):
     calls = []
 
     def fake_request(messages, repair_prompt=None):
-        calls.append(repair_prompt)
+        calls.append(messages)
         return next(responses)
 
     monkeypatch.setattr(provider, "_request", fake_request)
     result = provider.analyze_scene(image_path, {"ocr_elements": []})
     assert result["elements"][0]["role"] == "body"
     assert len(calls) == 2
-    assert calls[0] is None
-    assert calls[1] is not None
+    assert len(calls[1]) == len(calls[0]) + 2
+    assert calls[1][-2] == {"role": "assistant", "content": "not json"}
     assert provider.vision_debug()["repairUsed"] is True
 
 
-def test_qwen_page_plan_precedes_semantic_scene_and_survives_scene_failure(monkeypatch, tmp_path):
+def test_qwen_page_plan_survives_semantic_scene_failure(monkeypatch, tmp_path):
     provider = object.__new__(QwenProvider)
     provider.name = "qwen"
     provider.model = "qwen3-vl-flash"
@@ -80,15 +80,58 @@ def test_qwen_page_plan_precedes_semantic_scene_and_survives_scene_failure(monke
     def fake_request(messages, repair_prompt=None):
         requests.append(messages[0]["content"])
         if len(requests) == 1:
-            return json.dumps(plan)
-        raise RuntimeError("semantic request timed out")
+            raise RuntimeError("semantic request timed out")
+        return json.dumps(plan)
 
     monkeypatch.setattr(provider, "_request", fake_request)
     result = provider.analyze_scene(image_path, {"candidate_elements": [{"id": "chart", "type": "image", "bbox": {"left": 6, "top": 6, "width": 32, "height": 32}}]})
     assert len(requests) >= 2
-    assert "信息图重建规划器" in requests[0]
+    assert "视觉版式分析引擎" in requests[0]
+    assert "信息图重建规划器" in requests[1]
     assert result["aiUsed"] is True
     assert result["reconstructionPlan"]["modules"][0]["id"] == "visual"
+
+
+def test_qwen_requests_dedicated_plan_when_scene_omits_body(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    incomplete = {"elements": [], "reconstructionPlan": {"modules": [{"id": "header", "bbox": {"left": 0, "top": 0, "width": 1, "height": 0.2}, "confidence": 0.9}]}}
+    complete = {"modules": [{"id": "body", "bbox": {"left": 0, "top": 0.2, "width": 1, "height": 0.8}, "confidence": 0.9}]}
+    responses = iter([json.dumps(incomplete), json.dumps(complete)])
+    calls = []
+
+    def fake_request(messages, repair_prompt=None):
+        calls.append(messages[0]["content"])
+        return next(responses)
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+    context = {"width": 100, "height": 100, "candidate_elements": [
+        {"id": str(index), "type": "text", "text": "line", "bbox": {"left": 10, "top": 35 + index * 10, "width": 40, "height": 8}}
+        for index in range(4)
+    ]}
+    result = provider.analyze_scene(image_path, context)
+    assert len(calls) == 2
+    assert result["reconstructionPlan"]["modules"][0]["id"] == "body"
+
+
+def test_high_quality_rejects_plan_that_still_omits_body(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    incomplete = {"modules": [{"id": "header", "bbox": {"left": 0, "top": 0, "width": 1, "height": 0.2}, "confidence": 0.9}]}
+    responses = iter([json.dumps({"elements": [], "reconstructionPlan": incomplete}), json.dumps(incomplete)])
+    monkeypatch.setattr(provider, "_request", lambda messages, repair_prompt=None: next(responses))
+    context = {"width": 100, "height": 100, "candidate_elements": [
+        {"id": str(index), "type": "text", "text": "line", "bbox": {"left": 10, "top": 35 + index * 10, "width": 40, "height": 8}}
+        for index in range(4)
+    ]}
+    with pytest.raises(VisionProviderError, match="does not cover"):
+        provider.analyze_scene(image_path, context, mode="high")
 
 
 def test_scene_payload_normalizes_common_qwen_aliases():
