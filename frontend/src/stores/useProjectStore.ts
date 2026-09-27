@@ -1,11 +1,12 @@
 import { create } from 'zustand';
 import axios from 'axios';
-import type { LayoutElement, LayoutJSON, ProjectInfo } from '../types/layout';
-import { acceptCurrentResult, analyzeProject, approvePage, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
+import type { LayoutElement, LayoutJSON, PagePreview, ProjectInfo } from '../types/layout';
+import { acceptCurrentResult, analyzeProject, approvePage, artifactUrl, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
 
 interface ProjectState {
   project: ProjectInfo | null;
   slides: LayoutJSON[];
+  pagePreviews: PagePreview[];
   activePage: number;
   selectedIds: string[];
   busy: boolean;
@@ -41,6 +42,7 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 export const useProjectStore = create<ProjectState>((set, get) => ({
   project: null,
   slides: [],
+  pagePreviews: [],
   activePage: 0,
   selectedIds: [],
   busy: false,
@@ -60,8 +62,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const project = get().project;
     if (!project) return;
     set({ busy: true, message: `正在上传 ${files.length} 张图片…` });
-    const updated = await uploadImages(project.id, files);
-    set({ project: updated, aiPaused: false, busy: false, message: `${files.length} 张图片已添加，可以开始逐页解析` });
+    try {
+      const uploaded = await uploadImages(project.id, files);
+      set((state) => ({ project: uploaded.project, pagePreviews: [...state.pagePreviews, ...uploaded.images.map((image) => ({ id: image.id, originalPreviewUrl: image.source_url, resultPreviewUrl: null, status: 'waiting' as const }))], aiPaused: false, busy: false, message: `${files.length} 张图片已添加，可以开始逐页解析` }));
+    } catch (error) {
+      set({ busy: false, message: '图片上传失败，请重试。' });
+      throw error;
+    }
   },
   analyze: async () => {
     const project = get().project;
@@ -70,7 +77,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, aiPaused: false, message: `正在重建第 ${page} / ${project.imageCount} 页…` });
     try {
       const result = await analyzeProject(project.id, get().conversionMode, page);
-      set((state) => ({ project: result.project, slides: [...state.slides.slice(0, page - 1), result.slides[0]], activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: `第 ${page} 页已重建，请对照原图确认。${result.warnings[0] || ''}` }));
+      set((state) => ({ project: result.project, slides: [...state.slides.slice(0, page - 1), result.slides[0]], pagePreviews: state.pagePreviews.map((item, index) => index === page - 1 ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, page === 1 ? 'reconstructed_preview.png' : `reconstructed_preview_${page}.png`)}?v=${state.reviewVersion + 1}`, status: 'ready' } : item), activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: `第 ${page} 页已重建，请对照原图确认。${result.warnings[0] || ''}` }));
     } catch (error) {
       const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null;
       set({ busy: false, aiPaused: detail?.code === 'AI_UNAVAILABLE', message: typeof detail?.message === 'string' ? detail.message : '本页重建失败，请重试。' });
@@ -98,7 +105,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, aiPaused: false, message: `正在以基础模式处理第 ${page} 页…` });
     try {
       const result = await analyzeProject(project.id, get().conversionMode, page, true);
-      set((state) => ({ slides: [...state.slides.slice(0, page - 1), result.slides[0]], activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: '本页已使用基础模式，请仔细核对视觉结果。' }));
+      set((state) => ({ slides: [...state.slides.slice(0, page - 1), result.slides[0]], pagePreviews: state.pagePreviews.map((item, index) => index === page - 1 ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, page === 1 ? 'reconstructed_preview.png' : `reconstructed_preview_${page}.png`)}?v=${state.reviewVersion + 1}`, status: 'ready' } : item), activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: '本页已使用基础模式，请仔细核对视觉结果。' }));
     } catch (error) {
       set({ busy: false, aiPaused: true, message: '基础模式也未能完成，请检查设置并重试。' });
       throw error;
@@ -110,7 +117,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, message: `继续优化第 ${activePage + 1} 页…` });
     try {
       const result = await revisePage(project.id, activePage + 1);
-      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? result.layout : slide), busy: false, reviewVersion: state.reviewVersion + 1, message: result.accepted ? `第 ${result.revisionRound} 轮区域优化已改善 ${result.improvedRegions.length} 处，请对照检查。` : `第 ${result.revisionRound} 轮未改善指标，已保留上一轮结果。` }));
+      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? result.layout : slide), pagePreviews: state.pagePreviews.map((item, index) => index === activePage && result.accepted ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, activePage === 0 ? 'reconstructed_preview.png' : `reconstructed_preview_${activePage + 1}.png`)}?v=${state.reviewVersion + 1}` } : item), busy: false, reviewVersion: state.reviewVersion + 1, message: result.accepted ? `第 ${result.revisionRound} 轮区域优化已改善 ${result.improvedRegions.length} 处，请对照检查。` : `第 ${result.revisionRound} 轮未改善指标，已保留上一轮结果。` }));
     } catch (error) {
       set({ busy: false, message: '继续优化失败，当前结果已保留。' });
       throw error;
@@ -122,7 +129,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ busy: true, message: '正在将问题视觉区域改为图片主体与可编辑文字…' });
     try {
       const layout = await downgradePage(project.id, activePage + 1);
-      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? layout : slide), busy: false, reviewVersion: state.reviewVersion + 1, message: '问题区域已降级，请检查并确认。' }));
+      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? layout : slide), pagePreviews: state.pagePreviews.map((item, index) => index === activePage ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, activePage === 0 ? 'reconstructed_preview.png' : `reconstructed_preview_${activePage + 1}.png`)}?v=${state.reviewVersion + 1}` } : item), busy: false, reviewVersion: state.reviewVersion + 1, message: '问题区域已降级，请检查并确认。' }));
     } catch (error) {
       set({ busy: false, message: '问题区域降级失败，当前结果已保留。' });
       throw error;

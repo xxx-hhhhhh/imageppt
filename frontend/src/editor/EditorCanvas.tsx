@@ -6,6 +6,7 @@ import { assetUrl } from '../services/api';
 
 interface Props {
   page: LayoutJSON | undefined;
+  zoomFactor?: number;
   selectedIds: string[];
   onSelection: (ids: string[]) => void;
   onChange: (layout: LayoutJSON) => void;
@@ -23,7 +24,7 @@ function colorWithOpacity(color: string | undefined, opacity = 1): string {
   return `#${raw}${alpha}`;
 }
 
-export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props) {
+export function EditorCanvas({ page, zoomFactor = 1, selectedIds, onSelection, onChange }: Props) {
   const canvasElement = useRef<HTMLCanvasElement | null>(null);
   const wrapper = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -36,7 +37,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
     fabricRef.current = fabricCanvas;
     const availableWidth = Math.max(1, wrapper.current.clientWidth - 24);
     const availableHeight = Math.max(1, wrapper.current.clientHeight - 24);
-    const zoom = Math.min(availableWidth / page.slide.width, availableHeight / page.slide.height, 1);
+    const zoom = Math.min(availableWidth / page.slide.width, availableHeight / page.slide.height, 1) * zoomFactor;
     setZoom(zoom);
     fabricCanvas.setDimensions({ width: page.slide.width, height: page.slide.height });
     fabricCanvas.setZoom(1);
@@ -75,7 +76,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
       if (!wrapper.current || !fabricRef.current) return;
       const width = Math.max(1, wrapper.current.clientWidth - 24);
       const height = Math.max(1, wrapper.current.clientHeight - 24);
-      const nextZoom = Math.min(width / page.slide.width, height / page.slide.height, 1);
+      const nextZoom = Math.min(width / page.slide.width, height / page.slide.height, 1) * zoomFactor;
       setZoom(nextZoom);
       if (stageRef.current) {
         stageRef.current.style.transform = `scale(${nextZoom})`;
@@ -91,7 +92,7 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
       fabricCanvas.dispose();
       fabricRef.current = null;
     };
-  }, [page, onChange, onSelection]);
+  }, [page, onChange, onSelection, zoomFactor]);
 
   return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-viewport" style={{ width: (page?.slide.width || 1) * zoom, height: (page?.slide.height || 1) * zoom }}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div></div>;
 }

@@ -14,11 +14,11 @@ export async function createProject(name = 'Image2EditablePPT'): Promise<Project
   return response.data;
 }
 
-export async function uploadImages(projectId: string, files: File[]): Promise<ProjectInfo> {
+export async function uploadImages(projectId: string, files: File[]): Promise<{ project: ProjectInfo; images: { id: string; source_url: string }[] }> {
   const data = new FormData();
   files.forEach((file) => data.append('files', file));
-  const response = await api.post<{ project: ProjectInfo }>(`/projects/${projectId}/images`, data);
-  return response.data.project;
+  const response = await api.post<{ project: ProjectInfo; images: { id: string; source_url: string }[] }>(`/projects/${projectId}/images`, data);
+  return response.data;
 }
 
 export async function analyzeProject(projectId: string, mode: 'fast' | 'standard' | 'high_quality' | 'maximum' = 'maximum', page = 1, allowFallback = false): Promise<AnalyzeResponse> {

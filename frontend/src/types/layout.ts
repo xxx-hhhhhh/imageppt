@@ -70,6 +70,13 @@ export interface AnalyzeResponse {
   warnings: string[];
 }
 
+export interface PagePreview {
+  id: string;
+  originalPreviewUrl: string;
+  resultPreviewUrl: string | null;
+  status: 'waiting' | 'ready';
+}
+
 export interface RevisionResponse {
   layout: LayoutJSON;
   revisionRound: number;
