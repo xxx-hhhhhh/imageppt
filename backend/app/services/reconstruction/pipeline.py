@@ -342,6 +342,7 @@ class ReconstructionPipeline:
             score["revisionStatus"] = revision_status
             score["visionProvider"] = routing.get("usedProvider", "local")
             score["visionModel"] = routing.get("usedModel")
+            score["aiImageEditAttempts"] = sum(1 for strategy in inpainting.last_strategies if strategy.get("aiRepair") in {"failed", "rejected", "accepted"})
             score["aiBackgroundRepairs"] = reconstruction_stats["aiBackgroundRepairs"]
             score["revisionRounds"] = len(critic_reports)
             score["revisionRound"] = 0
