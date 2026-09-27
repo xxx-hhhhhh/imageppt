@@ -68,11 +68,11 @@ Image2EditablePPT/
 
 ## 7. 启动
 
-```powershell
-.\scripts\start.ps1
-```
+Windows 双击仓库根目录的 `start.bat`。脚本会检查并复用已经运行的 LaMa（8080）、后端（8000）和前端（5173；也识别现有的 5174）；缺失的服务自动启动，全部通过健康检查后打开网页。LaMa 使用现有 `lama-inpaint` conda 环境的 `iopaint.exe`，以 `lama` 模型和 CPU 模式运行。失败时控制台会指出服务，详细日志位于 `temp/launcher/`。也可在 PowerShell 中运行 `.\scripts\start.ps1`。
 
-默认地址：`http://127.0.0.1:5173`，后端健康检查：`http://127.0.0.1:8000/api/health`。
+关闭时双击 `stop.bat`，它只会关闭通过项目网页、后端健康接口或 LaMa 模型接口识别到的服务。如某服务由管理员权限启动，普通权限无法关闭；请关闭原始终端，或以管理员身份运行 `stop.bat`。
+
+默认地址：`http://127.0.0.1:5173`（复用现有前端时也可能是 5174），后端健康检查：`http://127.0.0.1:8000/api/health`。
 
 ## 8.1 Qwen3-VL-Flash 配置
 
@@ -94,7 +94,7 @@ QWEN_MAX_RETRIES=2
 
 ### 本地 IOPaint / LaMa
 
-启动 IOPaint 并确认当前模型为 `lama`，在后端运行环境设置：
+`start.bat` 会自动启动未运行的 IOPaint，并确认当前模型为 `lama`。在后端运行环境设置：
 
 ```env
 LOCAL_INPAINT_ENABLED=true
