@@ -10,7 +10,8 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app.config import OUTPUTS_DIR, PUBLIC_SHARED_MODE, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
+from app.config import LOCAL_INPAINT_ENABLED, LOCAL_INPAINT_MODEL, LOCAL_INPAINT_URL, OUTPUTS_DIR, PUBLIC_SHARED_MODE, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
+from app.services.inpainting.local_client import LocalIOPaintClient
 from app.models.project_store import ProjectStore
 from app.schemas.layout import AnalyzeResponse, LayoutJSON, RevisionResponse
 from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
@@ -53,6 +54,14 @@ def _get_project(project_id: str) -> dict:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "service": "Image2EditablePPT", **paddle_diagnostics()}
+
+
+@app.get("/api/inpainting/local/status")
+def local_inpainting_status() -> dict:
+    if not LOCAL_INPAINT_ENABLED:
+        return {"enabled": False, "connected": False, "model": LOCAL_INPAINT_MODEL, "route": ""}
+    status = LocalIOPaintClient(LOCAL_INPAINT_URL, LOCAL_INPAINT_MODEL).probe()
+    return {"enabled": True, "connected": bool(status["connected"]), "model": LOCAL_INPAINT_MODEL, "route": status.get("route", "")}
 
 
 @app.post("/api/projects", response_model=ProjectResponse)

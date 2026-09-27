@@ -4,6 +4,9 @@ import json
 import shutil
 from pathlib import Path
 
+from app.config import INPAINT_PROVIDER
+from app.services.inpainting.service import InpaintingService
+
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
@@ -61,14 +64,20 @@ def downgrade_problem_regions(store: ProjectStore, project_id: str, page: int) -
     candidate_background = output / "revisions" / f"fallback_{page}" / "background.png"
     candidate_background.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(background, candidate_background)
-    separate_foreground(candidate_background, new_assets)
-    erase_editable_text_sources(candidate_background, revised)
+    inpainting = InpaintingService(INPAINT_PROVIDER)
+    local_provider = inpainting.provider if inpainting.provider.name == "local_lama" else None
+    separate_foreground(candidate_background, new_assets, professional_provider=local_provider)
+    erase_editable_text_sources(candidate_background, revised, complex_cleaner=inpainting.clean_array if local_provider else None)
     preview = output / ("reconstructed_preview.png" if page == 1 else f"reconstructed_preview_{page}.png")
     candidate_preview = candidate_background.with_name("preview.png")
     render_preview(candidate_background, revised, candidate_preview)
     shutil.copy2(candidate_background, background)
     shutil.copy2(candidate_preview, preview)
     score = run_visual_qa(source, preview, output, revised)
+    for key, field in (("localInpaintAttempts", "attempts"), ("localInpaintSuccesses", "successes"), ("localInpaintFallbacks", "failures")):
+        score[key] = int(report.get(key) or 0) + int(getattr(inpainting.provider, field, 0))
+    if local_provider:
+        score["inpaintingProvider"] = "local_lama"
     text_metrics = measure_text_coverage(revised, int(report.get("detectedTextCount") or 0))
     asset_metrics = measure_movable_assets(source, background, revised, (revised.get("metadata") or {}).get("reconstructionPlan") or {})
     score.update(text_metrics)

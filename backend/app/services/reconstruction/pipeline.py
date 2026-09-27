@@ -240,12 +240,15 @@ class ReconstructionPipeline:
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
             asset_repairs: list[dict] = []
-            asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} else None
+            local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
+            asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
             reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
             reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
-            erasure_stats = erase_editable_text_sources(background_path, layout)
+            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None)
             for key, value in erasure_stats.items():
                 reconstruction_stats[key] += value
+            if local_provider:
+                reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
@@ -362,7 +365,10 @@ class ReconstructionPipeline:
             score["visionProvider"] = routing.get("usedProvider", "local")
             score["visionModel"] = routing.get("usedModel")
             score["inpaintingProvider"] = getattr(inpainting, "professional_provider_name", "none") if getattr(inpainting, "professional_provider_name", "none") != "none" else asset_provider.name if asset_provider else "unavailable"
-            score["professionalInpaintingAttempts"] = int(getattr(inpainting, "professional_attempts", 0)) + sum(item["provider"] != "unavailable" for item in asset_repairs)
+            score["professionalInpaintingAttempts"] = int(getattr(inpainting.provider, "attempts", 0)) if local_provider else int(getattr(inpainting, "professional_attempts", 0)) + sum(item["provider"] != "unavailable" for item in asset_repairs)
+            score["localInpaintAttempts"] = int(getattr(getattr(inpainting, "provider", None), "attempts", 0))
+            score["localInpaintSuccesses"] = int(getattr(getattr(inpainting, "provider", None), "successes", 0))
+            score["localInpaintFallbacks"] = int(getattr(getattr(inpainting, "provider", None), "failures", 0))
             score["aiImageEditAttempts"] = 0
             score["aiBackgroundRepairs"] = reconstruction_stats["aiBackgroundRepairs"]
             score["revisionRounds"] = len(critic_reports)

@@ -98,6 +98,8 @@ button { cursor: pointer; }
 .status-row { min-height: 46px; height: auto; gap: 12px; border-bottom: 1px solid var(--line); background: #fff; }
 .status-row > span:first-child { font-weight: 700; color: var(--ink); white-space: nowrap; }
 .status-row .status { text-align: right; overflow: hidden; text-overflow: ellipsis; }
+.status-row .status { flex: 1; min-width: 0; }
+.inpaint-status { flex: none; border-radius: 999px; padding: 5px 8px; color: var(--action); background: var(--action-soft); font-size: 11px; white-space: nowrap; }
 .review-actions { background: #fff; border-bottom: 1px solid var(--line); padding: 10px 20px; color: var(--ink); font-size: 12px; }
 .review-actions.page-decision { justify-content: space-between; }
 .page-decision > div { display: flex; gap: 8px; flex-wrap: wrap; }

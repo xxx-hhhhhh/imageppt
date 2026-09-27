@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from app.services.inpainting.provider import InpaintingProvider, LamaInpaintingProvider, create_inpainting_provider
+from app.services.inpainting.local_client import LocalIOPaintClient
 from app.services.ocr.provider import OCRResult
 from app.services.background.strategy import reclean_background as reclean_with_strategy
 from app.services.background.strategy import restore_background as restore_with_strategy
@@ -42,7 +43,9 @@ class InpaintingService:
 
     def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
         restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions, allow_complex_text_preservation=not self.force_clean, prefer_inpaint=self.prefer_inpaint)
-        if self.prefer_inpaint:
+        if isinstance(self.provider, LocalIOPaintClient):
+            self.ai_repaired_regions = self._repair_local_text_regions(image_path, output_path)
+        elif self.prefer_inpaint:
             self.ai_repaired_regions = self._repair_complex_regions(image_path, output_path)
         self.last_stats = {
             "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
@@ -51,12 +54,47 @@ class InpaintingService:
         return restored
 
     def _professional_provider(self) -> InpaintingProvider | None:
-        if self.provider.name in {"lama", "stability"}:
+        if self.provider.name in {"lama", "stability", "local_lama"}:
             return self.provider
         try:
             return LamaInpaintingProvider()
         except (ImportError, OSError, RuntimeError):
             return None
+
+    def _repair_local_text_regions(self, source_path: Path, background_path: Path) -> int:
+        targets = [item for item in self.last_strategies if item.get("willReconstruct") and item.get("cleanBBox")]
+        if not targets:
+            return 0
+        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+        if source is None or background is None:
+            return 0
+        mask = np.zeros(source.shape[:2], dtype=np.uint8)
+        for item in targets:
+            x1, y1, x2, y2 = map(int, item["cleanBBox"])
+            mask[max(0, y1):min(mask.shape[0], y2), max(0, x1):min(mask.shape[1], x2)] = 255
+        try:
+            candidate = self.provider.inpaint_array(source, mask)
+            background[mask > 0] = candidate[mask > 0]
+            cv2.imwrite(str(background_path), background)
+            for item in targets:
+                item["professionalRepair"] = "accepted"
+                item["reconstructionStrategy"] = "local_lama"
+            self.professional_provider_name = "local_lama"
+            return len(targets)
+        except Exception:
+            for item in targets:
+                item["professionalRepair"] = "fallback_opencv"
+            return 0
+
+    def clean_array(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if isinstance(self.provider, LocalIOPaintClient):
+            try:
+                candidate = self.provider.inpaint_array(image, mask)
+                return np.where(mask[:, :, None] > 0, candidate, image)
+            except Exception:
+                pass
+        return cv2.inpaint(image, mask, 4, cv2.INPAINT_TELEA)
 
     def _repair_complex_regions(self, source_path: Path, background_path: Path) -> int:
         targets = [item for item in self.last_strategies if item.get("willReconstruct") and item.get("category") in {"complex", "texture"}]
@@ -112,7 +150,23 @@ class InpaintingService:
         return repaired
 
     def reclean_background(self, background_path: Path, bboxes: list[list[float]]) -> int:
-        count = reclean_with_strategy(background_path, bboxes)
+        count = 0
+        if isinstance(self.provider, LocalIOPaintClient) and bboxes:
+            image = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+            if image is not None:
+                mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                for box in bboxes:
+                    x1, y1, x2, y2 = map(int, box)
+                    mask[max(0, y1):min(mask.shape[0], y2), max(0, x1):min(mask.shape[1], x2)] = 255
+                try:
+                    candidate = self.provider.inpaint_array(image, mask)
+                    image[mask > 0] = candidate[mask > 0]
+                    cv2.imwrite(str(background_path), image)
+                    count = len(bboxes)
+                except Exception:
+                    pass
+        if not count:
+            count = reclean_with_strategy(background_path, bboxes)
         self.last_stats["ghostingRegionsDetected"] += count
         self.last_stats["ghostingRegionsRecleaned"] += count
         return count

@@ -159,7 +159,7 @@ class FakePPTXRenderer:
         return output, {"valid": True}
 
 
-def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False, mode: str = "standard") -> tuple[list[dict], dict, dict]:
+def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False, mode: str = "standard", inpainting_factory=None) -> tuple[list[dict], dict, dict]:
     image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
     fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
     shutil.copy2(fixture_path, image_path)
@@ -178,7 +178,7 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool
 
     monkeypatch.setattr(pipeline_module, "OUTPUTS_DIR", output_root)
     monkeypatch.setattr(pipeline_module, "OCRService", lambda provider: FakeOCR())
-    monkeypatch.setattr(pipeline_module, "InpaintingService", lambda provider: FakeInpainting())
+    monkeypatch.setattr(pipeline_module, "InpaintingService", lambda provider: inpainting_factory() if inpainting_factory else FakeInpainting())
     monkeypatch.setattr(pipeline_module, "preprocess_image", fake_preprocess)
     monkeypatch.setattr(pipeline_module, "render_preview", fake_render_preview)
     monkeypatch.setattr(pipeline_module, "run_visual_qa", lambda *args, **kwargs: {"overall": 1.0})
@@ -292,3 +292,28 @@ def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, t
     assert asset["metadata"]["reconstructionStrategy"] == "cutout_image"
     assert asset["groupId"] == "chart_panel"
     assert elements["text_001"]["text"] == "OCR original text"
+
+
+def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkeypatch, tmp_path: Path) -> None:
+    import cv2
+    import numpy as np
+    from app.services.inpainting.local_client import LocalIOPaintClient
+    from app.services.inpainting.service import InpaintingService
+
+    provider = LocalIOPaintClient("http://127.0.0.1:8080")
+
+    def fake_local_call(source: Path, mask: np.ndarray, output: Path) -> Path:
+        provider.attempts += 1
+        image = cv2.imread(str(source))
+        image[mask > 0] = 255
+        cv2.imwrite(str(output), image)
+        provider.successes += 1
+        return output
+
+    provider.inpaint = fake_local_call
+    monkeypatch.setattr("app.services.inpainting.service.create_inpainting_provider", lambda preferred: (provider, []))
+    slides, report, debug = _run_pipeline(monkeypatch, tmp_path, False, with_plan=True, inpainting_factory=InpaintingService)
+    score = json.loads((tmp_path / "outputs" / "local-standard" / "visual_score.json").read_text(encoding="utf-8"))
+    assert slides and report["wholeImageRegions"] >= 1
+    assert score["localInpaintSuccesses"] >= 1
+    assert debug["provider"] == "local"

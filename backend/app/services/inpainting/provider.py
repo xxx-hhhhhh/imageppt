@@ -7,6 +7,9 @@ import os
 import cv2
 import numpy as np
 
+from app.config import LOCAL_INPAINT_ENABLED, LOCAL_INPAINT_MODEL, LOCAL_INPAINT_URL
+from app.services.inpainting.local_client import LocalIOPaintClient
+
 
 class InpaintingProvider:
     name = "none"
@@ -86,6 +89,12 @@ class StabilityInpaintingProvider(InpaintingProvider):
 
 def create_inpainting_provider(preferred: str = "opencv") -> tuple[InpaintingProvider, list[str]]:
     warnings: list[str] = []
+    if LOCAL_INPAINT_ENABLED:
+        local = LocalIOPaintClient(LOCAL_INPAINT_URL, LOCAL_INPAINT_MODEL)
+        status = local.probe()
+        if status["connected"]:
+            return local, warnings
+        warnings.append("Local LaMa unavailable; using existing inpainting fallback")
     if preferred == "stability":
         try:
             return StabilityInpaintingProvider(), warnings

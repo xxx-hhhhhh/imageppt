@@ -8,7 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.config import OUTPUTS_DIR
+from app.config import INPAINT_PROVIDER, OUTPUTS_DIR
+from app.services.inpainting.service import InpaintingService
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
@@ -93,6 +94,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_bg = candidate_dir / "background.png"
     candidate_preview = candidate_dir / "preview.png"
     shutil.copy2(background, candidate_bg)
+    inpainting = InpaintingService(INPAINT_PROVIDER)
+    local_cleaner = inpainting.clean_array if inpainting.provider.name == "local_lama" else None
+    local_provider = inpainting.provider if inpainting.provider.name == "local_lama" else None
     touched_text: set[str] = set()
     erase_text: set[str] = set()
     changed_ids: set[str] = set()
@@ -154,11 +158,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             item["width"] = max(4.0, float(raw[2]) - float(raw[0]))
             item["height"] = max(4.0, (float(raw[3]) - float(raw[1])) * 1.1)
     if erase_text:
-        erase_editable_text_sources(candidate_bg, candidate, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}")
+        erase_editable_text_sources(candidate_bg, candidate, complex_cleaner=local_cleaner, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}")
 
     residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id]
     if residual_assets:
-        separate_foreground(candidate_bg, residual_assets)
+        separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
     baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list)][:4]
     if baked:
         modules = []
@@ -175,11 +179,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         candidate = ReconstructionPipeline._apply_refined_scene(None, candidate, scene)
         new_assets = [item for item in candidate["elements"] if item["id"] not in before_ids and item.get("type") == "image"]
         if new_assets:
-            separate_foreground(candidate_bg, new_assets)
+            separate_foreground(candidate_bg, new_assets, professional_provider=local_provider)
             changed_ids.update(item["id"] for item in new_assets)
 
     render_preview(candidate_bg, candidate, candidate_preview)
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
+    for key, field in (("localInpaintAttempts", "attempts"), ("localInpaintSuccesses", "successes"), ("localInpaintFallbacks", "failures")):
+        score_after[key] = int(score_before.get(key) or 0) + int(getattr(inpainting.provider, field, 0))
+    if local_provider:
+        score_after["inpaintingProvider"] = "local_lama"
     detected_ids = {str(source_id) for item in baseline.get("elements", []) if item.get("type") == "text" for source_id in ((item.get("metadata") or {}).get("sourceOcrIds") or [item.get("id")]) if source_id}
     detected = max(int(score_before.get("detectedTextCount") or 0), len(detected_ids))
     coverage_before = float(score_before["editableTextCoverage"]) if "detectedTextCount" in score_before and "editableTextCoverage" in score_before else float(measure_text_coverage(baseline, detected)["editableTextCoverage"])

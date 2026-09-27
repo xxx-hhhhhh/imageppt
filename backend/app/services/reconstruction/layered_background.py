@@ -63,7 +63,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
     for (x1, y1, x2, y2), owned in regions:
         ring = _outer_ring(background, mask, (x1, y1, x2, y2))
         textured = ring.size > 0 and float(np.mean(np.std(ring.astype(np.float32), axis=0))) > 22
-        if textured:
+        if textured or (professional_provider is not None and professional_provider.name == "local_lama"):
             success = False
             if professional_provider is not None:
                 try:
@@ -81,7 +81,8 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
                 except Exception:
                     pass
             if repair_report is not None:
-                repair_report.append({"bbox": [x1, y1, x2, y2], "problem": "professionalInpaintingPending" if not success else "professionalInpaintingApplied", "provider": professional_provider.name if professional_provider else "unavailable"})
+                problem = "professionalInpaintingApplied" if success else "localInpaintingFallback" if professional_provider is not None and professional_provider.name == "local_lama" else "professionalInpaintingPending"
+                repair_report.append({"bbox": [x1, y1, x2, y2], "problem": problem, "provider": professional_provider.name if professional_provider else "unavailable"})
             if success:
                 continue
         if (x2 - x1) * (y2 - y1) <= width * height * 0.025:

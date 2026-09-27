@@ -25,6 +25,23 @@ def env_int(name: str, default: int) -> int:
 MAX_UPLOAD_MB = env_int("MAX_UPLOAD_MB", 25)
 OCR_PROVIDER = os.getenv("OCR_PROVIDER", "auto")
 INPAINT_PROVIDER = os.getenv("INPAINT_PROVIDER", "opencv")
+
+
+def local_inpaint_setting(name: str, default: str) -> str:
+    if name in os.environ:
+        return os.environ[name]
+    local_config = PROJECT_ROOT / ".env"
+    if local_config.is_file():
+        for line in local_config.read_text(encoding="utf-8-sig").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    return default
+
+
+LOCAL_INPAINT_ENABLED = local_inpaint_setting("LOCAL_INPAINT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_INPAINT_URL = local_inpaint_setting("LOCAL_INPAINT_URL", "http://127.0.0.1:8080")
+LOCAL_INPAINT_MODEL = local_inpaint_setting("LOCAL_INPAINT_MODEL", "lama")
 LAYOUT_PROVIDER = os.getenv("LAYOUT_PROVIDER", "auto")
 SEGMENTATION_PROVIDER = os.getenv("SEGMENTATION_PROVIDER", "auto")
 VLM_PROVIDER = os.getenv("VLM_PROVIDER", "none")
