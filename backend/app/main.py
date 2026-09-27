@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import json
 import re
 import uuid
 from pathlib import Path
@@ -18,7 +19,7 @@ from app.services.pptx import PPTXRenderer
 from app.services.reconstruction import ReconstructionPipeline
 from app.services.reconstruction.pipeline import AIUnavailableError
 from app.services.reconstruction.downgrade import downgrade_problem_regions
-from app.services.reconstruction.revision import revise_problem_regions
+from app.services.reconstruction.revision import run_revision_loop
 from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
 from app.services.vision.router import VisionRouter
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
@@ -138,9 +139,25 @@ def revise_page(project_id: str, page: int) -> RevisionResponse:
     if page < 1 or page > len(record.get("images", [])):
         raise HTTPException(status_code=404, detail="Page not found")
     try:
-        return RevisionResponse.model_validate(revise_problem_regions(store, project_id, page))
+        return RevisionResponse.model_validate(run_revision_loop(store, project_id, page))
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=409, detail={"code": "REVISION_NOT_READY", "message": str(exc)}) from exc
+
+
+@app.post("/api/projects/{project_id}/pages/{page}/accept-result")
+def accept_result(project_id: str, page: int) -> dict:
+    record = _get_project(project_id)
+    if page < 1 or page > len(record.get("images", [])):
+        raise HTTPException(status_code=404, detail="Page not found")
+    root = store.root / project_id
+    score_path = root / ("visual_score.json" if page == 1 else f"visual_score_{page}.json")
+    if not score_path.is_file():
+        raise HTTPException(status_code=409, detail="Analyze this page before accepting it")
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    score["revisionStatus"] = "user_accepted"
+    for path in (score_path, root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")):
+        path.write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"page": page, "revisionStatus": "user_accepted"}
 
 
 @app.get("/api/vision/status")

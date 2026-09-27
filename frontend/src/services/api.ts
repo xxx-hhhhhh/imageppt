@@ -40,6 +40,10 @@ export async function downgradePage(projectId: string, page: number): Promise<La
   return response.data;
 }
 
+export async function acceptCurrentResult(projectId: string, page: number): Promise<void> {
+  await api.post(`/projects/${projectId}/pages/${page}/accept-result`);
+}
+
 export interface VisionStatus {
   provider: string;
   configured: boolean;
@@ -116,9 +120,9 @@ export async function testVisionSettings(): Promise<VisionTestResult> {
   return response.data;
 }
 
-export async function getVisualScore(projectId: string, page = 1): Promise<{ overall?: number; revisionStatus?: string; issues?: { problem?: string }[] }> {
+export async function getVisualScore(projectId: string, page = 1): Promise<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; issues?: { problem?: string }[] }> {
   const file = page === 1 ? 'visual_validation.json' : `visual_validation_${page}.json`;
-  const response = await api.get<{ overall?: number; revisionStatus?: string; issues?: { problem?: string }[] }>(`/projects/${projectId}/artifacts/${file}`);
+  const response = await api.get<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; issues?: { problem?: string }[] }>(`/projects/${projectId}/artifacts/${file}`);
   return response.data;
 }
 

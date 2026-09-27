@@ -343,14 +343,16 @@ class ReconstructionPipeline:
             score["revisionRounds"] = len(critic_reports)
             score["revisionRound"] = 0
             score["issuesBefore"] = []
-            score["issuesAfter"] = score.get("issues", [])
+            from app.services.reconstruction.revision import collect_revision_issues
+            score["issuesAfter"] = collect_revision_issues(layout, score, scene_raw)
             score["improvedRegions"] = []
+            score["stagnationReason"] = "initial_quality_gate" if revision_status == "stagnated" else None
             shutil.copy2(preview_path, page_output / "final_preview.png" if page_index == 1 else page_output / f"final_preview_{page_index}.png")
             shutil.copy2(normalized_path, page_output / "source.png" if page_index == 1 else page_output / f"source_{page_index}.png")
             shutil.copy2(background_path, page_output / "clean_background.png" if page_index == 1 else page_output / f"clean_background_{page_index}.png")
             self._write_json(page_output / "visual_score.json" if page_index == 1 else page_output / f"visual_score_{page_index}.json", score)
             self._write_json(page_output / "visual_validation.json" if page_index == 1 else page_output / f"visual_validation_{page_index}.json", score)
-            self._write_json(page_output / "problem_report.json" if page_index == 1 else page_output / f"problem_report_{page_index}.json", {"revisionRound": 0, "issuesAfter": score["issuesAfter"], "editableTextCoverage": score["editableTextCoverage"], "overall": score.get("overall")})
+            self._write_json(page_output / "problem_report.json" if page_index == 1 else page_output / f"problem_report_{page_index}.json", {"revisionRound": 0, "issuesBefore": [], "issuesAfter": score["issuesAfter"], "improvedRegions": [], "stagnationReason": score["stagnationReason"], "editableTextCoverage": score["editableTextCoverage"], "overall": score.get("overall")})
             page_archive = page_output / "pages" / f"page_{page_index}"
             page_archive.mkdir(parents=True, exist_ok=True)
             archive_sources = {

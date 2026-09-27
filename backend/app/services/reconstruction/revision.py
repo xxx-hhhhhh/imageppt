@@ -5,6 +5,9 @@ import json
 import shutil
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from app.config import OUTPUTS_DIR
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
@@ -13,6 +16,51 @@ from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
+
+
+def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
+    """Continue local revisions while a high-quality page measurably improves."""
+    root = store.root / project_id
+    conversion_report = root / "conversion_report.json"
+    mode = json.loads(conversion_report.read_text(encoding="utf-8")).get("mode") if conversion_report.is_file() else "standard"
+    limit = max_rounds if mode in {"high_quality", "maximum"} else 1
+    result: dict | None = None
+    first: dict | None = None
+    improved: set[str] = set()
+    accepted_any = False
+    consecutive_failures = 0
+    for _ in range(limit):
+        result = revise_problem_regions(store, project_id, page)
+        first = first or result
+        accepted_any = accepted_any or bool(result["accepted"])
+        improved.update(result["improvedRegions"])
+        consecutive_failures = 0 if result["accepted"] else consecutive_failures + 1
+        if not result["issuesAfter"] or result.get("stagnationReason") == "no_targetable_issues" or consecutive_failures >= 2:
+            break
+    assert result is not None
+    if consecutive_failures >= 2:
+        result["stagnationReason"] = "consecutive_rounds_without_improvement"
+        root = store.root / project_id
+        for filename in ("visual_score.json" if page == 1 else f"visual_score_{page}.json", "visual_validation.json" if page == 1 else f"visual_validation_{page}.json", "problem_report.json" if page == 1 else f"problem_report_{page}.json"):
+            path = root / filename
+            if path.is_file():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["stagnationReason"] = result["stagnationReason"]
+                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif mode in {"high_quality", "maximum"} and consecutive_failures == 1 and result.get("stagnationReason") != "no_targetable_issues":
+        result["stagnationReason"] = None
+        root = store.root / project_id
+        for filename in ("visual_score.json" if page == 1 else f"visual_score_{page}.json", "visual_validation.json" if page == 1 else f"visual_validation_{page}.json", "problem_report.json" if page == 1 else f"problem_report_{page}.json"):
+            path = root / filename
+            if path.is_file():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["stagnationReason"] = None
+                if filename.startswith(("visual_score", "visual_validation")):
+                    payload["revisionStatus"] = "improving"
+                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if accepted_any:
+        result = {**result, "accepted": True, "layout": store.get_slide(project_id, page), "issuesBefore": first["issuesBefore"], "visualBefore": first["visualBefore"], "editableCoverageBefore": first["editableCoverageBefore"], "improvedRegions": sorted(improved)}
+    return result
 
 
 def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> dict:
@@ -31,8 +79,10 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     round_number = len(history) + 1
     scene_path = root / ("scene_raw.json" if page == 1 else f"scene_raw_{page}.json")
     raw_scene = json.loads(scene_path.read_text(encoding="utf-8")) if scene_path.is_file() else {}
-    issues_before = collect_revision_issues(baseline, score_before, raw_scene)
-    priority = {"ghosting": 0, "duplicateText": 1, "wrongOwnership": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7}
+    problem_path = root / ("problem_report.json" if page == 1 else f"problem_report_{page}.json")
+    previous_report = json.loads(problem_path.read_text(encoding="utf-8")) if problem_path.is_file() else {}
+    issues_before = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else collect_revision_issues(baseline, score_before, raw_scene)
+    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "backgroundResidual": 8}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
@@ -46,6 +96,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     erase_text: set[str] = set()
     changed_ids: set[str] = set()
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
+    regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
 
     for issue in target_issues:
         item = by_id.get(str(issue.get("elementId")))
@@ -68,9 +119,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         elif problem in {"wrongBBox", "textOverlap"} and item.get("type") == "text":
             touched_text.add(item["id"])
             changed_ids.add(item["id"])
-        elif problem == "duplicateText":
+        elif problem in {"duplicateText", "duplicateElement"}:
             other = by_id.get(str(issue.get("otherElementId")))
-            if other and other.get("type") == "text":
+            if other and other.get("type") == item.get("type"):
                 loser = item if float(item.get("confidence") or 0) < float(other.get("confidence") or 0) else other
                 loser.setdefault("metadata", {})["suppressed"] = True
                 changed_ids.add(loser["id"])
@@ -78,9 +129,13 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             touched_text.add(item["id"])
             erase_text.add(item["id"])
             changed_ids.add(item["id"])
-        elif problem == "brokenChartOrModule" and item.get("type") == "image":
-            bbox = [float(item.get("x") or 0), float(item.get("y") or 0), float(item.get("x") or 0) + float(item.get("width") or 0), float(item.get("y") or 0) + float(item.get("height") or 0)]
-            target_issues.append({"elementId": item["id"], "problem": "assetBakedIntoBackground", "bbox": bbox})
+        elif problem == "wrongZOrder" and item.get("type") == "text":
+            owner = by_id.get(str(metadata.get("textCleanedFromAsset") or ""))
+            if owner:
+                item["zIndex"] = max(int(item.get("zIndex") or 0), int(owner.get("zIndex") or 0) + 1)
+                changed_ids.add(item["id"])
+        elif problem == "backgroundResidual" and item.get("type") == "image":
+            changed_ids.add(item["id"])
 
     for text_id in touched_text:
         item = by_id[text_id]
@@ -100,7 +155,10 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     if erase_text:
         erase_editable_text_sources(candidate_bg, candidate, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}")
 
-    baked = [issue for issue in target_issues if issue["problem"] == "assetBakedIntoBackground"][:4]
+    residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id]
+    if residual_assets:
+        separate_foreground(candidate_bg, residual_assets)
+    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule"} and isinstance(issue.get("bbox"), list)][:4]
     if baked:
         modules = []
         width, height = float(candidate["slide"]["width"]), float(candidate["slide"]["height"])
@@ -134,15 +192,20 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     visual_delta = float(score_after.get("overall") or 0) - float(score_before.get("overall") or 0)
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
-    editable_improved = coverage_delta > 0.02 and float(score_after.get("overall") or 0) >= 0.8 and visual_delta >= -0.12
-    accepted = bool(changed_ids) and (visual_improved or editable_improved) and len(issues_after) <= len(issues_before) + 1
+    editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
+    local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
+    accepted = bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
+    stagnation_reason = None if accepted else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
     report = {
         "revisionRound": round_number, "accepted": accepted,
         "targetedIssues": target_issues,
-        "issuesBefore": issues_before, "issuesAfter": issues_after,
-        "improvedRegions": improved, "visualBefore": float(score_before.get("overall") or 0),
+        "issuesBefore": issues_before, "issuesAfter": issues_after if accepted else issues_before,
+        "improvedRegions": improved if accepted else [], "visualBefore": float(score_before.get("overall") or 0),
         "visualAfter": float(score_after.get("overall") or 0),
         "editableCoverageBefore": coverage_before, "editableCoverageAfter": coverage_after,
+        "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
     }
     history.append(report)
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -155,14 +218,19 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         difference = candidate_dir / "difference.png"
         if difference.is_file():
             shutil.copy2(difference, root / "difference.png")
-        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.8 or bool(issues_after)
-        score_after.update({"revisionRound": round_number, "revisionStatus": "stagnated" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, **measure_text_coverage(candidate, detected)})
+        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
+        score_after.update({"revisionRound": round_number, "revisionStatus": "improving" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, **measure_text_coverage(candidate, detected)})
         score_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
         validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
         validation_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
-        problem_path = root / ("problem_report.json" if page == 1 else f"problem_report_{page}.json")
-        problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesAfter": issues_after, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
+        problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
         store.save_slide(project_id, page, candidate)
+    else:
+        score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason})
+        score_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
+        validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
+        validation_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
+        problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, "editableTextCoverage": coverage_before, "overall": score_before.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
 
 
@@ -172,7 +240,10 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
         if issue.get("problem") == "textOverlap":
             issues.append({**issue, "problem": "textOverlap"})
         elif issue.get("problem") == "criticalRegionMismatch":
-            issues.append({**issue, "problem": "brokenChartOrModule"})
+            item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)
+            if item and item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:
+                x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+                issues.append({**issue, "problem": "brokenChartOrModule", "bbox": [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]})
     for item in layout.get("elements", []):
         meta = item.get("metadata") or {}
         if item.get("type") != "text" or not str(item.get("text") or "").strip() or item.get("role") in {"logo", "decorative_text"}:
@@ -188,8 +259,15 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
             tolerance = max(6, (float(raw[3]) - float(raw[1])) * 0.5)
             if abs(float(item.get("x") or 0) - float(raw[0])) > tolerance or abs(float(item.get("y") or 0) - float(raw[1])) > tolerance:
                 issues.append({"elementId": item_id, "problem": "wrongBBox"})
-        if meta.get("sourceTextPreserved") and not meta.get("sourceTextRecleaned"):
+        if meta.get("ghostingDetected") or meta.get("sourceTextPreserved") and not meta.get("sourceTextRecleaned"):
             issues.append({"elementId": item_id, "problem": "ghosting"})
+        owner_id = meta.get("textCleanedFromAsset")
+        if owner_id:
+            owner = next((element for element in layout.get("elements", []) if element.get("id") == owner_id), None)
+            if owner and int(item.get("zIndex") or 0) <= int(owner.get("zIndex") or 0):
+                issues.append({"elementId": item_id, "problem": "wrongZOrder"})
+            if owner and not (owner.get("metadata") or {}).get("textCleaned"):
+                issues.append({"elementId": item_id, "problem": "wrongOwnership"})
     texts = [item for item in layout.get("elements", []) if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for index, left in enumerate(texts):
         for right in texts[index + 1:]:
@@ -198,6 +276,16 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
             left_box = (float(left.get("x") or 0), float(left.get("y") or 0), float(left.get("x") or 0) + float(left.get("width") or 0), float(left.get("y") or 0) + float(left.get("height") or 0))
             if _overlap_fraction(left_box, right) > 0.7:
                 issues.append({"elementId": left["id"], "otherElementId": right["id"], "problem": "duplicateText"})
+    active_visuals = [item for item in layout.get("elements", []) if item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    for index, left in enumerate(active_visuals):
+        left_box = (float(left.get("x") or 0), float(left.get("y") or 0), float(left.get("x") or 0) + float(left.get("width") or 0), float(left.get("y") or 0) + float(left.get("height") or 0))
+        for right in active_visuals[index + 1:]:
+            if left.get("type") == right.get("type") and left.get("src") == right.get("src") and (left.get("style") or {}) == (right.get("style") or {}) and _overlap_fraction(left_box, right) >= 0.9:
+                issues.append({"elementId": left["id"], "otherElementId": right["id"], "problem": "duplicateElement"})
+    if int(score.get("backgroundResidualCount") or 0) > 0:
+        for asset in active_visuals:
+            if asset.get("type") == "image" and not (asset.get("metadata") or {}).get("backgroundSeparated"):
+                issues.append({"elementId": asset["id"], "problem": "backgroundResidual"})
     if scene:
         active_images = [item for item in layout.get("elements", []) if item.get("type") == "image" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
         for region in scene.get("regions", []):
@@ -218,3 +306,34 @@ def _overlap_fraction(box: tuple[float, float, float, float], item: dict) -> flo
     right, bottom = x + float(item.get("width") or 0), y + float(item.get("height") or 0)
     overlap = max(0, min(box[2], right) - max(box[0], x)) * max(0, min(box[3], bottom) - max(box[1], y))
     return overlap / max(1, (box[2] - box[0]) * (box[3] - box[1]))
+
+
+def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], by_id: dict[str, dict], output: Path) -> list[dict]:
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    previous = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    if source is None or previous is None:
+        return []
+    height, width = source.shape[:2]
+    analysis = []
+    for index, issue in enumerate(issues):
+        box = issue.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            item = by_id.get(str(issue.get("elementId")))
+            if not item:
+                continue
+            x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+            box = [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]
+        x1, y1, x2, y2 = [int(round(float(value))) for value in box]
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        original_crop = source[y1:y2, x1:x2]
+        previous_crop = previous[y1:y2, x1:x2]
+        original_edges = cv2.Canny(original_crop, 60, 160)
+        previous_edges = cv2.Canny(previous_crop, 60, 160)
+        pixel_difference = float(np.mean(cv2.absdiff(original_crop, previous_crop))) / 255
+        edge_difference = float(np.mean(cv2.absdiff(original_edges, previous_edges))) / 255
+        cv2.imwrite(str(output / f"region_{index + 1}_source.png"), original_crop)
+        cv2.imwrite(str(output / f"region_{index + 1}_previous.png"), previous_crop)
+        analysis.append({"elementId": issue.get("elementId"), "problem": issue.get("problem"), "bbox": [x1, y1, x2, y2], "pixelDifference": round(pixel_difference, 4), "edgeDifference": round(edge_difference, 4), "strategyChange": "movable_image_with_editable_text" if issue.get("problem") in {"brokenChartOrModule", "assetBakedIntoBackground"} else "editable_text_repair" if issue.get("problem") in {"missingEditableText", "ghosting", "wrongBBox", "textOverlap"} else "ownership_repair"})
+    return analysis

@@ -99,3 +99,5 @@ class RevisionResponse(BaseModel):
     visualAfter: float
     editableCoverageBefore: float
     editableCoverageAfter: float
+    stagnationReason: str | None = None
+    regionalAnalysis: list[dict[str, Any]] = Field(default_factory=list)

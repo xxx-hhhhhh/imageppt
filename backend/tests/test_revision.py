@@ -9,6 +9,7 @@ import numpy as np
 from app.models.project_store import ProjectStore
 from app import main as api_main
 from fastapi.testclient import TestClient
+from app.services.reconstruction import revision
 from app.services.reconstruction.revision import revise_problem_regions
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 
@@ -68,3 +69,37 @@ def test_revision_endpoint_uses_saved_page_and_reports_result(tmp_path: Path, mo
     assert payload["accepted"] is True
     assert payload["layout"]["elements"][0]["text"] == "HELLO"
     assert TestClient(api_main.app).post(f"/api/projects/{project_id}/pages/2/revise").status_code == 404
+
+
+def test_high_quality_loop_waits_for_consecutive_failed_rounds(tmp_path: Path, monkeypatch) -> None:
+    store, project_id, layout = _project(tmp_path, suppressed=False)
+    root = tmp_path / project_id
+    (root / "conversion_report.json").write_text(json.dumps({"mode": "high_quality"}), encoding="utf-8")
+    issue = {"problem": "wrongBBox", "elementId": "text_001"}
+    outcomes = [True, False, False]
+
+    def fake_round(*_args):
+        accepted = outcomes.pop(0)
+        return {"accepted": accepted, "layout": layout, "issuesBefore": [issue], "issuesAfter": [issue],
+                "improvedRegions": ["text_001"] if accepted else [], "visualBefore": 0.5,
+                "visualAfter": 0.6 if accepted else 0.5, "editableCoverageBefore": 1.0,
+                "editableCoverageAfter": 1.0, "revisionRound": 3 - len(outcomes),
+                "stagnationReason": None if accepted else "no_measurable_improvement"}
+
+    monkeypatch.setattr(revision, "revise_problem_regions", fake_round)
+    (root / "visual_score.json").write_text(json.dumps({"revisionStatus": "stagnated"}), encoding="utf-8")
+    result = revision.run_revision_loop(store, project_id, 1)
+    assert outcomes == []
+    assert result["accepted"] is True
+    assert result["stagnationReason"] == "consecutive_rounds_without_improvement"
+    assert result["improvedRegions"] == ["text_001"]
+    assert json.loads((root / "visual_score.json").read_text(encoding="utf-8"))["stagnationReason"] == result["stagnationReason"]
+
+
+def test_accept_current_result_persists_decision(tmp_path: Path, monkeypatch) -> None:
+    store, project_id, _ = _project(tmp_path, suppressed=False)
+    monkeypatch.setattr(api_main, "store", store)
+    response = TestClient(api_main.app).post(f"/api/projects/{project_id}/pages/1/accept-result")
+    assert response.status_code == 200
+    score = json.loads((tmp_path / project_id / "visual_score.json").read_text(encoding="utf-8"))
+    assert score["revisionStatus"] == "user_accepted"

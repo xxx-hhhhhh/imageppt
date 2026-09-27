@@ -81,4 +81,6 @@ export interface RevisionResponse {
   visualAfter: number;
   editableCoverageBefore: number;
   editableCoverageAfter: number;
+  stagnationReason?: string | null;
+  regionalAnalysis?: { elementId?: string; problem: string; bbox: number[]; pixelDifference: number; edgeDifference: number; strategyChange: string }[];
 }

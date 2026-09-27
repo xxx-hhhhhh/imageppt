@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import axios from 'axios';
 import type { LayoutElement, LayoutJSON, ProjectInfo } from '../types/layout';
-import { analyzeProject, approvePage, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
+import { acceptCurrentResult, analyzeProject, approvePage, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
 
 interface ProjectState {
   project: ProjectInfo | null;
@@ -20,6 +20,7 @@ interface ProjectState {
   useBasicFallback: () => Promise<void>;
   reanalyzeCurrent: () => Promise<void>;
   downgradeCurrent: () => Promise<void>;
+  acceptCurrent: () => Promise<void>;
   setConversionMode: (mode: 'fast' | 'standard' | 'high_quality' | 'maximum') => void;
   persistPage: (page: number, layout: LayoutJSON) => Promise<void>;
   updateActive: (updater: (layout: LayoutJSON) => LayoutJSON) => void;
@@ -124,6 +125,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       set({ busy: false, message: '问题区域降级失败，当前结果已保留。' });
       throw error;
     }
+  },
+  acceptCurrent: async () => {
+    const { project, activePage } = get();
+    if (!project) return;
+    await acceptCurrentResult(project.id, activePage + 1);
+    set((state) => ({ reviewVersion: state.reviewVersion + 1, message: '已使用当前结果，可继续编辑或导出。' }));
   },
   setConversionMode: (conversionMode) => set({ conversionMode }),
   persistPage: async (page, layout) => {
