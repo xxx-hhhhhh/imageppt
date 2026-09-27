@@ -49,11 +49,12 @@ class AIReconstructionPlanner:
 
         with Image.open(source_path) as source:
             source.load()
+            source_pixels = np.asarray(source.convert("RGB"))[:, :, ::-1]
             for module in modules[:100]:
                 if not isinstance(module, dict) or float(module.get("confidence") or 0) < 0.65:
                     continue
                 requested = module.get("reconstructionStrategy") or module.get("strategy")
-                strategy = {"editable": "editable_text", "whole_image": "cutout_image", "hybrid": "mixed_component"}.get(requested, requested)
+                strategy = {"editable": "editable_text", "whole_image": "cutout_image", "movable_image": "cutout_image", "hybrid": "mixed_component"}.get(requested, requested)
                 if strategy not in {"editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"}:
                     continue
                 module_box = _pixel_box(module.get("bbox"), width, height, max_area=1.0 if strategy == "background" else 0.80)
@@ -65,8 +66,10 @@ class AIReconstructionPlanner:
                 ignore_ids = {str(value) for value in module.get("ignoreIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 if strategy == "ignore":
                     ignore_ids.update(member_ids)
+                if strategy == "native_shape" and _is_flow_module(module) and _flow_needs_image(elements, module_box):
+                    strategy = "mixed_component"
                 stats["plannedModules"] += 1
-                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
+                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "requestedStrategy": requested, "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
 
                 for item_id in member_ids | editable_ids:
                     item = by_id[item_id]
@@ -78,10 +81,22 @@ class AIReconstructionPlanner:
                     for item in elements:
                         if item.get("type") not in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} or _coverage(item, module_box) < 0.75:
                             continue
+                        if any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+                            continue
                         if float(item.get("confidence") or item.get("finalConfidence") or 0) < 0.85 or float((item.get("metadata") or {}).get("visualComplexity") or 0) >= 0.35:
                             continue
                         item.setdefault("metadata", {}).update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "planner", "layerRole": "native_shape"})
                         stats["nativeShapesPlanned"] += 1
+                        stats["plannerSuppressedElements"] += _suppress_native_duplicates(item, elements)
+
+                if strategy == "background":
+                    for item_id in member_ids:
+                        item = by_id[item_id]
+                        if item.get("type") in {"text", "background", "group"}:
+                            continue
+                        metadata = item.setdefault("metadata", {})
+                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "source_background", "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
+                        stats["plannerSuppressedElements"] += 1
 
                 preserve_boxes = [
                     box for raw in module.get("preserveRegions", [])
@@ -89,11 +104,12 @@ class AIReconstructionPlanner:
                 ] if strategy in {"cutout_image", "mixed_component"} else []
                 cv_boxes = _cv_visual_boxes(scene.get("regions") or [], module_box, width, height) if strategy in {"cutout_image", "mixed_component"} else []
                 if strategy == "cutout_image":
-                    boxes = [module_box] if requested == "whole_image" or not (preserve_boxes or cv_boxes) else preserve_boxes
+                    boxes = ([module_box] if _has_nontext_visual(source_pixels, module_box, elements) or _module_has_visual_element(elements, module_box) else []) if requested == "whole_image" else preserve_boxes if preserve_boxes or cv_boxes else ([module_box] if _text_occupancy(module_box, elements) <= 0.20 and _has_nontext_visual(source_pixels, module_box, elements) else [])
                 elif strategy == "mixed_component":
-                    boxes = preserve_boxes if preserve_boxes or cv_boxes else [module_box]
+                    boxes = preserve_boxes if preserve_boxes or cv_boxes else ([module_box] if _is_flow_module(module) and _text_occupancy(module_box, elements) <= 0.20 else [])
                 else:
                     boxes = []
+                module_asset_start = len(planned_assets)
                 for box in boxes + cv_boxes:
                     from_cv = box in cv_boxes
                     snapped = _snap_to_layout_region(box, scene.get("regions") or [], width, height)
@@ -127,7 +143,7 @@ class AIReconstructionPlanner:
                     ]
                     editable_text = [
                         item for item in covered
-                        if item.get("type") == "text" and item.get("id") not in ignore_ids
+                        if item.get("type") == "text"
                         and item.get("role") not in {"logo", "decorative_text"}
                         and float(item.get("confidence") or 0) >= 0.5
                         and str(item.get("text") or "").strip()
@@ -186,13 +202,22 @@ class AIReconstructionPlanner:
                             metadata.update({"plannerModuleId": module_id, "reconstructionStrategy": "editable_text", "reconstructionStrategySource": "planner", "textCleanedFromAsset": asset_id})
                             item["zIndex"] = z_index + 1
                             continue
+                        if item.get("type") == "text" and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.5:
+                            continue
                         if not metadata.get("suppressed"):
                             stats["plannerSuppressedElements"] += 1
                         metadata.update({"suppressed": True, "ownedBy": asset_id, "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
 
+                module_assets = [item["id"] for item in planned_assets[module_asset_start:]]
+                normalized_modules[-1]["assetIds"] = module_assets
+                if strategy in {"cutout_image", "mixed_component"} and not module_assets:
+                    normalized_modules[-1]["resolvedStrategy"] = "editable_text" if _text_occupancy(module_box, elements) > 0 else "background"
+
                 for item_id in ignore_ids:
                     item = by_id[item_id]
                     if item.get("type") == "background":
+                        continue
+                    if item.get("type") == "text" and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.4:
                         continue
                     metadata = item.setdefault("metadata", {})
                     if not metadata.get("suppressed"):
@@ -415,6 +440,62 @@ def _text_occupancy(box: tuple[float, float, float, float], elements: list[dict[
         x, y, w, h = (float(raw.get(key) or 0) for key in ("left", "top", "width", "height"))
         covered += max(0, min(box[2], x + w) - max(box[0], x)) * max(0, min(box[3], y + h) - max(box[1], y))
     return covered / area
+
+
+def _has_nontext_visual(source: np.ndarray, box: tuple[int, int, int, int], elements: list[dict[str, Any]]) -> bool:
+    x1, y1, x2, y2 = box
+    crop = source[y1:y2, x1:x2]
+    if crop.size == 0:
+        return False
+    edges = cv2.Canny(crop, 70, 160)
+    for item in elements:
+        if item.get("type") != "text":
+            continue
+        raw = item.get("bbox") or {}
+        tx1, ty1 = float(raw.get("left") or 0), float(raw.get("top") or 0)
+        tx2, ty2 = tx1 + float(raw.get("width") or 0), ty1 + float(raw.get("height") or 0)
+        left, top = max(0, round(tx1 - x1) - 3), max(0, round(ty1 - y1) - 3)
+        right, bottom = min(x2 - x1, round(tx2 - x1) + 3), min(y2 - y1, round(ty2 - y1) + 3)
+        if right > left and bottom > top:
+            edges[top:bottom, left:right] = 0
+    return np.count_nonzero(edges) >= max(24, crop.shape[0] * crop.shape[1] * 0.001)
+
+
+def _module_has_visual_element(elements: list[dict[str, Any]], box: tuple[int, int, int, int]) -> bool:
+    return any(item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and _coverage(item, box) >= 0.6 for item in elements)
+
+
+def _is_flow_module(module: dict[str, Any]) -> bool:
+    role = str(module.get("role") or "").casefold()
+    return any(word in role for word in ("flow", "process", "workflow", "流程", "过程"))
+
+
+def _flow_needs_image(elements: list[dict[str, Any]], box: tuple[int, int, int, int]) -> bool:
+    shapes = [item for item in elements if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and _coverage(item, box) >= 0.75]
+    if not shapes:
+        return True
+    return any(float(item.get("confidence") or item.get("finalConfidence") or 0) < 0.85 or float((item.get("metadata") or {}).get("visualComplexity") or 0) >= 0.35 for item in shapes)
+
+
+def _suppress_native_duplicates(owner: dict[str, Any], elements: list[dict[str, Any]]) -> int:
+    raw = owner.get("bbox") or {}
+    owner_box = (round(float(raw.get("left") or 0)), round(float(raw.get("top") or 0)), round(float(raw.get("left") or 0) + float(raw.get("width") or 0)), round(float(raw.get("top") or 0) + float(raw.get("height") or 0)))
+    suppressed = 0
+    for item in elements:
+        if item is owner or item.get("type") not in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:
+            continue
+        metadata = item.setdefault("metadata", {})
+        if any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy", "preserveWholeAsset")):
+            continue
+        if item.get("type") != owner.get("type") or (item.get("style") or {}) != (owner.get("style") or {}):
+            continue
+        box = item.get("bbox") or {}
+        candidate = (round(float(box.get("left") or 0)), round(float(box.get("top") or 0)), round(float(box.get("left") or 0) + float(box.get("width") or 0)), round(float(box.get("top") or 0) + float(box.get("height") or 0)))
+        if _iou(owner_box, candidate) < 0.85:
+            continue
+        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": owner["id"], "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
+        suppressed += 1
+    return suppressed
 
 
 def _module_alpha(module: dict[str, Any], crop_box: tuple[int, int, int, int]) -> np.ndarray | None:

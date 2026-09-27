@@ -38,7 +38,7 @@ def test_qwen_scene_repairs_malformed_property_separator() -> None:
 def test_plan_accepts_layered_module_strategies() -> None:
     modules = [
         {"id": strategy, "bbox": {"left": 0.1, "top": 0.1, "width": 0.2, "height": 0.2}, "reconstructionStrategy": strategy}
-        for strategy in ("editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore")
+        for strategy in ("editable_text", "native_shape", "movable_image", "cutout_image", "mixed_component", "background", "ignore")
     ]
     plan = validate_json({"reconstructionPlan": {"modules": modules}}, "scene")["reconstructionPlan"]
     assert [item["reconstructionStrategy"] for item in plan["modules"]] == [item["reconstructionStrategy"] for item in modules]
@@ -181,8 +181,78 @@ def test_overlapping_whole_modules_do_not_claim_the_same_text(tmp_path: Path) ->
         "elements": [_element("shared_text", "text", (70, 140, 180, 30), "Shared line")],
     }
     stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "overlap", 1)
+    assert stats["wholeImageRegions"] == 0
+    assert not scene["elements"][0]["metadata"].get("suppressed")
+
+
+def test_mixed_text_module_does_not_become_whole_image(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    scene = {"canvas": {"width": 400, "height": 300}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "text-card", "role": "card", "reconstructionStrategy": "mixed_component", "bbox": {"left": 0.1, "top": 0.1, "width": 0.6, "height": 0.4}, "confidence": 0.9},
+    ]}}, "elements": [_element("headline", "text", (50, 50, 200, 40), "Editable heading")]}
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    assert stats["wholeImageRegions"] == 0
+    assert scene["elements"][0]["metadata"].get("ownedBy") is None
+
+
+def test_chart_movable_image_keeps_its_label_editable(tmp_path: Path) -> None:
+    source = tmp_path / "chart.png"
+    with Image.new("RGB", (320, 220), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.line((45, 170, 80, 120, 140, 135, 205, 70), fill="#0a4cbd", width=5)
+        draw.text((90, 185), "Chart", fill="#102b5c")
+        image.save(source)
+    label = _element("chart-label", "text", (85, 180, 75, 20), "Chart")
+    scene = {"canvas": {"width": 320, "height": 220}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "chart", "role": "chart", "reconstructionStrategy": "movable_image", "bbox": {"left": 0.1, "top": 0.2, "width": 0.65, "height": 0.75}, "confidence": 0.95},
+    ]}}, "elements": [label]}
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
     assert stats["wholeImageRegions"] == 1
-    assert len([item for item in scene["elements"] if item["id"].startswith("planner_page_")]) == 1
+    assert not label["metadata"].get("suppressed")
+    assert label["metadata"]["textCleanedFromAsset"] == "planner_page_1_region_001"
+    assert scene["reconstructionPlan"]["modules"][0]["requestedStrategy"] == "movable_image"
+
+
+def test_flowchart_prefers_reliable_shapes_and_falls_back_for_complex_nodes(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    plan = {"modules": [{"id": "flow", "role": "flowchart", "reconstructionStrategy": "native_shape", "bbox": {"left": 0.1, "top": 0.1, "width": 0.7, "height": 0.7}, "confidence": 0.95}]}
+    rectangle = _element("node", "rectangle", (60, 80, 100, 60), confidence=0.95)
+    scene = {"canvas": {"width": 400, "height": 300}, "vision": {"aiUsed": True, "reconstructionPlan": plan}, "elements": [rectangle]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    assert scene["reconstructionPlan"]["modules"][0]["resolvedStrategy"] == "native_shape"
+    assert rectangle["metadata"]["reconstructionStrategy"] == "native_shape"
+
+    complex_node = _element("node", "rectangle", (60, 80, 100, 60), confidence=0.6)
+    scene = {"canvas": {"width": 400, "height": 300}, "vision": {"aiUsed": True, "reconstructionPlan": plan}, "elements": [complex_node]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    assert scene["reconstructionPlan"]["modules"][0]["resolvedStrategy"] == "mixed_component"
+    assert any(item["type"] == "image" for item in scene["elements"])
+
+
+def test_background_module_owns_visual_member_but_not_text(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (200, 150), "white").save(source)
+    scene = {"canvas": {"width": 200, "height": 150}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "texture", "role": "background", "reconstructionStrategy": "background", "bbox": {"left": 0, "top": 0, "width": 1, "height": 1}, "memberIds": ["wash", "caption"], "confidence": 0.9},
+    ]}}, "elements": [_element("wash", "rectangle", (0, 0, 200, 150)), _element("caption", "text", (20, 20, 80, 20), "Caption")]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    assert scene["elements"][0]["metadata"]["ownedBy"] == "source_background"
+    assert not scene["elements"][1]["metadata"].get("suppressed")
+
+
+def test_native_shape_suppresses_exact_duplicate_shape(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (200, 150), "white").save(source)
+    first = _element("first", "rectangle", (30, 30, 80, 50), confidence=0.95)
+    duplicate = _element("duplicate", "rectangle", (30, 30, 80, 50), confidence=0.9)
+    scene = {"canvas": {"width": 200, "height": 150}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "shape", "role": "simple_geometry", "reconstructionStrategy": "native_shape", "bbox": {"left": 0.1, "top": 0.1, "width": 0.6, "height": 0.5}, "confidence": 0.9},
+    ]}}, "elements": [first, duplicate]}
+    stats = AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    assert stats["nativeShapesPlanned"] == 1
+    assert duplicate["metadata"]["ownedBy"] == "first"
 
 
 def test_image_crop_that_slices_a_text_line_is_rejected(tmp_path: Path) -> None:

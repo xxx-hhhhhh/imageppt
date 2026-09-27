@@ -47,8 +47,8 @@ class QwenPlanModule(BaseModel):
     moduleId: str | None = None
     role: str = "component"
     bbox: QwenPlanBox
-    strategy: Literal["editable", "whole_image", "hybrid", "editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"] = "editable"
-    reconstructionStrategy: Literal["editable_text", "native_shape", "cutout_image", "mixed_component", "background", "whole_image", "ignore"] | None = None
+    strategy: Literal["editable", "whole_image", "hybrid", "editable_text", "native_shape", "movable_image", "cutout_image", "mixed_component", "background", "ignore"] = "editable"
+    reconstructionStrategy: Literal["editable_text", "native_shape", "movable_image", "cutout_image", "mixed_component", "background", "whole_image", "ignore"] | None = None
     visualComplexity: float = Field(default=0.5, ge=0, le=1)
     editablePriority: float = Field(default=0.5, ge=0, le=1)
     preserveWhole: bool = False
