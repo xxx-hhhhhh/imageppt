@@ -23,7 +23,7 @@ from app.services.reconstruction.quality_guard import preserve_bad_text_regions
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
-from app.services.reconstruction.text_erasure import erase_editable_text_sources
+from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -162,6 +162,7 @@ class ReconstructionPipeline:
             "detectedTextCount": 0,
             "editableTextCount": 0,
             "nonEditableTextCount": 0,
+            "ghostingCount": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
@@ -256,7 +257,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in layout.get("elements", [])):
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
                     render_preview(background_path, layout, preview_path)
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
@@ -265,7 +266,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in layout.get("elements", [])):
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
                     render_preview(background_path, layout, preview_path)
                     best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             stagnation = 0
@@ -311,6 +312,10 @@ class ReconstructionPipeline:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
                 self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            ghosting_count = count_text_ghosting(normalized_path, background_path, layout)
+            reconstruction_stats["ghostingCount"] += ghosting_count
+            score["ghostingCount"] = ghosting_count
+            score["editableTextMismatchCount"] = sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and (item.get("metadata") or {}).get("visualTextMismatch") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
             asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
             reconstruction_stats.update(asset_metrics)
             score.update(asset_metrics)
@@ -318,10 +323,17 @@ class ReconstructionPipeline:
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
             score.update(text_coverage)
-            if conversion_mode in {"high_quality", "maximum"} and text_coverage["editableTextCoverage"] < 0.8:
+            if conversion_mode in {"high_quality", "maximum"} and text_coverage["editableTextCoverage"] < 0.95:
                 revision_status = "stagnated"
                 score["coverageGate"] = "review_required"
                 warnings.append("普通文字可编辑覆盖率偏低，需复核未转换的文字。")
+            if conversion_mode in {"high_quality", "maximum"} and ghosting_count:
+                revision_status = "stagnated"
+                score["ghostingGate"] = "review_required"
+                warnings.append("检测到可编辑文字下方仍有原字残留，需复核文字清理。")
+            if conversion_mode in {"high_quality", "maximum"} and score["editableTextMismatchCount"]:
+                revision_status = "stagnated"
+                score["textFidelityGate"] = "review_required"
             if conversion_mode in {"high_quality", "maximum"} and float(score.get("overall", 0)) < 0.85:
                 revision_status = "stagnated"
                 score["visualGate"] = "review_required"
@@ -414,6 +426,7 @@ class ReconstructionPipeline:
                 "detectedTextCount": reconstruction_stats["detectedTextCount"],
                 "editableTextCount": reconstruction_stats["editableTextCount"],
                 "nonEditableTextCount": reconstruction_stats["nonEditableTextCount"],
+                "ghostingCount": reconstruction_stats["ghostingCount"],
                 "editableTextCoverage": round(reconstruction_stats["editableTextCount"] / reconstruction_stats["detectedTextCount"], 4) if reconstruction_stats["detectedTextCount"] else 1.0,
                 "suppressedDuplicates": reconstruction_stats["suppressedDuplicates"],
                 "visualTextFallbacks": reconstruction_stats["visualTextFallbacks"],

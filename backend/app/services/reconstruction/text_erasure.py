@@ -106,6 +106,66 @@ def erase_editable_text_sources(
     return {"backgroundTextErased": len(texts), "assetTextErased": cleaned_assets}
 
 
+def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) -> int:
+    """Count editable OCR lines whose original glyph edges remain underneath."""
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    if source is None or background is None:
+        return 0
+    height, width = source.shape[:2]
+    count = 0
+    assets = [item for item in layout.get("elements", []) if item.get("type") == "image" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    for item in layout.get("elements", []):
+        meta = item.get("metadata") or {}
+        raw = meta.get("rawOCRBBox")
+        if item.get("type") != "text" or not str(item.get("text") or "").strip() or not isinstance(raw, list) or len(raw) != 4:
+            continue
+        if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        x1, y1, x2, y2 = [int(round(float(value))) for value in raw]
+        box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        original = source[box[1]:box[3], box[0]:box[2]]
+        if _source_edges_retained(original, background[box[1]:box[3], box[0]:box[2]]):
+            count += 1
+            meta["ghostingDetected"] = True
+            continue
+        for asset in assets:
+            ax, ay = float(asset.get("x") or 0), float(asset.get("y") or 0)
+            aw, ah = float(asset.get("width") or 0), float(asset.get("height") or 0)
+            if aw <= 0 or ah <= 0 or ax > box[0] or ay > box[1] or ax + aw < box[2] or ay + ah < box[3]:
+                continue
+            path = _path_from_src(asset.get("src"))
+            if path is None or not path.is_file():
+                continue
+            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if image is None or image.ndim != 3:
+                continue
+            sx, sy = image.shape[1] / aw, image.shape[0] / ah
+            bx1, by1 = int(round((box[0] - ax) * sx)), int(round((box[1] - ay) * sy))
+            bx2, by2 = int(round((box[2] - ax) * sx)), int(round((box[3] - ay) * sy))
+            patch = image[by1:by2, bx1:bx2]
+            if patch.size == 0:
+                continue
+            if patch.shape[2] == 4 and np.mean(patch[:, :, 3]) < 128:
+                continue
+            patch = cv2.resize(patch[:, :, :3], (original.shape[1], original.shape[0]))
+            if _source_edges_retained(original, patch):
+                count += 1
+                meta["ghostingDetected"] = True
+                break
+    return count
+
+
+def _source_edges_retained(source: np.ndarray, candidate: np.ndarray) -> bool:
+    edges = cv2.Canny(source, 60, 160) > 0
+    if np.count_nonzero(edges) < 12:
+        return False
+    close_pixels = np.max(cv2.absdiff(source, candidate), axis=2) <= 8
+    return float(np.count_nonzero(edges & close_pixels)) / np.count_nonzero(edges) >= 0.65
+
+
 def _mark(mask: np.ndarray, box: tuple[int, int, int, int], padding: int) -> None:
     x1, y1, x2, y2 = box
     h, w = mask.shape

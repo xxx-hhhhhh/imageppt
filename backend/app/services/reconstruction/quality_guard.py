@@ -8,7 +8,7 @@ import numpy as np
 
 
 def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_path: Path, layout: dict, asset_dir: Path, page: int, minimum_f1: float | None = None) -> dict[str, int]:
-    """Keep OCR text editable when it is present in the rendered line region.
+    """Keep ordinary OCR text editable, reporting visual mismatches for review.
 
     The decision is recorded per element so the user can see why that line was
     preserved as an image. A whole cleaned module is restored together when
@@ -43,6 +43,13 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
                 mask = np.zeros(background.shape[:2], dtype=np.uint8)
                 mask[y1:y2, x1:x2] = 255
                 background = cv2.inpaint(background, mask, 4, cv2.INPAINT_TELEA)
+            if _ordinary_text(item):
+                from app.services.reconstruction.text_erasure import erase_editable_text_sources
+                erase_editable_text_sources(background_path, layout, target_text_ids={str(item["id"])})
+                background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+                metadata["visualTextMismatch"] = True
+                _ensure_readable_text(item, preview[y1:y2, x1:x2])
+                continue
             metadata.update({"suppressRender": True, "sourceTextPreserved": True, "ownedBy": owner, "fallbackReason": "source_asset_owns_text"})
             preserved += 1
             continue
@@ -54,6 +61,20 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             background = cv2.inpaint(background, mask, 4, cv2.INPAINT_TELEA)
             metadata["sourceTextRecleaned"] = True
         if rendered:
+            continue
+        if _ordinary_text(item):
+            confidence = item.get("finalConfidence", item.get("confidence"))
+            if confidence is not None and float(confidence) < 0.4 and fidelity < 0.6:
+                if _active_asset_overlaps((x1, y1, x2, y2), elements):
+                    metadata["visualTextMismatch"] = True
+                    continue
+                metadata.update({"suppressed": True, "suppressRender": True, "fallbackReason": "low_confidence_ocr_mismatch"})
+                if not _other_editable_text_overlaps((x1, y1, x2, y2), elements, item["id"]):
+                    background[y1:y2, x1:x2] = source[y1:y2, x1:x2]
+                    metadata["sourceVisualRestored"] = True
+                continue
+            metadata["visualTextMismatch"] = True
+            _ensure_readable_text(item, preview[y1:y2, x1:x2])
             continue
         if asset_id:
             bad_assets.add(str(asset_id))
@@ -89,9 +110,34 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             if metadata.get("textCleanedFromAsset") == asset_id:
                 metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch"})
                 preserved += 1
-    if preserved or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in elements):
+    if preserved or any((item.get("metadata") or {}).get(key) for item in elements for key in ("sourceTextRecleaned", "sourceVisualRestored")):
         cv2.imwrite(str(background_path), background)
     return {"preservedTextRegions": preserved, "restoredModules": restored_modules}
+
+
+def _ordinary_text(item: dict) -> bool:
+    metadata = item.get("metadata") or {}
+    return item.get("role") not in {"logo", "decorative_text"} and not metadata.get("decorativeArtText")
+
+
+def _ensure_readable_text(item: dict, preview_region: np.ndarray) -> None:
+    if preview_region.size == 0:
+        return
+    style = item.setdefault("style", {})
+    color = str(style.get("color") or "#111827").lstrip("#")
+    if len(color) != 6:
+        return
+    try:
+        red, green, blue = (int(color[index:index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        return
+    current_luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    backdrop = np.median(preview_region.reshape(-1, 3), axis=0)
+    backdrop_luma = float(0.2126 * backdrop[2] + 0.7152 * backdrop[1] + 0.0722 * backdrop[0])
+    if abs(current_luma - backdrop_luma) >= 75:
+        return
+    style["color"] = "#102B5C" if backdrop_luma >= 125 else "#FFFFFF"
+    item.setdefault("metadata", {})["visualTextAdjusted"] = True
 
 
 def _clip_box(box: list[float], shape: tuple[int, ...]) -> tuple[int, int, int, int]:
@@ -115,6 +161,38 @@ def _source_asset_owner(box: tuple[int, int, int, int], elements: list[dict]) ->
         if overlap / area >= 0.85:
             return str(asset["id"])
     return None
+
+
+def _active_asset_overlaps(box: tuple[int, int, int, int], elements: list[dict]) -> bool:
+    x1, y1, x2, y2 = box
+    area = max(1, (x2 - x1) * (y2 - y1))
+    for asset in elements:
+        metadata = asset.get("metadata") or {}
+        if asset.get("type") != "image" or any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        ax1, ay1 = float(asset.get("x") or 0), float(asset.get("y") or 0)
+        ax2, ay2 = ax1 + float(asset.get("width") or 0), ay1 + float(asset.get("height") or 0)
+        overlap = max(0.0, min(x2, ax2) - max(x1, ax1)) * max(0.0, min(y2, ay2) - max(y1, ay1))
+        if overlap / area > 0.2:
+            return True
+    return False
+
+
+def _other_editable_text_overlaps(box: tuple[int, int, int, int], elements: list[dict], excluded_id: str) -> bool:
+    x1, y1, x2, y2 = box
+    area = max(1, (x2 - x1) * (y2 - y1))
+    for text in elements:
+        metadata = text.get("metadata") or {}
+        if text.get("id") == excluded_id or text.get("type") != "text" or any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw = metadata.get("rawOCRBBox")
+        if not isinstance(raw, list) or len(raw) != 4:
+            continue
+        tx1, ty1, tx2, ty2 = map(float, raw)
+        overlap = max(0.0, min(x2, tx2) - max(x1, tx1)) * max(0.0, min(y2, ty2) - max(y1, ty1))
+        if overlap / area > 0.2:
+            return True
+    return False
 
 
 def _edge_f1(source: np.ndarray, preview: np.ndarray) -> float:
