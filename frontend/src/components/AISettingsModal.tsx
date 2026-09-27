@@ -112,13 +112,14 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
     <div className="ai-modal-header"><h2 id="ai-settings-title">AI视觉模型设置</h2><button className="modal-close" onClick={onClose} aria-label="关闭">×</button></div>
     <div className="ai-modal-body">
       <label className="toggle-row"><span>启用 AI视觉理解</span><input type="checkbox" checked={settings.enabled} onChange={(event) => update({ enabled: event.target.checked, selectedProvider: event.target.checked ? 'qwen' : 'local' })} /></label>
-      <label className="field"><span>AI Provider</span><select value={settings.selectedProvider} onChange={(event) => update({ selectedProvider: event.target.value as 'qwen' | 'local', enabled: event.target.value === 'qwen' })}><option value="local">关闭AI，仅本地解析</option><option value="qwen">Qwen3-VL-Flash</option></select></label>
-      <div className="provider-section-title">Qwen3-VL-Flash</div>
+      <label className="field"><span>AI Provider</span><select value={settings.selectedProvider} onChange={(event) => update({ selectedProvider: event.target.value as 'qwen' | 'local', enabled: event.target.value === 'qwen' })}><option value="local">关闭AI，仅本地解析</option><option value="qwen">千问视觉理解</option></select></label>
+      <div className="provider-section-title">千问视觉理解</div>
       <div className="provider-card">
         <div className="provider-key-label"><span>Qwen API Key</span><span className={qwen.configured ? 'provider-ok' : 'provider-muted'}>{qwen.configured ? '● 已配置' : '○ 未配置'}</span></div>
         <div className="key-input"><input type={visibleKey ? 'text' : 'password'} placeholder={qwen.apiKeyMasked || '输入 Qwen API Key'} value={draftKey} onChange={(event) => { setDraftKey(event.target.value); setClearKey(false); }} /><button type="button" onClick={() => setVisibleKey((value) => !value)}>{visibleKey ? '隐藏' : '显示'}</button><button type="button" onClick={() => { setDraftKey(''); setClearKey(true); }} disabled={!qwen.configured && !draftKey}>清除 Key</button></div>
         <label className="field"><span>Qwen Base URL</span><input value={qwen.baseUrl} onChange={(event) => updateQwen({ baseUrl: event.target.value })} /></label>
-        <label className="field"><span>Model</span><input value="qwen3-vl-flash" readOnly /></label>
+        <label className="field"><span>视觉模型</span><select value={qwen.model} onChange={(event) => updateQwen({ model: event.target.value })}><option value="qwen3-vl-flash">Qwen3-VL-Flash</option><option value="qwen3-vl-plus">Qwen3-VL-Plus</option></select></label>
+        <div className="network-hint">图片修复另用 Qwen-Image-Edit-Plus；仅在高质量模式遇到复杂文字背景时按需调用。</div>
       </div>
       <div className="provider-section-title">网络代理</div>
       <div className="network-card">
@@ -130,7 +131,7 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
       <div className="field"><span>模式</span><div className="radio-row"><label><input type="radio" checked={settings.mode === 'fast'} onChange={() => update({ mode: 'fast' })} /> 快速</label><label><input type="radio" checked={settings.mode === 'standard'} onChange={() => update({ mode: 'standard' })} /> 标准</label><label><input type="radio" checked={settings.mode === 'high'} onChange={() => update({ mode: 'high' })} /> 高精度</label></div></div>
       <button className="test-connection" disabled={busy} onClick={() => void testCurrent()}>测试当前模型</button>
       {(diagnostics.proxyTcp || diagnostics.qwenBaseUrl || diagnostics.qwenApi) && <div className="network-test-results"><div>Qwen TCP：{diagnostics.tcp ? 'PASS' : 'FAIL'}</div><div>HTTPS Direct：{diagnostics.qwenBaseUrl?.status || '—'} {diagnostics.qwenBaseUrl?.message || ''}</div><div>Auth：{diagnostics.auth ? 'PASS' : 'FAIL'}</div><div>Model Request：{diagnostics.modelReachable ? 'PASS' : 'FAIL'}</div><div>VISION_OK：{diagnostics.visionRequest ? 'PASS' : 'FAIL'}</div><div>Proxy TCP：{diagnostics.proxyTcp?.status || '—'}</div><div>Connection path：{testResult?.connectionPath || diagnostics.connectionPath || diagnostics.networkPath || '—'}</div>{testResult?.latencyMs != null && <div>Latency：{testResult.latencyMs} ms</div>}</div>}
-      {testResult?.success && <div className="ai-status"><div>Provider: Qwen3-VL-Flash</div><div>Model: {testResult.model}</div><div>Network: {testResult.connectionPath || 'DIRECT'}</div><div>Latency: {testResult.latencyMs ?? '—'} ms</div></div>}
+      {testResult?.success && <div className="ai-status"><div>Provider: 千问视觉理解</div><div>Model: {testResult.model}</div><div>Network: {testResult.connectionPath || 'DIRECT'}</div><div>Latency: {testResult.latencyMs ?? '—'} ms</div></div>}
       {testResult && !testResult.success && <div className="ai-error"><div>HTTP：{testResult.statusCode ?? '—'}</div><div>Error：{testResult.errorType || testResult.errorCode || 'unknown'}</div><div>Stage：{testResult.stage || 'request'}</div></div>}
       {status && <div className="ai-status">状态：{status}</div>}{error && <div className="ai-error">{error}</div>}
       <div className="local-secret-note">API Key 仅保存在本机设置目录，不写入 Google Drive 项目目录。</div>

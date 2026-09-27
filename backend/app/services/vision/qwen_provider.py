@@ -125,7 +125,7 @@ class QwenProvider(OpenAICompatibleVisionProvider):
             provider_name="qwen",
             api_key=api_key if api_key is not None else config.api_key,
             base_url=normalize_qwen_base_url(base_url if base_url is not None else config.base_url, api_key if api_key is not None else config.api_key),
-            model=QWEN_MODEL,
+            model=model or config.model or QWEN_MODEL,
             timeout=runtime.timeout,
             max_retries=0,
             proxy_url=first_proxy,
@@ -172,7 +172,7 @@ def test_qwen_connectivity(vision_settings: VisionSettings | None = None) -> dic
     settings = vision_settings or load_vision_settings()
     config = settings.providers["qwen"]
     base_url = normalize_qwen_base_url(config.base_url, config.api_key)
-    model = QWEN_MODEL
+    model = config.model or QWEN_MODEL
     proxy = resolve_proxy(settings.proxy_mode, settings.manual_proxy)
     proxy_tcp = proxy_tcp_test(proxy.url)
     parsed = urlparse(base_url)

@@ -148,7 +148,7 @@ def load_vision_settings() -> VisionSettings:
     except (OSError, ValueError, TypeError):
         pass
     value.providers["qwen"].base_url = normalize_qwen_base_url(value.providers["qwen"].base_url, value.providers["qwen"].api_key)
-    value.providers["qwen"].model = QWEN_MODEL
+    value.providers["qwen"].model = value.providers["qwen"].model or QWEN_MODEL
     value.providers["qwen"].enabled = value.selected_provider == "qwen"
     return value
 
@@ -185,7 +185,7 @@ def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSett
         current.providers["qwen"] = ProviderSettings.from_dict(raw, current.providers["qwen"])
     current.providers["qwen"].enabled = current.selected_provider == "qwen"
     current.providers["qwen"].base_url = normalize_qwen_base_url(current.providers["qwen"].base_url, current.providers["qwen"].api_key)
-    current.providers["qwen"].model = QWEN_MODEL
+    current.providers["qwen"].model = current.providers["qwen"].model or QWEN_MODEL
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"vision": current.to_dict()}, ensure_ascii=False, indent=2), encoding="utf-8")

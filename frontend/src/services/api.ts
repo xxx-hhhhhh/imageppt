@@ -120,9 +120,9 @@ export async function testVisionSettings(): Promise<VisionTestResult> {
   return response.data;
 }
 
-export async function getVisualScore(projectId: string, page = 1): Promise<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; issues?: { problem?: string }[] }> {
+export async function getVisualScore(projectId: string, page = 1): Promise<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; visionProvider?: string; visionModel?: string | null; aiBackgroundRepairs?: number; issues?: { problem?: string }[] }> {
   const file = page === 1 ? 'visual_validation.json' : `visual_validation_${page}.json`;
-  const response = await api.get<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; issues?: { problem?: string }[] }>(`/projects/${projectId}/artifacts/${file}`);
+  const response = await api.get<{ overall?: number; revisionStatus?: string; revisionRound?: number; stagnationReason?: string | null; visionProvider?: string; visionModel?: string | null; aiBackgroundRepairs?: number; issues?: { problem?: string }[] }>(`/projects/${projectId}/artifacts/${file}`);
   return response.data;
 }
 

@@ -24,3 +24,14 @@ def test_qwen_endpoint_selection_is_explicit_even_with_workspace_key(tmp_path, m
     international = runtime_settings.save_vision_settings({"base_url": runtime_settings.QWEN_CLOUD_BASE_URL})
     assert international.base_url == runtime_settings.QWEN_CLOUD_BASE_URL
     assert runtime_settings.load_vision_settings().base_url == runtime_settings.QWEN_CLOUD_BASE_URL
+
+
+def test_selected_qwen_plus_model_survives_reload_and_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime_settings, "_settings_path", lambda: tmp_path / "settings.json")
+    saved = runtime_settings.save_vision_settings({"providers": {"qwen": {"model": "qwen3-vl-plus"}}})
+    assert saved.model == "qwen3-vl-plus"
+    loaded = runtime_settings.load_vision_settings()
+    assert loaded.model == "qwen3-vl-plus"
+    from app.services.vision.qwen_provider import QwenProvider
+    provider = QwenProvider(vision_settings=loaded, api_key="sk-test-only")
+    assert provider.model == "qwen3-vl-plus"

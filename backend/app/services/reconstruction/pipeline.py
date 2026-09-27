@@ -340,6 +340,9 @@ class ReconstructionPipeline:
             if page_index > 1 and (page_output / "difference.png").is_file():
                 shutil.copy2(page_output / "difference.png", page_output / f"difference_{page_index}.png")
             score["revisionStatus"] = revision_status
+            score["visionProvider"] = routing.get("usedProvider", "local")
+            score["visionModel"] = routing.get("usedModel")
+            score["aiBackgroundRepairs"] = reconstruction_stats["aiBackgroundRepairs"]
             score["revisionRounds"] = len(critic_reports)
             score["revisionRound"] = 0
             score["issuesBefore"] = []
