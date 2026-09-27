@@ -37,7 +37,10 @@ class AIReconstructionPlanner:
         width, height = int(canvas.get("width") or 0), int(canvas.get("height") or 0)
         if width < 32 or height < 32:
             return stats
-        modules = list(modules) + (_unplanned_visual_modules(scene.get("regions") or [], scene.get("elements") or [], width, height) if include_detected_visuals else [])
+        if include_detected_visuals:
+            modules = list(modules) + _unplanned_visual_modules(scene.get("regions") or [], scene.get("elements") or [], width, height)
+            modules += _segmented_visual_modules(scene.get("segmentation") or [], scene.get("elements") or [], width, height)
+            modules += _contour_visual_modules(source_path, scene.get("elements") or [], width, height)
         elements = scene.setdefault("elements", [])
         by_id = {str(item.get("id")): item for item in elements}
         planned_assets: list[dict[str, Any]] = []
@@ -46,7 +49,7 @@ class AIReconstructionPlanner:
 
         with Image.open(source_path) as source:
             source.load()
-            for module in modules[:80]:
+            for module in modules[:100]:
                 if not isinstance(module, dict) or float(module.get("confidence") or 0) < 0.65:
                     continue
                 requested = module.get("reconstructionStrategy") or module.get("strategy")
@@ -148,12 +151,15 @@ class AIReconstructionPlanner:
                             pad_y = max(2, round((ty2 - ty1) * 0.20))
                             cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
-                    if text_area_ratio > 0.20 and (module_id.startswith("detected_visual_") or strategy == "mixed_component"):
+                    if text_area_ratio > 0.20 and (module_id.startswith(("detected_visual_", "segmented_visual_", "contour_visual_")) or strategy == "mixed_component"):
                         continue
                     safe_to_clean = text_area_ratio <= 0.20
                     source.crop(box).convert("RGB").save(module_dir / f"{asset_id}.png", format="PNG")
                     if np.any(mask) and safe_to_clean:
                         crop = _clean_text_from_asset(crop, mask)
+                    alpha = _module_alpha(module, box)
+                    if alpha is not None:
+                        crop = np.dstack((crop, alpha))
                     cv2.imwrite(str(asset_path), crop)
                     cv2.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
                     z_index = max((int(item.get("zIndex") or 0) for item in covered), default=1) + 1
@@ -339,6 +345,98 @@ def _unplanned_visual_modules(regions: list[dict[str, Any]], elements: list[dict
             "editablePriority": "normal",
         })
     return modules[:32]
+
+
+def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dict[str, Any]], width: int, height: int) -> list[dict[str, Any]]:
+    modules = []
+    for index, segment in enumerate(segments):
+        raw = segment.get("bbox") or {}
+        try:
+            x, y, w, h = (float(raw[key]) for key in ("left", "top", "width", "height"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        area_ratio = w * h / max(1, width * height)
+        if not 0.0003 <= area_ratio <= 0.30 or w < 20 or h < 20 or _text_occupancy((x, y, x + w, y + h), elements) > 0.12:
+            continue
+        mask = np.asarray(segment.get("mask") or [], dtype=np.uint8)
+        if mask.ndim != 2 or not mask.size:
+            continue
+        fill = float(np.count_nonzero(mask)) / mask.size
+        if not 0.15 <= fill <= 0.98:
+            continue
+        bbox = {"left": x / width, "top": y / height, "width": w / width, "height": h / height}
+        modules.append({"id": f"segmented_visual_{index + 1}", "role": "complex_visual", "reconstructionStrategy": "cutout_image", "bbox": bbox, "preserveRegions": [bbox], "confidence": max(0.66, float(segment.get("confidence") or 0)), "maskBBox": [round(x), round(y), round(x + w), round(y + h)], "mask": mask})
+    return modules[:24]
+
+
+def _contour_visual_modules(source_path: Path, elements: list[dict[str, Any]], width: int, height: int) -> list[dict[str, Any]]:
+    image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    if image is None:
+        return []
+    edges = cv2.Canny(image, 70, 160)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    proposals = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        ratio = w * h / max(1, width * height)
+        if w < 20 or h < 20 or not 0.0002 <= ratio <= 0.12 or max(w / h, h / w) > 6:
+            continue
+        if (x <= 2 or y <= 2 or x + w >= width - 2 or y + h >= height - 2) and ratio > 0.02:
+            continue
+        fill = cv2.contourArea(contour) / max(1, w * h)
+        if fill < 0.40 or _text_occupancy((x, y, x + w, y + h), elements) > 0.08:
+            continue
+        patch = image[y:y + h, x:x + w]
+        interior = np.median(patch.reshape(-1, 3), axis=0)
+        pad = 3
+        surround = image[max(0, y - pad):min(height, y + h + pad), max(0, x - pad):min(width, x + w + pad)]
+        border = np.concatenate((surround[0], surround[-1], surround[:, 0], surround[:, -1]))
+        contrast = float(np.linalg.norm(interior - np.median(border, axis=0)))
+        if contrast < 18:
+            continue
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(mask, [contour - np.array([[[x, y]]])], -1, 255, -1)
+        proposals.append((y, x, w, h, mask))
+    modules = []
+    for index, (y, x, w, h, mask) in enumerate(sorted(proposals)[:32]):
+        bbox = {"left": x / width, "top": y / height, "width": w / width, "height": h / height}
+        modules.append({"id": f"contour_visual_{index + 1}", "role": "decorative_visual", "reconstructionStrategy": "cutout_image", "bbox": bbox, "preserveRegions": [bbox], "confidence": 0.7, "maskBBox": [x, y, x + w, y + h], "mask": mask})
+    return modules
+
+
+def _text_occupancy(box: tuple[float, float, float, float], elements: list[dict[str, Any]]) -> float:
+    area = max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
+    covered = 0.0
+    for item in elements:
+        if item.get("type") != "text" or float(item.get("confidence") or 0) < 0.5:
+            continue
+        raw = item.get("bbox") or {}
+        x, y, w, h = (float(raw.get(key) or 0) for key in ("left", "top", "width", "height"))
+        covered += max(0, min(box[2], x + w) - max(box[0], x)) * max(0, min(box[3], y + h) - max(box[1], y))
+    return covered / area
+
+
+def _module_alpha(module: dict[str, Any], crop_box: tuple[int, int, int, int]) -> np.ndarray | None:
+    raw_mask = module.get("mask")
+    mask_box = module.get("maskBBox")
+    if raw_mask is None or not isinstance(mask_box, list) or len(mask_box) != 4:
+        return None
+    mask = np.asarray(raw_mask, dtype=np.uint8)
+    if mask.ndim != 2:
+        return None
+    mx1, my1, mx2, my2 = map(int, mask_box)
+    expected = (max(1, my2 - my1), max(1, mx2 - mx1))
+    if mask.shape != expected:
+        mask = cv2.resize(mask, (expected[1], expected[0]), interpolation=cv2.INTER_NEAREST)
+    x1, y1, x2, y2 = crop_box
+    alpha = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    left, top = max(x1, mx1), max(y1, my1)
+    right, bottom = min(x2, mx2), min(y2, my2)
+    if right <= left or bottom <= top:
+        return None
+    alpha[top - y1:bottom - y1, left - x1:right - x1] = mask[top - my1:bottom - my1, left - mx1:right - mx1]
+    return alpha
 
 
 def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:

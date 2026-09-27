@@ -21,6 +21,7 @@ from app.services.reconstruction.router import ReconstructionRouter
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.quality_guard import preserve_bad_text_regions
 from app.services.reconstruction.layered_background import separate_foreground
+from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.refinement import TypographyLayoutRefiner
@@ -143,6 +144,9 @@ class ReconstructionPipeline:
             "cutoutImages": 0,
             "nativeShapesPlanned": 0,
             "backgroundSeparatedRegions": 0,
+            "movableAssetCount": 0,
+            "backgroundResidualCount": 0,
+            "movableVisualCoverage": 0.0,
             "textFallbackCutouts": 0,
             "plannerSuppressedElements": 0,
             "plannerDuplicateTexts": 0,
@@ -307,6 +311,9 @@ class ReconstructionPipeline:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
                 self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
+            reconstruction_stats.update(asset_metrics)
+            score.update(asset_metrics)
             text_coverage = measure_text_coverage(layout, len(regions))
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
@@ -394,6 +401,9 @@ class ReconstructionPipeline:
                 "cutoutImages": reconstruction_stats["cutoutImages"],
                 "nativeShapesPlanned": reconstruction_stats["nativeShapesPlanned"],
                 "backgroundSeparatedRegions": reconstruction_stats["backgroundSeparatedRegions"],
+                "movableAssetCount": reconstruction_stats["movableAssetCount"],
+                "backgroundResidualCount": reconstruction_stats["backgroundResidualCount"],
+                "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
                 "plannerDuplicateTexts": reconstruction_stats["plannerDuplicateTexts"],

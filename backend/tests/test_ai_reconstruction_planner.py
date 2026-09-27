@@ -7,6 +7,8 @@ from pptx import Presentation
 
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
+from app.services.reconstruction.layered_background import separate_foreground
+from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.vision.schemas import extract_json, validate_json
 from app.services.pptx import renderer as renderer_module
 
@@ -63,6 +65,38 @@ def test_detected_visual_outside_ai_plan_becomes_editable_image_asset(tmp_path: 
     assert scene["elements"][0]["metadata"]["textCleanedFromAsset"] == asset["id"]
     with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as crop:
         assert crop.size == (140, 130)
+
+
+def test_bounded_unplanned_visual_is_movable_and_removed_from_background(tmp_path: Path, monkeypatch) -> None:
+    project_id = "visual-ownership"
+    project = tmp_path / project_id
+    assets = project / "assets"
+    assets.mkdir(parents=True)
+    source = project / "source.png"
+    background = project / "background.png"
+    with Image.new("RGB", (320, 220), "#f5f5f5") as image:
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((58, 48, 126, 116), fill="#1255c5")
+        image.save(source)
+        image.save(background)
+    scene = {"canvas": {"width": 320, "height": 220}, "vision": {"aiUsed": False}, "regions": [], "elements": []}
+    stats = AIReconstructionPlanner().apply(scene, source, assets, project_id, 1)
+    assert stats["wholeImageRegions"] >= 1
+    visual = next(item for item in scene["elements"] if item["type"] == "image")
+    with Image.open(assets / f"{visual['id']}.png") as extracted:
+        assert extracted.mode == "RGBA"
+        assert extracted.getextrema()[3][0] == 0
+    box = visual["bbox"]
+    layout = {"elements": [{**visual, "x": box["left"], "y": box["top"], "width": box["width"], "height": box["height"]}]}
+    monkeypatch.setattr(renderer_module, "OUTPUTS_DIR", tmp_path)
+    assert separate_foreground(background, layout["elements"]) == 1
+    with Image.open(background) as cleaned:
+        assert cleaned.getpixel((92, 82)) != (18, 85, 197)
+    assert measure_movable_assets(source, background, layout, scene["reconstructionPlan"]) == {
+        "movableAssetCount": 1,
+        "backgroundResidualCount": 0,
+        "movableVisualCoverage": 1.0,
+    }
 
 
 def test_whole_chart_owns_cv_and_ocr_without_covering_editable_title(tmp_path: Path, monkeypatch) -> None:
