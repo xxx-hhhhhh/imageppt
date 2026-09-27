@@ -16,7 +16,7 @@ from app.services.pptx import PPTXRenderer
 from app.services.scene.scene_analyzer import SceneAnalyzer
 from app.services.segmentation.segmentation_provider import create_segmentation_provider
 from app.services.preprocessing.service import preprocess_image
-from app.services.visual_qa.analyzer import render_preview, run_visual_qa
+from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 from app.services.reconstruction.router import ReconstructionRouter
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.quality_guard import preserve_bad_text_regions
@@ -111,6 +111,8 @@ class ReconstructionPipeline:
         inpainting = InpaintingService(INPAINT_PROVIDER)
         inpainting.force_clean = conversion_mode in {"high_quality", "maximum"}
         inpainting.prefer_inpaint = conversion_mode in {"high_quality", "maximum"}
+        if hasattr(self.scene_analyzer.vision_provider, "strict"):
+            self.scene_analyzer.vision_provider.strict = conversion_mode in {"high_quality", "maximum"} and not allow_fallback
         slides: list[dict] = []
         warnings = list(ocr.warnings) + list(inpainting.warnings) + self.segmentation_warnings + self.scene_analyzer.layout_warnings + self.scene_analyzer.vlm_warnings
         project_output = OUTPUTS_DIR / project_id
@@ -237,7 +239,10 @@ class ReconstructionPipeline:
             layout, typography_stats = typography_layout_refiner.refine(layout)
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
-            reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []))
+            asset_repairs: list[dict] = []
+            asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} else None
+            reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
+            reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
             erasure_stats = erase_editable_text_sources(background_path, layout)
             for key, value in erasure_stats.items():
                 reconstruction_stats[key] += value
@@ -273,7 +278,12 @@ class ReconstructionPipeline:
             revision_status = "not_requested" if critic_rounds == 0 else "converged"
             if critic_rounds and routing.get("usedProvider") not in {None, "none", "local"}:
                 for round_index in range(critic_rounds):
-                    critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
+                    try:
+                        critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
+                    except Exception as exc:
+                        if conversion_mode in {"high_quality", "maximum"} and not allow_fallback:
+                            raise AIUnavailableError("Qwen 视觉复核失败；处理已暂停。请检查 AI 设置并重试，或明确选择基础模式继续。") from exc
+                        raise
                     critic_reports.append(critic)
                     before_scene, before_layout = copy.deepcopy(scene_refined), copy.deepcopy(layout)
                     before_background = background_path.read_bytes()
@@ -323,6 +333,11 @@ class ReconstructionPipeline:
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
             score.update(text_coverage)
+            professional_pending = int(getattr(inpainting, "professional_pending", 0)) + sum(item["problem"] == "professionalInpaintingPending" for item in asset_repairs)
+            enrich_quality_score(score, editable_coverage=float(text_coverage["editableTextCoverage"]), movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=ghosting_count, background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=professional_pending)
+            score["issues"] = [issue for issue in score.get("issues", []) if issue.get("problem") != "professionalInpaintingPending"]
+            score["issues"].extend({"elementId": f"text_background_{index}", "problem": "professionalInpaintingPending", "bbox": item.get("cleanBBox") or item.get("bbox")} for index, item in enumerate(inpainting.last_strategies) if item.get("professionalRepair") in {"unavailable", "invalid_mask", "rejected", "failed"})
+            score.setdefault("issues", []).extend({"elementId": f"asset_background_{index}", "problem": "professionalInpaintingPending", "bbox": item["bbox"]} for index, item in enumerate(asset_repairs) if item["problem"] == "professionalInpaintingPending")
             if conversion_mode in {"high_quality", "maximum"} and text_coverage["editableTextCoverage"] < 0.95:
                 revision_status = "stagnated"
                 score["coverageGate"] = "review_required"
@@ -334,6 +349,10 @@ class ReconstructionPipeline:
             if conversion_mode in {"high_quality", "maximum"} and score["editableTextMismatchCount"]:
                 revision_status = "stagnated"
                 score["textFidelityGate"] = "review_required"
+            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap"} for issue in score.get("issues", []))):
+                revision_status = "stagnated"
+                score["structuralGate"] = "review_required"
+                warnings.append("视觉对象或复杂背景仍有待修复区域，请复核本页质量报告。")
             if conversion_mode in {"high_quality", "maximum"} and float(score.get("overall", 0)) < 0.85:
                 revision_status = "stagnated"
                 score["visualGate"] = "review_required"
@@ -342,7 +361,9 @@ class ReconstructionPipeline:
             score["revisionStatus"] = revision_status
             score["visionProvider"] = routing.get("usedProvider", "local")
             score["visionModel"] = routing.get("usedModel")
-            score["aiImageEditAttempts"] = sum(1 for strategy in inpainting.last_strategies if strategy.get("aiRepair") in {"failed", "rejected", "accepted"})
+            score["inpaintingProvider"] = getattr(inpainting, "professional_provider_name", "none") if getattr(inpainting, "professional_provider_name", "none") != "none" else asset_provider.name if asset_provider else "unavailable"
+            score["professionalInpaintingAttempts"] = int(getattr(inpainting, "professional_attempts", 0)) + sum(item["provider"] != "unavailable" for item in asset_repairs)
+            score["aiImageEditAttempts"] = 0
             score["aiBackgroundRepairs"] = reconstruction_stats["aiBackgroundRepairs"]
             score["revisionRounds"] = len(critic_reports)
             score["revisionRound"] = 0

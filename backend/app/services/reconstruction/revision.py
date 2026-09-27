@@ -11,11 +11,12 @@ import numpy as np
 from app.config import OUTPUTS_DIR
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
+from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
-from app.services.reconstruction.text_erasure import erase_editable_text_sources
-from app.services.visual_qa.analyzer import render_preview, run_visual_qa
+from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
+from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -82,7 +83,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     problem_path = root / ("problem_report.json" if page == 1 else f"problem_report_{page}.json")
     previous_report = json.loads(problem_path.read_text(encoding="utf-8")) if problem_path.is_file() else {}
     issues_before = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else collect_revision_issues(baseline, score_before, raw_scene)
-    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "backgroundResidual": 8}
+    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
@@ -158,7 +159,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id]
     if residual_assets:
         separate_foreground(candidate_bg, residual_assets)
-    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule"} and isinstance(issue.get("bbox"), list)][:4]
+    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list)][:4]
     if baked:
         modules = []
         width, height = float(candidate["slide"]["width"]), float(candidate["slide"]["height"])
@@ -183,6 +184,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     detected = max(int(score_before.get("detectedTextCount") or 0), len(detected_ids))
     coverage_before = float(score_before["editableTextCoverage"]) if "detectedTextCount" in score_before and "editableTextCoverage" in score_before else float(measure_text_coverage(baseline, detected)["editableTextCoverage"])
     coverage_after = float(measure_text_coverage(candidate, detected)["editableTextCoverage"])
+    asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {})
+    score_after.update(asset_metrics)
+    enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=count_text_ghosting(source, candidate_bg, candidate), background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
     issues_after = collect_revision_issues(candidate, score_after, raw_scene)
     prior_regions = {item.get("elementId"): float(item.get("score") or 0) for item in score_before.get("regions", [])}
     improved = sorted({str(item.get("elementId")) for item in score_after.get("regions", []) if item.get("elementId") in changed_ids and float(item.get("score") or 0) > prior_regions.get(item.get("elementId"), 0) + 0.02})
@@ -237,8 +241,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") == "textOverlap":
-            issues.append({**issue, "problem": "textOverlap"})
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending"}:
+            issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)
             if item and item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:

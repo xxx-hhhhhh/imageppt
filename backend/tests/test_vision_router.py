@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from app.services.settings.runtime_settings import ProviderSettings, VisionSettings
 from app.services.vision.base import VisionProvider
@@ -48,6 +49,17 @@ def test_router_does_not_fallback_to_other_provider(tmp_path):
     assert result["routing"]["usedModel"] is None
     assert result["routing"]["fallbackCount"] == 1
     assert called == ["qwen"]
+
+
+def test_strict_router_raises_after_failed_qwen_attempt(tmp_path):
+    image = tmp_path / "tiny.png"
+    image.write_bytes(b"png")
+    router = VisionRouter(qwen_settings(), provider_factory=lambda name, model: FakeQwenProvider(name, model, fail=True))
+    router.strict = True
+    with pytest.raises(VisionProviderError):
+        router.analyze_scene(image, {}, "high")
+    assert router.routing_result()["aiUsed"] is False
+    assert router.routing_result()["attempts"][0]["success"] is False
 
 
 def test_router_local_mode_never_calls_qwen(tmp_path):

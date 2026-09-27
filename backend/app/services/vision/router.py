@@ -23,6 +23,7 @@ class VisionRouter(VisionProvider):
         self.requested_provider = "qwen" if self.settings.selected_provider != "local" else "local"
         self.attempts: list[dict[str, Any]] = []
         self.warnings: list[str] = []
+        self.strict = False
         self._active: VisionProvider = NullVisionProvider()
 
     def _provider(self, model: str | None = None) -> VisionProvider:
@@ -48,11 +49,13 @@ class VisionRouter(VisionProvider):
             self.used_model = None
             return _local_scene(self.routing_result())
         _, model = candidate
+        provider: VisionProvider | None = None
         try:
             provider = self._provider(model)
             self.attempts.append({"provider": "qwen", "model": provider.model_name, "success": False})
             result = provider.analyze_scene(image_path, context, mode)
             self.attempts[-1]["success"] = True
+            self.attempts[-1]["connections"] = list(getattr(provider, "connection_attempts", []))
             self._active = provider
             self.used_provider = "qwen"
             self.used_model = provider.model_name
@@ -60,10 +63,13 @@ class VisionRouter(VisionProvider):
         except Exception as exc:
             if self.attempts:
                 self.attempts[-1]["error"] = _friendly_error(exc)
+                self.attempts[-1]["connections"] = list(getattr(provider, "connection_attempts", []))
             self.warnings.append(f"Qwen unavailable: {_friendly_error(exc)}")
             self._active = NullVisionProvider()
             self.used_provider = "local"
             self.used_model = None
+            if self.strict:
+                raise VisionProviderError(_friendly_error(exc), getattr(exc, "status_code", None)) from exc
             return _local_scene(self.routing_result())
 
     def critique_reconstruction(self, original_path: Path, reconstructed_path: Path, scene: dict) -> dict[str, Any]:
@@ -73,6 +79,8 @@ class VisionRouter(VisionProvider):
             return self._active.critique_reconstruction(original_path, reconstructed_path, scene)
         except Exception as exc:
             self.warnings.append(f"Qwen critic unavailable: {_friendly_error(exc)}")
+            if self.strict:
+                raise VisionProviderError(_friendly_error(exc), getattr(exc, "status_code", None)) from exc
             return {"provider": "qwen", "issues": []}
 
     def test_connection(self) -> dict[str, Any]:

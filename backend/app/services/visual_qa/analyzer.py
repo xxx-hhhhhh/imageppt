@@ -104,15 +104,18 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     ghosting_penalty = _ghosting_penalty(original, preview, text_mask)
     duplicate_penalty = _duplicate_penalty(layout)
     regions, issues = _critical_regions(original, preview, layout)
+    geometry, structural_issues = _structural_checks(layout, preview.shape[:2], regions)
+    issues.extend(structural_issues)
     critical_score = sum(item["score"] * item["weight"] for item in regions) / max(1.0, sum(item["weight"] for item in regions)) if regions else layout_score
     overlap_penalty = min(0.2, sum(0.04 for issue in issues if issue["problem"] == "textOverlap"))
     overall = (
-        0.30 * critical_score
-        + 0.25 * text_region
-        + 0.20 * component_score
-        + 0.15 * layout_score
-        + 0.07 * color_similarity
-        + 0.03 * background_score
+        0.23 * critical_score
+        + 0.18 * text_region
+        + 0.14 * component_score
+        + 0.10 * layout_score
+        + 0.05 * color_similarity
+        + 0.05 * background_score
+        + 0.25 * geometry["structuralScore"]
         - ghosting_penalty
         - duplicate_penalty
         - overlap_penalty
@@ -134,6 +137,7 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
         "ssim": round(ssim_like, 4),
         "edgeSimilarity": round(edge, 4),
         "criticalRegionScore": round(critical_score, 4),
+        **geometry,
         "textOverlapPenalty": round(overlap_penalty, 4),
         "regions": regions,
         "issues": issues,
@@ -142,6 +146,97 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     difference = cv2.absdiff(cv2.resize(original, (preview.shape[1], preview.shape[0])), preview)
     cv2.imwrite(str(output_dir / "difference.png"), difference)
     return score
+
+
+def enrich_quality_score(score: dict[str, Any], *, editable_coverage: float, movable_coverage: float, ghosting_count: int, background_residual_count: int, professional_pending: int = 0) -> dict[str, Any]:
+    """Apply ownership and editability gates after the page assets have been measured."""
+    visual = float(score.get("overall") or 0)
+    coverage = max(0.0, min(1.0, editable_coverage))
+    movable = max(0.0, min(1.0, movable_coverage))
+    penalties = min(0.35, ghosting_count * 0.08 + background_residual_count * 0.08 + professional_pending * 0.05)
+    score.update({
+        "visualSceneScore": round(visual, 4),
+        "editableTextCoverage": round(coverage, 4),
+        "movableVisualCoverage": round(movable, 4),
+        "ghostingCount": ghosting_count,
+        "backgroundResidualCount": background_residual_count,
+        "professionalRepairPending": professional_pending,
+        "overall": round(max(0.0, min(1.0, 0.65 * visual + 0.21 * coverage + 0.14 * movable - penalties)), 4),
+    })
+    if ghosting_count:
+        score.setdefault("issues", []).append({"problem": "ghosting", "count": ghosting_count})
+    if background_residual_count:
+        score.setdefault("issues", []).append({"problem": "backgroundResidual", "count": background_residual_count})
+    if professional_pending:
+        score.setdefault("issues", []).append({"problem": "professionalInpaintingPending", "count": professional_pending})
+    return score
+
+
+def _structural_checks(layout: dict[str, Any], shape: tuple[int, int], regions: list[dict[str, Any]]) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    height, width = shape
+    issues: list[dict[str, Any]] = []
+    active = [item for item in layout.get("elements", []) if item.get("type") != "background" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    by_id = {str(item.get("id")): item for item in active}
+    placements: list[float] = []
+    image_scores: list[float] = []
+    boundary_scores: list[float] = []
+    for item in active:
+        item_id = str(item.get("id"))
+        x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+        w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+        box_area = max(1.0, w * h)
+        clipped_area = max(0.0, min(width, x + w) - max(0.0, x)) * max(0.0, min(height, y + h) - max(0.0, y))
+        boundary_scores.append(min(1.0, clipped_area / box_area))
+        if clipped_area / box_area < 0.9:
+            issues.append({"elementId": item_id, "problem": "moduleBoundary"})
+        meta = item.get("metadata") or {}
+        if item.get("type") == "text":
+            raw = meta.get("rawOCRBBox")
+            if isinstance(raw, list) and len(raw) == 4:
+                displacement = max(abs(x - float(raw[0])), abs(y - float(raw[1]))) / max(8.0, float(raw[3]) - float(raw[1]))
+                placements.append(max(0.0, 1.0 - displacement / 1.5))
+                if displacement > 0.6:
+                    issues.append({"elementId": item_id, "problem": "wrongBBox"})
+            owner = by_id.get(str(meta.get("textCleanedFromAsset") or ""))
+            if owner and int(item.get("zIndex") or 0) <= int(owner.get("zIndex") or 0):
+                issues.append({"elementId": item_id, "problem": "wrongZOrder"})
+        if item.get("type") == "image":
+            asset_path = _path_from_src(item.get("src"))
+            if asset_path and asset_path.is_file() and w > 0 and h > 0:
+                try:
+                    with Image.open(asset_path) as asset:
+                        intrinsic = asset.width / max(1, asset.height)
+                    difference = abs(math.log(max(0.01, w / h) / max(0.01, intrinsic)))
+                    image_scores.append(max(0.0, 1.0 - difference))
+                    if difference > 0.18:
+                        issues.append({"elementId": item_id, "problem": "imageDistortion"})
+                except OSError:
+                    issues.append({"elementId": item_id, "problem": "brokenChartOrModule"})
+    for index, left in enumerate(active):
+        for right in active[index + 1:]:
+            if left.get("type") != right.get("type"):
+                continue
+            if left.get("type") == "text" and str(left.get("text") or "").strip().casefold() != str(right.get("text") or "").strip().casefold():
+                continue
+            if left.get("type") == "image" and left.get("src") != right.get("src"):
+                continue
+            if left.get("type") not in {"text", "image"}:
+                continue
+            left_box = (float(left.get("x") or 0), float(left.get("y") or 0), float(left.get("width") or 0), float(left.get("height") or 0))
+            right_box = (float(right.get("x") or 0), float(right.get("y") or 0), float(right.get("width") or 0), float(right.get("height") or 0))
+            overlap = max(0.0, min(left_box[0] + left_box[2], right_box[0] + right_box[2]) - max(left_box[0], right_box[0])) * max(0.0, min(left_box[1] + left_box[3], right_box[1] + right_box[3]) - max(left_box[1], right_box[1]))
+            if overlap / max(1.0, min(left_box[2] * left_box[3], right_box[2] * right_box[3])) > 0.85:
+                issues.append({"elementId": left.get("id"), "otherElementId": right.get("id"), "problem": "duplicateText" if left.get("type") == "text" else "duplicateElement"})
+    for region in regions:
+        item = by_id.get(str(region.get("elementId")))
+        if item and item.get("type") == "image" and str(item.get("role") or "").lower() in {"chart", "flowchart", "diagram"} and float(region.get("score") or 0) < 0.65:
+            issues.append({"elementId": item.get("id"), "problem": "brokenChartOrModule", "bbox": region.get("bbox")})
+    placement = sum(placements) / len(placements) if placements else 1.0
+    aspect = sum(image_scores) / len(image_scores) if image_scores else 1.0
+    boundaries = sum(boundary_scores) / len(boundary_scores) if boundary_scores else 1.0
+    duplicate_penalty = min(0.25, sum(issue["problem"] in {"duplicateText", "duplicateElement"} for issue in issues) * 0.05)
+    structural = max(0.0, 0.4 * placement + 0.3 * aspect + 0.3 * boundaries - duplicate_penalty)
+    return {"textPlacementScore": round(placement, 4), "imageAspectScore": round(aspect, 4), "moduleBoundaryScore": round(boundaries, 4), "structuralScore": round(structural, 4)}, issues
 
 
 def _critical_regions(original: np.ndarray, preview: np.ndarray, layout: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -180,7 +275,7 @@ def _element_mask(shape: tuple[int, int], layout: dict[str, Any], kinds: set[str
     mask = np.zeros((height, width), dtype=np.uint8)
     for item in layout.get("elements", []):
         metadata = item.get("metadata") or {}
-        if item.get("type") not in kinds or metadata.get("suppressRender") or metadata.get("ownedBy"):
+        if item.get("type") not in kinds or any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
         x1, y1 = int(max(0, float(item.get("x", 0)))), int(max(0, float(item.get("y", 0))))
         x2 = int(min(width, np.ceil(float(item.get("x", 0)) + float(item.get("width", 0)))))

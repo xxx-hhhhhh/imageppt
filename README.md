@@ -88,7 +88,9 @@ QWEN_TIMEOUT=120
 QWEN_MAX_RETRIES=2
 ```
 
-不要把真实 Key 写入 README、源码、日志或 Google Drive 文件。没有 Key 时，系统自动回退到 OCR + OpenCV。连接状态可通过 `GET /api/vision/status` 查看，连接测试使用 `POST /api/vision/test`。
+不要把真实 Key 写入 README、源码、日志或 Google Drive 文件。没有 Key 时，快速模式仍可进行本地解析；高质量模式会暂停并提示配置或明确选择基础模式。连接状态可通过 `GET /api/vision/status` 查看，连接测试使用 `POST /api/vision/test`。
+
+高质量/最高质量模式要求千问视觉规划成功；请求会在可重试故障后重试，并在自动代理模式下尝试直连与代理路径。仍失败时暂停当前页，等待重试或用户明确选择基础模式。复杂背景修复由独立修图 Provider 执行：本机安装 `simple-lama-inpainting` 时优先使用 LaMa；需要云端修图时显式设置 `INPAINT_PROVIDER=stability` 和 `STABILITY_API_KEY`。默认配置不会调用付费修图 API。专业修复不可用或失败会写入质量报告，不能作为高质量完成结果。Stability 接口采用[官方 Inpaint API](https://platform.stability.ai/docs/api-reference)。
 
 网页顶部的“AI设置 / API Key”可以选择自动免费、Gemini 2.5 Flash、Gemini 2.5 Flash-Lite、Qwen3-VL-Flash、OpenRouter Free、自定义 OpenAI-compatible 或本地模式，并分别填写、保存和测试各 Provider。API Key 只保存到 Windows `%LOCALAPPDATA%/Image2EditablePPT/settings.json`，不会写入项目目录；接口只返回掩码后的 Key。自动免费模式按已配置且允许自动使用的 Provider 路由，并记录每页实际使用模型和 fallback 次数。
 

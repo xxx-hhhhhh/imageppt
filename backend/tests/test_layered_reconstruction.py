@@ -46,6 +46,19 @@ def test_cutout_removes_duplicate_pixels_from_background_and_stays_movable(tmp_p
     np.testing.assert_array_equal(moved_image[150, 290], image[150, 150])
 
 
+def test_textured_asset_background_requests_professional_repair(tmp_path: Path) -> None:
+    rng = np.random.default_rng(7)
+    image = rng.integers(40, 220, (120, 160, 3), dtype=np.uint8)
+    image[35:85, 50:110] = 15
+    background = tmp_path / "textured.png"
+    cv2.imwrite(str(background), image)
+    asset = {"id": "visual", "type": "image", "x": 50, "y": 35, "width": 60, "height": 50, "src": str(background), "metadata": {"preserveWholeAsset": True}}
+    report = []
+    assert separate_foreground(background, [asset], repair_report=report) == 1
+    assert report[0]["problem"] == "professionalInpaintingPending"
+    assert report[0]["bbox"] == [50, 35, 110, 85]
+
+
 def test_plan_keeps_text_editable_and_accepts_background_and_native_shape(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (400, 300), "white").save(source)

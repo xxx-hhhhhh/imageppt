@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 
 import cv2
 import numpy as np
 
-from app.services.inpainting.provider import create_inpainting_provider
+from app.services.inpainting.provider import InpaintingProvider, LamaInpaintingProvider, create_inpainting_provider
 from app.services.ocr.provider import OCRResult
 from app.services.background.strategy import reclean_background as reclean_with_strategy
 from app.services.background.strategy import restore_background as restore_with_strategy
-from app.services.inpainting.qwen_image_edit import repair_complex_text
 
 
 class InpaintingService:
@@ -20,6 +20,9 @@ class InpaintingService:
         self.force_clean = False
         self.prefer_inpaint = False
         self.ai_repaired_regions = 0
+        self.professional_attempts = 0
+        self.professional_pending = 0
+        self.professional_provider_name = "none"
 
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
@@ -40,12 +43,73 @@ class InpaintingService:
     def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
         restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions, allow_complex_text_preservation=not self.force_clean, prefer_inpaint=self.prefer_inpaint)
         if self.prefer_inpaint:
-            self.ai_repaired_regions = repair_complex_text(image_path, output_path, self.last_strategies)
+            self.ai_repaired_regions = self._repair_complex_regions(image_path, output_path)
         self.last_stats = {
             "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
             "ghostingRegionsRecleaned": sum(1 for item in self.last_strategies if item.get("ghostingRecleaned")),
         }
         return restored
+
+    def _professional_provider(self) -> InpaintingProvider | None:
+        if self.provider.name in {"lama", "stability"}:
+            return self.provider
+        try:
+            return LamaInpaintingProvider()
+        except (ImportError, OSError, RuntimeError):
+            return None
+
+    def _repair_complex_regions(self, source_path: Path, background_path: Path) -> int:
+        targets = [item for item in self.last_strategies if item.get("willReconstruct") and item.get("category") in {"complex", "texture"}]
+        if not targets:
+            return 0
+        provider = self._professional_provider()
+        self.professional_provider_name = provider.name if provider else "unavailable"
+        if provider is None:
+            for item in targets:
+                item["professionalRepair"] = "unavailable"
+            self.professional_pending = len(targets)
+            return 0
+        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+        if source is None or background is None:
+            self.professional_pending = len(targets)
+            return 0
+        repaired = 0
+        with tempfile.TemporaryDirectory(prefix="imageppt-inpaint-") as workspace:
+            candidate_path = Path(workspace) / "candidate.png"
+            for item in targets:
+                box = item.get("cleanBBox") or item.get("bbox")
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    item["professionalRepair"] = "invalid_mask"
+                    continue
+                x1, y1, x2, y2 = (int(value) for value in box)
+                x1, y1, x2, y2 = max(0, x1), max(0, y1), min(source.shape[1], x2), min(source.shape[0], y2)
+                if x2 <= x1 or y2 <= y1:
+                    item["professionalRepair"] = "invalid_mask"
+                    continue
+                mask = np.zeros(source.shape[:2], dtype=np.uint8)
+                mask[y1:y2, x1:x2] = 255
+                self.professional_attempts += 1
+                try:
+                    provider.inpaint(source_path, mask, candidate_path)
+                    candidate = cv2.imread(str(candidate_path), cv2.IMREAD_COLOR)
+                    if candidate is None or candidate.shape != source.shape:
+                        raise ValueError("Inpainting output dimensions changed")
+                    before = cv2.Canny(source[y1:y2, x1:x2], 50, 150)
+                    after = cv2.Canny(candidate[y1:y2, x1:x2], 50, 150)
+                    if np.count_nonzero(before) > 5 and np.count_nonzero(after) > np.count_nonzero(before) * 0.9:
+                        item["professionalRepair"] = "rejected"
+                        continue
+                    background[y1:y2, x1:x2] = candidate[y1:y2, x1:x2]
+                    item["professionalRepair"] = "accepted"
+                    item["reconstructionStrategy"] = "professional_inpaint"
+                    repaired += 1
+                except Exception:
+                    item["professionalRepair"] = "failed"
+        self.professional_pending = len(targets) - repaired
+        if repaired:
+            cv2.imwrite(str(background_path), background)
+        return repaired
 
     def reclean_background(self, background_path: Path, bboxes: list[list[float]]) -> int:
         count = reclean_with_strategy(background_path, bboxes)

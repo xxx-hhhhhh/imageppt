@@ -9,7 +9,10 @@ from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
-from app.services.visual_qa.analyzer import render_preview, run_visual_qa
+from app.services.reconstruction.text_erasure import count_text_ghosting
+from app.services.reconstruction.text_coverage import measure_text_coverage
+from app.services.reconstruction.asset_metrics import measure_movable_assets
+from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
 
 def downgrade_problem_regions(store: ProjectStore, project_id: str, page: int) -> dict:
@@ -28,7 +31,7 @@ def downgrade_problem_regions(store: ProjectStore, project_id: str, page: int) -
     by_id = {item["id"]: item for item in layout.get("elements", [])}
     modules = []
     for issue in (saved_problems.get("issuesAfter") or report.get("issues", [])):
-        if issue.get("problem") not in {"criticalRegionMismatch", "brokenChartOrModule", "assetBakedIntoBackground", "backgroundResidual"}:
+        if issue.get("problem") not in {"criticalRegionMismatch", "brokenChartOrModule", "assetBakedIntoBackground", "backgroundResidual", "professionalInpaintingPending"}:
             continue
         item = by_id.get(issue.get("elementId"))
         if item and (item.get("type") not in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"} or (item.get("metadata") or {}).get("suppressed")):
@@ -66,6 +69,11 @@ def downgrade_problem_regions(store: ProjectStore, project_id: str, page: int) -
     shutil.copy2(candidate_background, background)
     shutil.copy2(candidate_preview, preview)
     score = run_visual_qa(source, preview, output, revised)
+    text_metrics = measure_text_coverage(revised, int(report.get("detectedTextCount") or 0))
+    asset_metrics = measure_movable_assets(source, background, revised, (revised.get("metadata") or {}).get("reconstructionPlan") or {})
+    score.update(text_metrics)
+    score.update(asset_metrics)
+    enrich_quality_score(score, editable_coverage=float(text_metrics["editableTextCoverage"]), movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=count_text_ghosting(source, background, revised), background_residual_count=int(asset_metrics["backgroundResidualCount"]))
     score["revisionStatus"] = "user_downgraded"
     score["stagnationReason"] = None
     validation.write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")

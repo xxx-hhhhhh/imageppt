@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from app.services.pptx.renderer import _path_from_src
+if TYPE_CHECKING:
+    from app.services.inpainting.provider import InpaintingProvider
 
 
-def separate_foreground(background_path: Path, elements: list[dict]) -> int:
+def separate_foreground(background_path: Path, elements: list[dict], *, professional_provider: "InpaintingProvider | None" = None, repair_report: list[dict] | None = None) -> int:
     """Remove independently rendered pixels from the slide's background layer.
 
     The visual asset is left unchanged. Its position therefore renders exactly
@@ -57,13 +61,34 @@ def separate_foreground(background_path: Path, elements: list[dict]) -> int:
     # sampled outside the owned region so the operation stays bounded.
     small = np.zeros_like(mask)
     for (x1, y1, x2, y2), owned in regions:
+        ring = _outer_ring(background, mask, (x1, y1, x2, y2))
+        textured = ring.size > 0 and float(np.mean(np.std(ring.astype(np.float32), axis=0))) > 22
+        if textured:
+            success = False
+            if professional_provider is not None:
+                try:
+                    with TemporaryDirectory(prefix="imageppt-asset-inpaint-") as workspace:
+                        source_file, result_file = Path(workspace) / "source.png", Path(workspace) / "result.png"
+                        cv2.imwrite(str(source_file), background)
+                        region_mask = np.zeros((height, width), dtype=np.uint8)
+                        region_mask[y1:y2, x1:x2] = owned
+                        professional_provider.inpaint(source_file, region_mask, result_file)
+                        edited = cv2.imread(str(result_file), cv2.IMREAD_COLOR)
+                        if edited is not None and edited.shape == background.shape:
+                            patch = background[y1:y2, x1:x2]
+                            patch[owned > 0] = edited[y1:y2, x1:x2][owned > 0]
+                            success = True
+                except Exception:
+                    pass
+            if repair_report is not None:
+                repair_report.append({"bbox": [x1, y1, x2, y2], "problem": "professionalInpaintingPending" if not success else "professionalInpaintingApplied", "provider": professional_provider.name if professional_provider else "unavailable"})
+            if success:
+                continue
         if (x2 - x1) * (y2 - y1) <= width * height * 0.025:
             small[y1:y2, x1:x2] = np.maximum(small[y1:y2, x1:x2], owned)
-        else:
-            ring = _outer_ring(background, mask, (x1, y1, x2, y2))
-            if ring.size:
-                patch = background[y1:y2, x1:x2]
-                patch[owned > 0] = np.median(ring, axis=0).astype(np.uint8)
+        elif ring.size:
+            patch = background[y1:y2, x1:x2]
+            patch[owned > 0] = np.median(ring, axis=0).astype(np.uint8)
     if np.any(small):
         background = cv2.inpaint(background, small, 4, cv2.INPAINT_TELEA)
     cv2.imwrite(str(background_path), background)

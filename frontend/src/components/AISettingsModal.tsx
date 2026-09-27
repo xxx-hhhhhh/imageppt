@@ -119,7 +119,7 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
         <div className="key-input"><input type={visibleKey ? 'text' : 'password'} placeholder={qwen.apiKeyMasked || '输入 Qwen API Key'} value={draftKey} onChange={(event) => { setDraftKey(event.target.value); setClearKey(false); }} /><button type="button" onClick={() => setVisibleKey((value) => !value)}>{visibleKey ? '隐藏' : '显示'}</button><button type="button" onClick={() => { setDraftKey(''); setClearKey(true); }} disabled={!qwen.configured && !draftKey}>清除 Key</button></div>
         <label className="field"><span>Qwen Base URL</span><input value={qwen.baseUrl} onChange={(event) => updateQwen({ baseUrl: event.target.value })} /></label>
         <label className="field"><span>视觉模型</span><select value={qwen.model} onChange={(event) => updateQwen({ model: event.target.value })}><option value="qwen3-vl-flash">Qwen3-VL-Flash</option><option value="qwen3-vl-plus">Qwen3-VL-Plus</option></select></label>
-        <div className="network-hint">图片修复另用 Qwen-Image-Edit-Plus；仅在高质量模式遇到复杂文字背景时按需调用。</div>
+        <div className="network-hint">复杂背景修复使用独立修图 Provider；本机优先 LaMa，可显式配置 Stability Inpaint。千问仅用于视觉分析。</div>
       </div>
       <div className="provider-section-title">网络代理</div>
       <div className="network-card">

@@ -52,8 +52,9 @@ class SceneAnalyzer:
                 requested_provider = "local" if self.vision_provider.provider_name == "none" else "qwen"
                 reason = _safe_vision_failure(exc)
                 vision = {"provider": "local", "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
-                self.vision_routing = {"requestedProvider": requested_provider, "usedProvider": "local", "usedModel": None, "fallbackCount": 1 if requested_provider == "qwen" else 0, "aiUsed": False, "attempts": [{"provider": requested_provider, "success": False, "error": reason}]}
-                self.vision_warnings.append(f"{reason}; using OCR+CV fallback")
+                router_result = self.vision_provider.routing_result() if hasattr(self.vision_provider, "routing_result") else {}
+                self.vision_routing = {"requestedProvider": requested_provider, "usedProvider": "local", "usedModel": None, "fallbackCount": 1 if requested_provider == "qwen" else 0, "aiUsed": False, "attempts": [{"provider": requested_provider, "success": False, "error": reason}], **router_result}
+                self.vision_warnings.append(f"{reason}; page paused" if getattr(self.vision_provider, "strict", False) else f"{reason}; using OCR+CV fallback")
         else:
             vision = {"provider": "none", "page": {}, "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
             self.vision_routing = {"requestedProvider": "qwen", "usedProvider": "local", "usedModel": None, "fallbackCount": 0, "aiUsed": False, "attempts": []}

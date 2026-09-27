@@ -127,7 +127,7 @@ class QwenProvider(OpenAICompatibleVisionProvider):
             base_url=normalize_qwen_base_url(base_url if base_url is not None else config.base_url, api_key if api_key is not None else config.api_key),
             model=model or config.model or QWEN_MODEL,
             timeout=runtime.timeout,
-            max_retries=0,
+            max_retries=1,
             proxy_url=first_proxy,
         )
 
@@ -158,7 +158,7 @@ class QwenProvider(OpenAICompatibleVisionProvider):
                     "errorCode": exc.error_code,
                 })
                 last_error = exc
-                if index + 1 < len(self.connection_options) and exc.network_failure:
+                if index + 1 < len(self.connection_options) and (exc.network_failure or exc.status_code in {408, 500, 502, 503, 504}):
                     continue
                 raise
         raise last_error or VisionProviderError("Qwen API 请求失败")

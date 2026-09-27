@@ -159,7 +159,7 @@ class FakePPTXRenderer:
         return output, {"valid": True}
 
 
-def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False) -> tuple[list[dict], dict, dict]:
+def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False, mode: str = "standard") -> tuple[list[dict], dict, dict]:
     image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
     fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
     shutil.copy2(fixture_path, image_path)
@@ -208,7 +208,7 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool
     pipeline.segmentation_provider = FakeSegmentationProvider()
     pipeline.segmentation_warnings = []
     pipeline.reconstruction_router = ReconstructionRouter()
-    slides, _, _ = pipeline.analyze_project("ai-standard" if ai_enabled else "local-standard", "standard")
+    slides, _, _ = pipeline.analyze_project("ai-standard" if ai_enabled else "local-standard", mode)
     report_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "conversion_report.json"
     debug_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "vision_debug.json"
     return slides, json.loads(report_path.read_text(encoding="utf-8")), json.loads(debug_path.read_text(encoding="utf-8"))
@@ -259,6 +259,26 @@ def test_local_mode_reports_no_ai_strategy_or_critic_round(monkeypatch, tmp_path
     assert report["criticAdjustmentsApplied"] == 0
     assert debug["provider"] == "local"
     assert debug["rawResponseAvailable"] is False
+
+
+def test_high_quality_pauses_when_qwen_critic_fails(monkeypatch, tmp_path: Path) -> None:
+    def fail_critic(*_args):
+        raise RuntimeError("simulated provider failure")
+
+    monkeypatch.setattr(FakeVisionProvider, "critique_reconstruction", fail_critic)
+    with pytest.raises(pipeline_module.AIUnavailableError, match="视觉复核失败"):
+        _run_pipeline(monkeypatch, tmp_path, True, with_plan=True, mode="high_quality")
+
+
+def test_high_quality_does_not_mark_pending_professional_repair_complete(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(FakeInpainting, "professional_pending", 1, raising=False)
+    _, report, _ = _run_pipeline(monkeypatch, tmp_path, True, with_plan=True, mode="high_quality")
+    score_path = tmp_path / "outputs" / "ai-standard" / "visual_score.json"
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    assert score["professionalRepairPending"] >= 1
+    assert score["revisionStatus"] == "stagnated"
+    assert score["structuralGate"] == "review_required"
+    assert report["aiUsed"] is True
 
 
 def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, tmp_path: Path) -> None:

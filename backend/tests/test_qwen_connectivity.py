@@ -126,3 +126,23 @@ def test_public_test_endpoint_returns_detailed_failure(monkeypatch):
     assert payload["statusCode"] == 429
     assert payload["errorType"] == "insufficient_quota"
     assert payload["connectionPath"] == "DIRECT"
+
+
+def test_qwen_retries_transient_failure_then_tries_proxy_without_network(monkeypatch):
+    provider = QwenProvider.__new__(QwenProvider)
+    provider.connection_options = [(None, "DIRECT"), ("http://127.0.0.1:7897", "PROXY test")]
+    provider.connection_attempts = []
+    provider.last_status_code = None
+    provider.last_latency_ms = None
+    paths = []
+    monkeypatch.setattr(provider, "_configure_client", lambda proxy: paths.append(proxy))
+
+    def fake_request(self, messages, *, repair_prompt=None):
+        if len(paths) == 1:
+            raise VisionProviderError("temporary unavailable", 503, error_type="server_error")
+        return "ok"
+
+    monkeypatch.setattr(OpenAICompatibleVisionProvider, "_request", fake_request)
+    assert provider._request([{"role": "user", "content": "test"}]) == "ok"
+    assert paths == [None, "http://127.0.0.1:7897"]
+    assert [attempt["success"] for attempt in provider.connection_attempts] == [False, True]
