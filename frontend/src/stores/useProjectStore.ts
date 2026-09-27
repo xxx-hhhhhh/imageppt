@@ -61,7 +61,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project) return;
     set({ busy: true, message: `正在上传 ${files.length} 张图片…` });
     const updated = await uploadImages(project.id, files);
-    set({ project: updated, slides: [], activePage: 0, approvedPages: [], aiPaused: false, busy: false, message: '图片已上传，可以开始逐页解析' });
+    set({ project: updated, aiPaused: false, busy: false, message: `${files.length} 张图片已添加，可以开始逐页解析` });
   },
   analyze: async () => {
     const project = get().project;
