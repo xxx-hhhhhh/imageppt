@@ -12,6 +12,7 @@ interface ProjectState {
   message: string;
   aiPaused: boolean;
   reviewVersion: number;
+  approvedPages: number[];
   conversionMode: 'fast' | 'standard' | 'high_quality' | 'maximum';
   create: () => Promise<void>;
   upload: (files: File[]) => Promise<void>;
@@ -46,6 +47,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   message: '请上传一张或多张图片开始',
   aiPaused: false,
   reviewVersion: 0,
+  approvedPages: [],
   conversionMode: 'maximum',
   create: async () => {
     set({ busy: true, message: '正在创建项目…' });
@@ -59,7 +61,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project) return;
     set({ busy: true, message: `正在上传 ${files.length} 张图片…` });
     const updated = await uploadImages(project.id, files);
-    set({ project: updated, slides: [], activePage: 0, aiPaused: false, busy: false, message: '图片已上传，开始逐页解析' });
+    set({ project: updated, slides: [], activePage: 0, approvedPages: [], aiPaused: false, busy: false, message: '图片已上传，可以开始逐页解析' });
   },
   analyze: async () => {
     const project = get().project;
@@ -78,16 +80,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   approveAndNext: async () => {
     const { project, slides, activePage } = get();
     if (!project || !slides[activePage]) return;
-    set({ busy: true, message: `正在确认第 ${activePage + 1} 页…` });
+    set((state) => ({ busy: true, approvedPages: [...new Set([...state.approvedPages, activePage + 1])], message: `正在确认第 ${activePage + 1} 页…` }));
     try {
       await saveSlide(project.id, activePage + 1, slides[activePage]);
       await approvePage(project.id, activePage + 1);
       set({ busy: false, message: `第 ${activePage + 1} 页已通过。` });
-      if (activePage + 1 < project.imageCount) await get().analyze();
     } catch (error) {
-      set({ busy: false, message: '页面确认失败，请重试。' });
+      set((state) => ({ busy: false, approvedPages: state.approvedPages.filter((page) => page !== activePage + 1), message: '页面确认失败，请重试。' }));
       throw error;
     }
+    if (activePage + 1 < project.imageCount) await get().analyze();
   },
   useBasicFallback: async () => {
     const project = get().project;
@@ -192,8 +194,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const project = get().project;
     if (!project) throw new Error('项目尚未创建');
     set({ busy: true, message: '正在生成对象级可编辑 PPTX…' });
-    const result = await exportPptx(project.id);
-    set({ busy: false, message: 'PPTX 导出完成' });
-    return result.downloadUrl;
+    try {
+      const result = await exportPptx(project.id);
+      set({ busy: false, message: 'PPTX 导出完成' });
+      return result.downloadUrl;
+    } catch (error) {
+      set({ busy: false, message: '导出失败，请检查页面后重试。' });
+      throw error;
+    }
   },
 }));

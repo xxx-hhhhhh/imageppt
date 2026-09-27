@@ -11,10 +11,9 @@ import type { LayoutJSON } from '../types/layout';
 
 export function EditorPage() {
   const [error, setError] = useState('');
-  const [viewMode, setViewMode] = useState<'reconstruction' | 'original' | 'difference'>('reconstruction');
+  const [editing, setEditing] = useState(false);
   const [visionStatus, setVisionStatus] = useState<VisionStatus | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [compareSplit, setCompareSplit] = useState(50);
   const [similarity, setSimilarity] = useState<number | null>(null);
   const [actualVision, setActualVision] = useState<string | null>(null);
   const [professionalInpainting, setProfessionalInpainting] = useState<string | null>(null);
@@ -23,7 +22,7 @@ export function EditorPage() {
   const [revisionRound, setRevisionRound] = useState(0);
   const [stagnationReason, setStagnationReason] = useState<string | null>(null);
   const [dismissedDecision, setDismissedDecision] = useState('');
-  const { project, slides, activePage, selectedIds, busy, message, aiPaused, reviewVersion, conversionMode, create, upload, analyze, approveAndNext, useBasicFallback, reanalyzeCurrent, downgradeCurrent, acceptCurrent, setConversionMode, persistPage, updateActive, setSelection, setActivePage, deletePage, movePage, addShape, deleteSelected, copySelected, moveLayer, export: exportProject } = useProjectStore();
+  const { project, slides, activePage, selectedIds, busy, message, aiPaused, reviewVersion, approvedPages, create, upload, analyze, approveAndNext, useBasicFallback, reanalyzeCurrent, downgradeCurrent, acceptCurrent, persistPage, updateActive, setSelection, setActivePage, moveLayer, export: exportProject } = useProjectStore();
 
   useEffect(() => { if (!project) void create(); }, [project, create]);
   useEffect(() => { void getVisionStatus().then(setVisionStatus).catch(() => setVisionStatus(null)); }, []);
@@ -40,30 +39,23 @@ export function EditorPage() {
   };
   const saveCurrent = (next: LayoutJSON) => { updateActive(() => next); };
   const exportPpt = async () => { const url = await exportProject(); window.open(url, '_blank'); };
-  const comparisonFile = viewMode === 'original' ? (activePage === 0 ? 'original.png' : `original_${activePage + 1}.png`) : 'difference.png';
-  const previewFile = activePage === 0 ? 'reconstructed_preview.png' : `reconstructed_preview_${activePage + 1}.png`;
-
-  const renderCompare = () => <div className="comparison-view">
-    <div className="comparison-stage">
-      <img className="comparison-image comparison-base" src={artifactUrl(project!.id, previewFile)} alt="重建结果" />
-      <div className="comparison-original-clip" style={{ width: `${compareSplit}%` }}><img className="comparison-image comparison-original" src={artifactUrl(project!.id, activePage === 0 ? 'original.png' : `original_${activePage + 1}.png`)} alt="原图对比层" /></div>
-    </div>
-    <label className="compare-slider">原图 <input type="range" min="0" max="100" value={compareSplit} onChange={(event) => setCompareSplit(Number(event.target.value))} /> 重建 <span>{compareSplit}%</span></label>
-  </div>;
+  const approved = approvedPages.includes(activePage + 1);
+  const reviewing = Boolean(page && !approved && !editing);
+  const originalFile = activePage === 0 ? 'original.png' : `original_${activePage + 1}.png`;
 
   return <div className="app-shell">
-    <Toolbar busy={busy} conversionMode={conversionMode} viewMode={viewMode} visionStatus={visionStatus} onModeChange={setConversionMode} onViewChange={setViewMode} onOpenSettings={() => setSettingsOpen(true)} onUpload={(files) => void handle(() => upload(files))} onAnalyze={() => void handle(analyze)} onExport={() => void handle(exportPpt)} onAddShape={addShape} onDelete={deleteSelected} onCopy={copySelected} onLayer={moveLayer} />
+    <Toolbar busy={busy} hasImages={Boolean(project?.imageCount)} hasPage={Boolean(page)} visionStatus={visionStatus} onOpenSettings={() => setSettingsOpen(true)} onUpload={(files) => void handle(() => upload(files))} onAnalyze={() => void handle(analyze)} onEdit={() => setEditing(true)} onExport={() => void handle(exportPpt)} />
     <div className="workspace">
-      <PageList slides={slides} activePage={activePage} onSelect={setActivePage} onDelete={deletePage} onMove={movePage} />
+      <PageList slides={slides} activePage={activePage} approvedPages={approvedPages} onSelect={(index) => { setEditing(false); setActivePage(index); }} />
       <main className="editor-area">
-        <div className="status-row"><span>{project?.name || 'Image2EditablePPT'}</span><span className={busy ? 'status busy' : 'status'}>{error || message}</span></div>
-        {aiPaused && <div className="review-actions" role="alert"><span>AI 未完成本页规划，处理已暂停。</span><button disabled={busy} onClick={() => void handle(analyze)}>重试 AI</button><button disabled={busy} onClick={() => void handle(useBasicFallback)}>明确使用基础模式</button></div>}
-        {page && revisionStatus === 'stagnated' && !busy && dismissedDecision !== decisionKey && <div className="review-actions" role="alert"><span>本页局部优化已停滞{stagnationReason === 'no_targetable_issues' ? '：没有新的可修复区域' : '。请选择下一步'}。</span><button onClick={() => void handleDecision(reanalyzeCurrent)}>继续自动优化</button><button onClick={() => void handleDecision(downgradeCurrent)}>问题区域改为图片主体＋可编辑文字</button><button onClick={() => void handleDecision(acceptCurrent)}>使用当前结果</button></div>}
-        {page && <div className="review-actions"><span>第 {activePage + 1} / {project?.imageCount || slides.length} 页 · 请确认视觉与可编辑文字</span><button disabled={busy} onClick={() => void handle(approveAndNext)}>{activePage + 1 < (project?.imageCount || 0) ? '通过并处理下一页' : '通过本页'}</button><button disabled={busy} onClick={() => setViewMode('reconstruction')}>手动编辑</button></div>}
-        {page ? (viewMode === 'reconstruction' || !project ? <EditorCanvas page={page} selectedIds={selectedIds} onSelection={setSelection} onChange={saveCurrent} /> : viewMode === 'difference' ? renderCompare() : <div className="comparison-view"><img className="comparison-image" src={artifactUrl(project.id, comparisonFile)} alt="原图" /></div>) : <div className="welcome"><div className="welcome-icon">P</div><h1>图片转可编辑 PPT</h1><p>上传 JPG、JPEG、PNG 或 WEBP，然后开始 OCR 解析。</p><label className="dropzone">选择图片<input hidden type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { const files = event.currentTarget.files; if (files) void handle(() => upload(Array.from(files))); event.currentTarget.value = ''; }} /></label></div>}
+        <div className="status-row"><span>{page ? `第 ${activePage + 1} / ${project?.imageCount || slides.length} 页` : project?.name || 'Image2EditablePPT'}</span><span className={busy ? 'status busy' : 'status'} role="status">{error || message}</span></div>
+        {aiPaused && !busy && <div className="review-actions" role="alert"><span>AI 未完成本页规划，处理已暂停。</span><button onClick={() => void handle(analyze)}>重试 AI</button><button onClick={() => void handle(useBasicFallback)}>使用基础模式</button></div>}
+        {reviewing && revisionStatus === 'stagnated' && !busy && dismissedDecision !== decisionKey && <div className="review-actions" role="alert"><span>局部优化已停滞{stagnationReason === 'no_targetable_issues' ? '：没有新的可修复区域' : '，请选择下一步'}。</span><button onClick={() => void handleDecision(reanalyzeCurrent)}>继续自动优化</button><button onClick={() => void handleDecision(downgradeCurrent)}>图片主体＋可编辑文字</button><button onClick={() => void handleDecision(acceptCurrent)}>使用当前结果</button></div>}
+        {reviewing && !busy && <div className="review-actions page-decision"><span>对照原图检查本页，确认后继续下一页</span><div><button className="decision-primary" onClick={() => void handle(approveAndNext)}>通过本页</button><button onClick={() => void handle(reanalyzeCurrent)}>继续自动优化</button><button onClick={() => setEditing(true)}>手动编辑</button></div></div>}
+        {page ? reviewing && project ? <div className="review-stage"><section className="review-pane"><h2>原图</h2><div className="original-frame"><img src={artifactUrl(project.id, originalFile)} alt={`第 ${activePage + 1} 页原图`} /></div></section><section className="review-pane"><h2>当前重建结果</h2><EditorCanvas page={page} selectedIds={selectedIds} onSelection={setSelection} onChange={saveCurrent} /></section></div> : <><div className="editing-heading"><span>{approved ? '本页已通过' : '手动编辑'}</span>{!approved && <button onClick={() => setEditing(false)}>返回逐页确认</button>}</div><EditorCanvas page={page} selectedIds={selectedIds} onSelection={setSelection} onChange={saveCurrent} /></> : <div className="welcome"><div className="welcome-icon">P</div><h1>图片转可编辑 PPT</h1><p>上传 JPG、JPEG、PNG 或 WEBP，开始逐页转换与确认。</p><label className="dropzone">选择图片<input hidden type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { const files = event.currentTarget.files; if (files) void handle(() => upload(Array.from(files))); event.currentTarget.value = ''; }} /></label></div>}
         <div className="editor-footer"><span>OCR: RapidOCR · 已配置视觉模型：{visionStatus?.configured && visionStatus.model ? visionStatus.model : '本地模式'} · 本页实际：{actualVision || '待解析'}{professionalInpainting ? ` · 复杂背景修复：${professionalInpainting}，成功 ${aiBackgroundRepairs || 0} 处` : ''} · 视觉相似度：{similarity === null ? '—' : `${Math.round(similarity * 100)}%`}</span><button onClick={() => page && void handle(() => persistPage(activePage, page))} disabled={!page || busy}>保存当前页面</button></div>
       </main>
-      <PropertyPanel page={page} selectedIds={selectedIds} onChange={(updater) => { if (page) updateActive(updater); }} />
+      <PropertyPanel page={page} selectedIds={selectedIds} onLayer={moveLayer} onChange={(updater) => { if (page) updateActive(updater); }} />
     </div>
     <AISettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void getVisionStatus().then(setVisionStatus).catch(() => undefined)} />
   </div>;

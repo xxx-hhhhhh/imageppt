@@ -34,8 +34,8 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
     if (!canvasElement.current || !wrapper.current || !page) return;
     const fabricCanvas = new Canvas(canvasElement.current, { preserveObjectStacking: true, selection: true });
     fabricRef.current = fabricCanvas;
-    const availableWidth = Math.max(480, wrapper.current.clientWidth - 24);
-    const availableHeight = Math.max(340, wrapper.current.clientHeight - 24);
+    const availableWidth = Math.max(1, wrapper.current.clientWidth - 24);
+    const availableHeight = Math.max(1, wrapper.current.clientHeight - 24);
     const zoom = Math.min(availableWidth / page.slide.width, availableHeight / page.slide.height, 1);
     setZoom(zoom);
     fabricCanvas.setDimensions({ width: page.slide.width, height: page.slide.height });
@@ -73,8 +73,8 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
 
     const resize = () => {
       if (!wrapper.current || !fabricRef.current) return;
-      const width = Math.max(480, wrapper.current.clientWidth - 24);
-      const height = Math.max(340, wrapper.current.clientHeight - 24);
+      const width = Math.max(1, wrapper.current.clientWidth - 24);
+      const height = Math.max(1, wrapper.current.clientHeight - 24);
       const nextZoom = Math.min(width / page.slide.width, height / page.slide.height, 1);
       setZoom(nextZoom);
       if (stageRef.current) {
@@ -83,10 +83,11 @@ export function EditorCanvas({ page, selectedIds, onSelection, onChange }: Props
       }
       fabricCanvas.renderAll();
     };
-    window.addEventListener('resize', resize);
+    const observer = new ResizeObserver(resize);
+    observer.observe(wrapper.current);
     return () => {
       disposed = true;
-      window.removeEventListener('resize', resize);
+      observer.disconnect();
       fabricCanvas.dispose();
       fabricRef.current = null;
     };
@@ -129,7 +130,14 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
   };
   const beginTextEdit = (event: ReactMouseEvent<HTMLDivElement>) => { if (element.type !== 'text') return; const target = event.currentTarget; target.contentEditable = 'true'; target.focus(); const finish = () => { target.contentEditable = 'false'; onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, text: target.innerText } : item) }); target.removeEventListener('blur', finish); }; target.addEventListener('blur', finish); };
   if (element.type === 'background' && element.src) return <img className="visual-image" src={assetUrl(element.src)} alt="" style={{ ...base, objectFit: 'cover' }} />;
-  if (element.type === 'image' && element.src) return <div className="visual-image" style={base} onPointerDown={beginDrag}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'image' && element.src) {
+    const crop = element.crop || {};
+    const left = Math.min(.95, Math.max(0, crop.left || 0));
+    const right = Math.min(.95 - left, Math.max(0, crop.right || 0));
+    const top = Math.min(.95, Math.max(0, crop.top || 0));
+    const bottom = Math.min(.95 - top, Math.max(0, crop.bottom || 0));
+    return <div className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  }
   if (element.type === 'text') return <div className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}>{element.text}{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (element.type === 'line' || element.type === 'arrow') return <div className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
@@ -139,9 +147,11 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
 async function createFabricObject(element: LayoutElement): Promise<any> {
   const style = element.style || {};
   const common = { left: element.x, top: element.y, angle: element.rotation, opacity: style.opacity ?? 1, originX: 'left' as const, originY: 'top' as const };
-  if ((element.type === 'background' || element.type === 'image') && element.src) {
+  // Images use the interactive DOM layer so their crop preview has one owner.
+  if (element.type === 'image') return null;
+  if (element.type === 'background' && element.src) {
     const image = await FabricImage.fromURL(assetUrl(element.src));
-    image.set({ ...common, width: element.width, height: element.height, scaleX: 1, scaleY: 1, selectable: element.type !== 'background', evented: element.type !== 'background' });
+    image.set({ ...common, width: element.width, height: element.height, scaleX: 1, scaleY: 1, selectable: false, evented: false });
     return image;
   }
   if (element.type === 'text') {
