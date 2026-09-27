@@ -22,6 +22,9 @@ class AIReconstructionPlanner:
         asset_dir: Path,
         project_id: str,
         page_index: int,
+        *,
+        include_detected_visuals: bool = True,
+        asset_prefix: str = "planner",
     ) -> dict[str, int]:
         stats = {"plannedModules": 0, "wholeImageRegions": 0, "cutoutImages": 0, "nativeShapesPlanned": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
         vision = scene.get("vision") or {}
@@ -34,7 +37,7 @@ class AIReconstructionPlanner:
         width, height = int(canvas.get("width") or 0), int(canvas.get("height") or 0)
         if width < 32 or height < 32:
             return stats
-        modules = list(modules) + _unplanned_visual_modules(scene.get("regions") or [], scene.get("elements") or [], width, height)
+        modules = list(modules) + (_unplanned_visual_modules(scene.get("regions") or [], scene.get("elements") or [], width, height) if include_detected_visuals else [])
         elements = scene.setdefault("elements", [])
         by_id = {str(item.get("id")): item for item in elements}
         planned_assets: list[dict[str, Any]] = []
@@ -113,7 +116,7 @@ class AIReconstructionPlanner:
                     clean_dir = asset_dir.parent / "text_clean_assets" / f"page_{page_index}"
                     module_dir.mkdir(parents=True, exist_ok=True)
                     clean_dir.mkdir(parents=True, exist_ok=True)
-                    asset_id = f"planner_page_{page_index}_region_{len(planned_assets) + 1:03d}"
+                    asset_id = f"{asset_prefix}_page_{page_index}_region_{len(planned_assets) + 1:03d}"
                     asset_path = asset_dir / f"{asset_id}.png"
                     covered = [
                         item for item in elements

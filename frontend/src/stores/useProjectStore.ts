@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import axios from 'axios';
 import type { LayoutElement, LayoutJSON, ProjectInfo } from '../types/layout';
-import { analyzeProject, approvePage, createProject, downgradePage, exportPptx, saveSlide, uploadImages } from '../services/api';
+import { analyzeProject, approvePage, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
 
 interface ProjectState {
   project: ProjectInfo | null;
@@ -102,12 +102,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
   reanalyzeCurrent: async () => {
-    const { project, activePage, conversionMode } = get();
+    const { project, activePage } = get();
     if (!project) return;
     set({ busy: true, message: `继续优化第 ${activePage + 1} 页…` });
     try {
-      const result = await analyzeProject(project.id, conversionMode, activePage + 1);
-      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? result.slides[0] : slide), busy: false, reviewVersion: state.reviewVersion + 1, message: '本页已重新优化，请对照检查。' }));
+      const result = await revisePage(project.id, activePage + 1);
+      set((state) => ({ slides: state.slides.map((slide, index) => index === activePage ? result.layout : slide), busy: false, reviewVersion: state.reviewVersion + 1, message: result.accepted ? `第 ${result.revisionRound} 轮区域优化已改善 ${result.improvedRegions.length} 处，请对照检查。` : `第 ${result.revisionRound} 轮未改善指标，已保留上一轮结果。` }));
     } catch (error) {
       set({ busy: false, message: '继续优化失败，当前结果已保留。' });
       throw error;

@@ -18,6 +18,8 @@ def erase_editable_text_sources(
     layout: dict,
     *,
     complex_cleaner: ComplexTextCleaner | None = None,
+    target_text_ids: set[str] | None = None,
+    copy_asset_prefix: str | None = None,
 ) -> dict[str, int]:
     """Remove source glyphs from every layer beneath an editable OCR line.
 
@@ -33,6 +35,8 @@ def erase_editable_text_sources(
         meta = item.get("metadata") or {}
         raw = meta.get("rawOCRBBox")
         if item.get("type") != "text" or not str(item.get("text") or "").strip():
+            continue
+        if target_text_ids is not None and str(item.get("id")) not in target_text_ids:
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
@@ -61,10 +65,10 @@ def erase_editable_text_sources(
         if not path or not path.is_file():
             continue
         project_root = background_path.parent.parent
-        if project_root not in path.parents:
+        if copy_asset_prefix or project_root not in path.parents:
             local_assets = project_root / "assets"
             local_assets.mkdir(parents=True, exist_ok=True)
-            local_path = local_assets / f"text_clean_{asset['id']}.png"
+            local_path = local_assets / f"{copy_asset_prefix or 'text_clean'}_{asset['id']}.png"
             shutil.copy2(path, local_path)
             path = local_path
             asset["src"] = f"/media/assets/{project_root.name}/{local_path.name}"

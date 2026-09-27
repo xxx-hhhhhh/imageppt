@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AnalyzeResponse, LayoutJSON, ProjectInfo } from '../types/layout';
+import type { AnalyzeResponse, LayoutJSON, ProjectInfo, RevisionResponse } from '../types/layout';
 
 export const api = axios.create({ baseURL: '/api' });
 
@@ -28,6 +28,11 @@ export async function analyzeProject(projectId: string, mode: 'fast' | 'standard
 
 export async function approvePage(projectId: string, page: number): Promise<void> {
   await api.post(`/projects/${projectId}/pages/${page}/approve`);
+}
+
+export async function revisePage(projectId: string, page: number): Promise<RevisionResponse> {
+  const response = await api.post<RevisionResponse>(`/projects/${projectId}/pages/${page}/revise`);
+  return response.data;
 }
 
 export async function downgradePage(projectId: string, page: number): Promise<LayoutJSON> {

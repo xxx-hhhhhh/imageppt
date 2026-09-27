@@ -86,3 +86,16 @@ class AnalyzeResponse(BaseModel):
     fallbackCount: int = 0
     visionWarning: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class RevisionResponse(BaseModel):
+    layout: LayoutJSON
+    revisionRound: int
+    accepted: bool
+    issuesBefore: list[dict[str, Any]]
+    issuesAfter: list[dict[str, Any]]
+    improvedRegions: list[str]
+    visualBefore: float
+    visualAfter: float
+    editableCoverageBefore: float
+    editableCoverageAfter: float

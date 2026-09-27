@@ -11,13 +11,14 @@ from fastapi.responses import FileResponse
 
 from app.config import OUTPUTS_DIR, PUBLIC_SHARED_MODE, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
 from app.models.project_store import ProjectStore
-from app.schemas.layout import AnalyzeResponse, LayoutJSON
+from app.schemas.layout import AnalyzeResponse, LayoutJSON, RevisionResponse
 from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
 from app.schemas.vision import VisionSettingsPayload, VisionSettingsResponse, VisionTestResponse
 from app.services.pptx import PPTXRenderer
 from app.services.reconstruction import ReconstructionPipeline
 from app.services.reconstruction.pipeline import AIUnavailableError
 from app.services.reconstruction.downgrade import downgrade_problem_regions
+from app.services.reconstruction.revision import revise_problem_regions
 from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
 from app.services.vision.router import VisionRouter
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
@@ -129,6 +130,17 @@ def downgrade_page(project_id: str, page: int) -> LayoutJSON:
         return LayoutJSON.model_validate(downgrade_problem_regions(store, project_id, page))
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/pages/{page}/revise", response_model=RevisionResponse)
+def revise_page(project_id: str, page: int) -> RevisionResponse:
+    record = _get_project(project_id)
+    if page < 1 or page > len(record.get("images", [])):
+        raise HTTPException(status_code=404, detail="Page not found")
+    try:
+        return RevisionResponse.model_validate(revise_problem_regions(store, project_id, page))
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "REVISION_NOT_READY", "message": str(exc)}) from exc
 
 
 @app.get("/api/vision/status")
@@ -282,8 +294,8 @@ def asset_media(project_id: str, file_name: str) -> FileResponse:
 @app.get("/api/projects/{project_id}/artifacts/{file_name}")
 def project_artifact(project_id: str, file_name: str) -> FileResponse:
     _get_project(project_id)
-    allowed = {"original.png", "background.png", "reconstructed_preview.png", "initial_preview.png", "final_preview.png", "source.png", "clean_background.png", "reconstruction_plan.json", "vision_debug.json", "difference.png", "visual_score.json", "visual_validation.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
-    page_artifact = re.fullmatch(r"(?:original|reconstructed_preview|difference|visual_score|visual_validation)_[1-9][0-9]*\.(?:png|json)", file_name)
+    allowed = {"original.png", "background.png", "reconstructed_preview.png", "initial_preview.png", "final_preview.png", "source.png", "clean_background.png", "reconstruction_plan.json", "vision_debug.json", "difference.png", "visual_score.json", "visual_validation.json", "problem_report.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
+    page_artifact = re.fullmatch(r"(?:original|reconstructed_preview|difference|visual_score|visual_validation|problem_report)_[1-9][0-9]*\.(?:png|json)", file_name)
     if file_name not in allowed and not page_artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return _media_file(OUTPUTS_DIR / project_id / file_name)

@@ -69,3 +69,16 @@ export interface AnalyzeResponse {
   visionWarning?: string | null;
   warnings: string[];
 }
+
+export interface RevisionResponse {
+  layout: LayoutJSON;
+  revisionRound: number;
+  accepted: boolean;
+  issuesBefore: { elementId?: string; problem: string }[];
+  issuesAfter: { elementId?: string; problem: string }[];
+  improvedRegions: string[];
+  visualBefore: number;
+  visualAfter: number;
+  editableCoverageBefore: number;
+  editableCoverageAfter: number;
+}
