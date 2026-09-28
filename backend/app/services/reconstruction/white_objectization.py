@@ -119,13 +119,12 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
     selected: list[tuple[int, int, int, int]] = []
     for x, y, w, h, contour, rounded in candidates[:80]:
         box = (x, y, x + w, y + h)
-        if any((w * h) <= 1.6 * float(item.get("width") or 0) * float(item.get("height") or 0) and _overlap_min(box, _box(item, width, height)) > 0.65 for item in active if item.get("type") == "text" and _box(item, width, height)):
-            continue
         if any(_overlap_min(box, prior) > 0.75 for prior in selected):
             continue
-        if any(_overlap_min(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") != "text" and _box(item, width, height)):
+        if any(_overlap_of_first(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") != "text" and _box(item, width, height)):
             continue
-        texts = [item for item in active if item.get("type") == "text" and _text_inside(item, box)]
+        members = _module_members(active, box)
+        texts = [item for item in members if item.get("type") == "text"]
         crop = source[y:y + h, x:x + w]
         inset = max(2, min(w, h) // 10)
         inner = crop[inset:h - inset, inset:w - inset]
@@ -145,12 +144,14 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
         dominant_fill = np.median(clean_pixels, axis=0).astype(np.uint8)
         dominant_fraction = float(np.mean(np.max(np.abs(clean_pixels.astype(np.int16) - dominant_fill.astype(np.int16)), axis=1) <= 12))
         flat = float(np.max(np.std(clean_pixels.astype(np.float32), axis=0))) < 12 or dominant_fraction >= 0.78
-        z_index = min([int(item.get("zIndex") or 20) for item in texts], default=10) - 1
+        z_index = min([int(item.get("zIndex") or 20) for item in members], default=10) - 1
+        identifier = f"white_border_page_{page_index}_{shapes + assets + 1:03d}"
+        group_id = _bind_container_module(members, identifier)
         if flat:
             fill_color = dominant_fill
             border_color = np.median(crop[edges[y:y + h, x:x + w] > 0], axis=0).astype(np.uint8)
             shapes += 1
-            elements.append({"id": f"white_border_page_{page_index}_{shapes:03d}", "type": "roundedRectangle" if rounded else "rectangle", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "style": {"fill": _hex_bgr(fill_color), "stroke": _hex_bgr(border_color), "strokeWidth": 1, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container"}})
+            elements.append({"id": identifier, "type": "roundedRectangle" if rounded else "rectangle", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": _hex_bgr(fill_color), "stroke": _hex_bgr(border_color), "strokeWidth": 1, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
         else:
             assets += 1
             clean = cv2.inpaint(crop, text_mask, 3, cv2.INPAINT_TELEA) if np.any(text_mask) else crop
@@ -159,7 +160,7 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             cv2.drawContours(alpha, [local_contour], -1, 255, -1)
             path = asset_dir / f"white_border_page_{page_index}_{assets:03d}.png"
             cv2.imwrite(str(path), np.dstack((clean, alpha)))
-            elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "textCleaned": bool(texts)}})
+            elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")], "textCleaned": bool(texts)}})
         if flat:
             _occupy_shape_color(source, occupied, box, _hex_bgr(fill_color))
             _occupy_shape_color(source, occupied, box, _hex_bgr(border_color))
@@ -207,6 +208,33 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
             fill = f"#{median[2]:02X}{median[1]:02X}{median[0]:02X}"
             radius = _rounded_corner_hint(mask[y:y + h, x:x + w])
             candidates.append((x, y, w, h, fill, "roundedRectangle" if radius else "rectangle"))
+    # Quantization can put a pale panel and its near-white page background in
+    # the same bucket. Find locally bounded panels by contrast with the page
+    # border as well, then require a flat interior and associated foreground.
+    page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
+    contrast = np.max(np.abs(source_int - page_color), axis=2)
+    local_mask = np.uint8(contrast >= 5) * 255
+    local_mask = cv2.morphologyEx(local_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    local_contours, _ = cv2.findContours(local_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in local_contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = w * h
+        if w < 10 or h < 8 or area < minimum_area or area > width * height * 0.60:
+            continue
+        if cv2.contourArea(contour) / area < 0.80:
+            continue
+        box = (x, y, x + w, y + h)
+        if not _module_members(active, box):
+            continue
+        region = source[y:y + h, x:x + w]
+        median = np.median(region.reshape(-1, 3), axis=0).astype(np.int16)
+        if np.max(np.abs(median - page_color)) < 5:
+            continue
+        if np.mean(np.max(np.abs(region.astype(np.int16) - median), axis=2) <= 5) < 0.63:
+            continue
+        fill = _hex_bgr(median.astype(np.uint8))
+        radius = _rounded_corner_hint(local_mask[y:y + h, x:x + w])
+        candidates.append((x, y, w, h, fill, "roundedRectangle" if radius else "rectangle"))
     # Prefer larger panels; nested differently colored blocks remain separate.
     candidates.sort(key=lambda item: item[2] * item[3], reverse=True)
     created = 0
@@ -215,26 +243,51 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         box = (x, y, x + w, y + h)
         if np.mean(occupied[y:y + h, x:x + w] > 0) > 0.35:
             continue
-        if any((w * h) <= 1.6 * float(item.get("width") or 0) * float(item.get("height") or 0) and _overlap_min(box, _box(item, width, height)) > 0.65 for item in active if item.get("type") == "text" and _box(item, width, height)):
-            continue
         if any(_overlap_min(box, previous) > 0.78 for previous in created_boxes):
             continue
-        if any(_overlap_min(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
+        if any(_overlap_of_first(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
             continue
         if any(_overlap_min(box, _box(item, width, height)) > 0.80 and item.get("style", {}).get("fill") == fill for item in elements if item.get("metadata", {}).get("reconstructionStrategySource") == "white_objectization" and _box(item, width, height)):
             continue
+        members = _module_members(active, box)
+        if not members and (w * h > width * height * 0.20 or x == 0 or y == 0 or x + w >= width or y + h >= height):
+            continue
         created += 1
         identifier = f"white_container_page_{page_index}_{created:03d}"
-        contained_text = [item for item in active if item.get("type") == "text" and _text_inside(item, box)]
-        elements.append({"id": identifier, "type": kind, "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": min([int(item.get("zIndex") or 20) for item in contained_text], default=10) - 1, "style": {"fill": fill, "stroke": fill, "strokeWidth": 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container"}})
+        group_id = _bind_container_module(members, identifier)
+        z_index = min([int(item.get("zIndex") or 20) for item in members], default=10) - 1
+        elements.append({"id": identifier, "type": kind, "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": fill, "stroke": fill, "strokeWidth": 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
         _occupy_shape_color(source, occupied, box, fill)
         created_boxes.append(box)
     return created
 
 
+def _module_members(active: list[dict], box: tuple[int, int, int, int]) -> list[dict]:
+    """Foreground with its center on a local plate, excluding page-size owners."""
+    area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+    return [item for item in active if item.get("type") in {"text", "image", "ellipse", "line", "arrow"}
+            and float(item.get("width") or 0) * float(item.get("height") or 0) <= area * 0.85
+            and _text_inside(item, box)]
+
+
+def _bind_container_module(members: list[dict], identifier: str) -> str:
+    groups = [str(item.get("groupId") or (item.get("metadata") or {}).get("groupId")) for item in members if item.get("groupId") or (item.get("metadata") or {}).get("groupId")]
+    group_id = max(set(groups), key=groups.count) if groups else f"module_{identifier}"
+    for item in members:
+        if not item.get("groupId") and not (item.get("metadata") or {}).get("groupId"):
+            item["groupId"] = group_id
+            item.setdefault("metadata", {})["groupId"] = group_id
+    return group_id
+
+
 def _overlap_min(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
     overlap = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
     return overlap / max(1, min((left[2] - left[0]) * (left[3] - left[1]), (right[2] - right[0]) * (right[3] - right[1])))
+
+
+def _overlap_of_first(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    overlap = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
+    return overlap / max(1, (left[2] - left[0]) * (left[3] - left[1]))
 
 
 def _text_inside(item: dict, box: tuple[int, int, int, int]) -> bool:

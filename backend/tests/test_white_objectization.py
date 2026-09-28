@@ -64,6 +64,49 @@ def test_text_backplates_and_cards_export_as_independent_shapes(tmp_path):
     assert all(shape.shape_type == 1 for shape in slide.shapes)  # native PowerPoint shapes
 
 
+def test_pale_module_backplate_survives_with_foreground_and_group(tmp_path):
+    source = np.full((240, 400, 3), 250, np.uint8)
+    cv2.rectangle(source, (48, 42), (226, 112), (242, 244, 246), -1)
+    cv2.circle(source, (76, 77), 13, (180, 80, 40), -1)
+    cv2.putText(source, "ITEM", (101, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
+    source_path = tmp_path / "pale.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 400, "height": 240}, "elements": [
+        {"id": "module_icon", "type": "ellipse", "x": 63, "y": 64, "width": 26, "height": 26, "zIndex": 10, "groupId": "module_a", "style": {"fill": "#2850B4"}},
+        {"id": "module_title", "type": "text", "x": 99, "y": 62, "width": 91, "height": 29, "zIndex": 20, "groupId": "module_a", "text": "ITEM", "metadata": {"rawOCRBBox": [99, 62, 190, 91]}},
+    ]}
+    stats = objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "pale-module", 1)
+    plates = [item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container"]
+    assert stats["whiteContainerShapes"] >= 1
+    plate = next(item for item in plates if item["x"] <= 48 and item["x"] + item["width"] >= 226)
+    assert plate["groupId"] == "module_a"
+    assert set(plate["metadata"]["moduleMemberIds"]) == {"module_icon", "module_title"}
+    assert plate["zIndex"] < 10
+    assert plate["type"] in {"rectangle", "roundedRectangle", "image"}
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    preview = tmp_path / "preview.png"
+    render_preview(background_path, layout, preview)
+    pixels = cv2.imread(str(preview))
+    assert np.max(np.abs(pixels[48, 51].astype(int) - source[48, 51].astype(int))) < 8
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    PPTXRenderer()._add_element(slide, plate, 0.02, 0.02)
+    assert len(slide.shapes) == 1
+
+
+def test_page_wide_pale_background_is_not_a_local_backplate(tmp_path):
+    source = np.full((240, 400, 3), 245, np.uint8)
+    source_path = tmp_path / "page.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 400, "height": 240}, "elements": [
+        {"id": "title", "type": "text", "x": 80, "y": 60, "width": 120, "height": 30, "text": "Title", "metadata": {"rawOCRBBox": [80, 60, 200, 90]}}
+    ]}
+    objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "page-bg", 1)
+    assert not [item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container"]
+
+
 def test_outline_card_becomes_movable_container(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (45, 35), (330, 190), (120, 65, 35), 3)
