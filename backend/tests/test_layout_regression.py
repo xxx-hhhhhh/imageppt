@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zipfile import ZipFile
 
 import cv2
 import numpy as np
@@ -13,6 +14,8 @@ from app.services.layout.text_blocks import group_text_elements
 from app.services.layout.typography import estimate_text_style
 from app.services.ocr.provider import OCRResult
 from app.services.pptx import PPTXRenderer
+from app.services.reconstruction.planner import _single_ellipse_alpha
+from app.services.segmentation.segmentation_provider import OpenCVSegmentationProvider
 
 
 def _style(text: str, bbox: list[float], width: int = 1000, height: int = 600) -> dict:
@@ -88,10 +91,10 @@ def test_complex_badge_owns_and_suppresses_native_circle(tmp_path: Path) -> None
     elements = detect_label_groups(source, 500, 300, regions, texts + [ellipse], tmp_path / "assets", "badge-test")
     asset = next(item for item in elements if (item.get("metadata") or {}).get("wholeBadgeAsset"))
     source_shape = next(item for item in elements if item.get("id") == "shape_badge")
-    assert asset["metadata"]["reconstructionStrategy"] == "local_image"
+    assert asset["metadata"]["reconstructionStrategy"] == "transparent_image"
     assert asset["metadata"]["preserveWholeAsset"] is True
     assert asset["metadata"]["doNotVectorize"] is True
-    assert asset["metadata"]["transparent"] is False
+    assert asset["metadata"]["transparent"] is True
     assert asset["metadata"]["owns"] == ["shape_badge"]
     assert source_shape["metadata"]["suppressRender"] is True
     assert source_shape["metadata"]["suppressed"] is True
@@ -99,9 +102,48 @@ def test_complex_badge_owns_and_suppresses_native_circle(tmp_path: Path) -> None
     assert source_shape["metadata"]["badgeSyntheticBackgroundSuppressed"] is True
     exported = cv2.imread(str(tmp_path / "assets" / Path(asset["src"]).name), cv2.IMREAD_UNCHANGED)
     assert exported is not None
-    assert exported.ndim == 3 and exported.shape[2] == 3
+    assert exported.ndim == 3 and exported.shape[2] == 4
+    assert exported[0, 0, 3] == 0
+    assert exported[-1, -1, 3] == 0
     center = exported[exported.shape[0] // 2, exported.shape[1] // 2]
-    assert np.all(center > 240)
+    assert np.all(center[:3] > 240) and center[3] == 255
+    assert exported[exported.shape[0] // 2, exported.shape[1] // 6, 3] == 255
+    # The same asset must retain its silhouette when embedded in PowerPoint.
+    export_asset = {**asset, "src": str(tmp_path / "assets" / Path(asset["src"]).name)}
+    layout = {"version": "1.1", "slide": {"width": 500, "height": 300}, "elements": [export_asset]}
+    output, report = PPTXRenderer().render_project("badge_alpha_export", [layout])
+    assert report["valid"] is True
+    with ZipFile(output) as archive:
+        media = [name for name in archive.namelist() if name.startswith("ppt/media/") and name.endswith(".png")]
+        assert len(media) == 1
+        embedded = cv2.imdecode(np.frombuffer(archive.read(media[0]), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    assert embedded.shape[2] == 4
+    assert embedded[0, 0, 3] == 0
+    assert embedded[embedded.shape[0] // 2, embedded.shape[1] // 2, 3] == 255
+
+
+def test_planned_oval_uses_contour_only_for_a_tight_single_shape() -> None:
+    oval = {"id": "oval", "type": "ellipse", "bbox": {"left": 10, "top": 12, "width": 80, "height": 46}}
+    alpha = _single_ellipse_alpha([oval], (8, 10, 92, 60))
+    assert alpha is not None
+    assert alpha[0, 0] == 0
+    assert alpha[25, 42] == 255
+    assert _single_ellipse_alpha([oval, {"type": "rectangle"}], (8, 10, 92, 60)) is None
+    assert _single_ellipse_alpha([oval], (0, 0, 200, 120)) is None
+
+
+def test_irregular_icon_segmentation_keeps_transparent_corners(tmp_path: Path) -> None:
+    image = np.full((200, 200, 3), 255, dtype=np.uint8)
+    points = np.array([[35, 85], [100, 25], [165, 85], [120, 85], [120, 155], [80, 155], [80, 85]], np.int32)
+    cv2.fillPoly(image, [points], (20, 80, 220))
+    source = tmp_path / "arrow.png"
+    cv2.imwrite(str(source), image)
+    segments = OpenCVSegmentationProvider().segment(source, tmp_path / "assets", "arrow-test")
+    assert segments
+    asset = cv2.imread(str(tmp_path / "assets" / Path(segments[0]["alphaCrop"]).name), cv2.IMREAD_UNCHANGED)
+    assert asset.shape[2] == 4
+    assert asset[0, 0, 3] == 0
+    assert asset[asset.shape[0] // 2, asset.shape[1] // 2, 3] == 255
 
 
 def test_whole_badge_renderer_skips_synthetic_circle_and_transparent_foreground(tmp_path: Path) -> None:

@@ -56,22 +56,30 @@ def _sample_fill(image: np.ndarray, bounds: tuple[float, float, float, float]) -
 
 
 def _extract_whole_badge_crop(image: np.ndarray, item: dict[str, Any], destination: Path) -> tuple[int, int, int, int] | None:
-    """Save the complete badge pixels without foreground/background separation.
+    """Keep every pixel inside the detected ellipse, including white artwork.
 
-    White artwork inside a badge is authored content, not transparency.  Whole
-    badge assets therefore stay ordinary RGB PNGs and retain their original
-    fill, highlight, shadow, gradient, and texture.
+    Only the exterior of the badge is transparent. Color-keying white pixels
+    would erase the symbol and highlights inside the badge as well.
     """
-    x, y, w, h = [int(max(0, item[key])) for key in ("x", "y", "width", "height")]
-    padding = max(2, int(round(min(w, h) * 0.04)))
-    x, y = max(0, x - padding), max(0, y - padding)
-    x2, y2 = min(image.shape[1], x + w + padding * 2), min(image.shape[0], y + h + padding * 2)
+    left, top = float(item["x"]), float(item["y"])
+    right, bottom = left + float(item["width"]), top + float(item["height"])
+    padding = max(2, int(round(min(right - left, bottom - top) * 0.04)))
+    x, y = max(0, int(np.floor(left)) - padding), max(0, int(np.floor(top)) - padding)
+    x2, y2 = min(image.shape[1], int(np.ceil(right)) + padding), min(image.shape[0], int(np.ceil(bottom)) + padding)
     w, h = x2 - x, y2 - y
-    crop = image[y:min(image.shape[0], y + h), x:min(image.shape[1], x + w)]
+    crop = image[y:y2, x:x2]
     if crop.size == 0:
         return None
+    scale = 4
+    alpha_large = np.zeros((h * scale, w * scale), dtype=np.uint8)
+    center = (round(((left + right) / 2 - x) * scale), round(((top + bottom) / 2 - y) * scale))
+    axes = (max(1, round((right - left) * scale / 2)), max(1, round((bottom - top) * scale / 2)))
+    cv2.ellipse(alpha_large, center, axes, float(item.get("rotation") or 0), 0, 360, 255, -1, cv2.LINE_AA)
+    alpha = cv2.resize(alpha_large, (w, h), interpolation=cv2.INTER_AREA)
+    rgba = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
+    rgba[:, :, 3] = alpha
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return (x, y, w, h) if cv2.imwrite(str(destination), crop) else None
+    return (x, y, w, h) if cv2.imwrite(str(destination), rgba) else None
 
 
 def _complex_badge(image: np.ndarray, item: dict[str, Any]) -> bool:
@@ -157,7 +165,7 @@ def detect_label_groups(image_path: Path, image_width: int, image_height: int, o
                 crop_x, crop_y, crop_w, crop_h = crop_bounds
                 icon = {"id": f"component_asset_{next_group:04d}", "type": "image", "x": float(crop_x), "y": float(crop_y), "width": float(crop_w), "height": float(crop_h), "rotation": 0, "zIndex": 16, "src": f"/media/assets/{project_id}/{icon_path.name}", "style": {"opacity": 1}, "confidence": 0.82}
                 _mark(icon, group_id, role, "wholeBadgeImage")
-                icon.setdefault("metadata", {}).update({"wholeBadgeAsset": True, "preserveWholeAsset": True, "preserveAsImage": True, "doNotVectorize": True, "transparent": False, "reconstructionStrategy": "local_image", "sourceContentPreserved": True, "badgeForegroundTransparentExtraction": False, "owns": [shape["id"]]})
+                icon.setdefault("metadata", {}).update({"wholeBadgeAsset": True, "preserveWholeAsset": True, "preserveAsImage": True, "doNotVectorize": True, "transparent": True, "reconstructionStrategy": "transparent_image", "sourceContentPreserved": True, "badgeContourMasked": True, "owns": [shape["id"]]})
                 shape.setdefault("metadata", {}).update({"ownedBy": icon["id"], "suppressed": True, "suppressRender": True, "duplicateSuppressed": True, "badgeSyntheticBackgroundSuppressed": True, "duplicateBadgeLayerRemoved": True, "reconstructionStrategy": "group", "sourceContentPreserved": False})
                 for contained in texts:
                     if contained is not text and _inside_shape(contained, shape):

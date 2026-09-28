@@ -174,6 +174,8 @@ class AIReconstructionPlanner:
                     if np.any(mask) and safe_to_clean:
                         crop = _clean_text_from_asset(crop, mask)
                     alpha = _module_alpha(module, box)
+                    if alpha is None:
+                        alpha = _single_ellipse_alpha(covered, box)
                     if alpha is not None:
                         crop = np.dstack((crop, alpha))
                     cv2.imwrite(str(asset_path), crop)
@@ -518,6 +520,30 @@ def _module_alpha(module: dict[str, Any], crop_box: tuple[int, int, int, int]) -
         return None
     alpha[top - y1:bottom - y1, left - x1:right - x1] = mask[top - my1:bottom - my1, left - mx1:right - mx1]
     return alpha
+
+
+def _single_ellipse_alpha(elements: list[dict[str, Any]], crop_box: tuple[int, int, int, int]) -> np.ndarray | None:
+    """Mask a tightly cropped, detected oval without masking mixed modules."""
+    visuals = [item for item in elements if item.get("type") not in {"text", "group", "background"}]
+    if len(visuals) != 1 or visuals[0].get("type") != "ellipse":
+        return None
+    item = visuals[0]
+    bounds = item.get("bbox") or {}
+    left = float(bounds.get("left", item.get("x", 0)))
+    top = float(bounds.get("top", item.get("y", 0)))
+    width = float(bounds.get("width", item.get("width", 0)))
+    height = float(bounds.get("height", item.get("height", 0)))
+    x1, y1, x2, y2 = crop_box
+    if width <= 0 or height <= 0 or (x2 - x1) > width * 1.25 or (y2 - y1) > height * 1.25:
+        return None
+    if left < x1 - 2 or top < y1 - 2 or left + width > x2 + 2 or top + height > y2 + 2:
+        return None
+    scale = 4
+    alpha_large = np.zeros(((y2 - y1) * scale, (x2 - x1) * scale), dtype=np.uint8)
+    center = (round((left + width / 2 - x1) * scale), round((top + height / 2 - y1) * scale))
+    axes = (max(1, round(width * scale / 2)), max(1, round(height * scale / 2)))
+    cv2.ellipse(alpha_large, center, axes, float(item.get("rotation") or 0), 0, 360, 255, -1, cv2.LINE_AA)
+    return cv2.resize(alpha_large, (x2 - x1, y2 - y1), interpolation=cv2.INTER_AREA)
 
 
 def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
