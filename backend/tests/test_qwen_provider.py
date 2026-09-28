@@ -47,6 +47,16 @@ def test_scene_schema_preserves_reconstruction_semantics():
     assert element["visualComplexity"] == 0.9
 
 
+def test_plan_normalization_keeps_module_with_noncanonical_children_and_strategy():
+    plan = validate_json({"reconstructionPlan": {"modules": [{
+        "moduleId": "card", "bbox": {"left": 0.1, "top": 0.1, "width": 0.4, "height": 0.4},
+        "reconstructionStrategy": "hybrid", "children": ["icon", "label"],
+    }]}})["reconstructionPlan"]
+    assert len(plan["modules"]) == 1
+    assert plan["modules"][0]["reconstructionStrategy"] == "mixed_component"
+    assert plan["modules"][0]["children"] == [{"id": "icon"}, {"id": "label"}]
+
+
 def test_qwen_provider_retries_json_repair(monkeypatch, tmp_path):
     provider = object.__new__(QwenProvider)
     provider.name = "qwen"
