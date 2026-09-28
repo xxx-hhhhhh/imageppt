@@ -59,6 +59,7 @@ QWEN_ENABLE_THINKING = os.getenv("QWEN_ENABLE_THINKING", "false").lower() == "tr
 QWEN_TIMEOUT = env_int("QWEN_TIMEOUT", 120)
 QWEN_MAX_RETRIES = env_int("QWEN_MAX_RETRIES", 2)
 CONVERSION_MODE = os.getenv("CONVERSION_MODE", "maximum")
+RECONSTRUCTION_SURFACE_MODE = os.getenv("RECONSTRUCTION_SURFACE_MODE", "white_objectized")
 MAX_AI_CALLS_PER_SLIDE = env_int("MAX_AI_CALLS_PER_SLIDE", 3)
 PUBLIC_SHARED_MODE = os.getenv("IMAGE2EDITABLEPPT_PUBLIC_SHARED", "false").strip().lower() in {"1", "true", "yes", "on"}
 

@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, SEGMENTATION_PROVIDER, VISION_PROVIDER
+from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, RECONSTRUCTION_SURFACE_MODE, SEGMENTATION_PROVIDER, VISION_PROVIDER
 from app.services.fusion.adjustment_validator import apply_safe_adjustments
 from app.models.project_store import ProjectStore
 from app.services.inpainting.service import InpaintingService
@@ -24,6 +24,7 @@ from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
+from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -106,6 +107,7 @@ class ReconstructionPipeline:
 
     def analyze_project(self, project_id: str, mode: str | None = None, page: int = 1, allow_fallback: bool = False) -> tuple[list[dict], str, list[str]]:
         conversion_mode = mode if mode in {"fast", "standard", "high_quality", "maximum"} else CONVERSION_MODE
+        white_objectized = RECONSTRUCTION_SURFACE_MODE != "legacy"
         record = self.store.get(project_id)
         ocr = OCRService(OCR_PROVIDER)
         inpainting = InpaintingService(INPAINT_PROVIDER)
@@ -216,7 +218,7 @@ class ReconstructionPipeline:
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
             for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
                 reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
-            if conversion_mode in {"high_quality", "maximum"}:
+            if conversion_mode in {"high_quality", "maximum"} and not white_objectized:
                 for item in scene_refined.get("elements", []):
                     metadata = item.setdefault("metadata", {})
                     if item.get("type") not in {"text", "background"} and not metadata.get("preserveWholeAsset") and not (metadata.get("reconstructionStrategySource") == "planner" and metadata.get("reconstructionStrategy") == "native_shape"):
@@ -239,10 +241,14 @@ class ReconstructionPipeline:
             layout, typography_stats = typography_layout_refiner.refine(layout)
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
+            if white_objectized:
+                white_stats = objectize_on_white(normalized_path, background_path, layout, page_output / "assets", project_id, page_index)
+                reconstruction_stats.update(white_stats)
             asset_repairs: list[dict] = []
             local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
             asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
-            reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
+            if not white_objectized:
+                reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
             reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
             erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None)
             for key, value in erasure_stats.items():
@@ -261,7 +267,7 @@ class ReconstructionPipeline:
             preview_path = page_output / "reconstructed_preview.png" if page_index == 1 else page_output / f"reconstructed_preview_{page_index}.png"
             render_preview(background_path, layout, preview_path)
             shutil.copy2(preview_path, page_output / "initial_preview.png" if page_index == 1 else page_output / f"initial_preview_{page_index}.png")
-            if conversion_mode in {"high_quality", "maximum"}:
+            if conversion_mode in {"high_quality", "maximum"} and not white_objectized:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
@@ -270,7 +276,7 @@ class ReconstructionPipeline:
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
             best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < 0.85:
+            if conversion_mode in {"high_quality", "maximum"} and not white_objectized and float(best_score.get("overall", 0)) < 0.85:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
