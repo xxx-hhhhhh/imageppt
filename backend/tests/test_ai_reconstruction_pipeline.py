@@ -304,6 +304,8 @@ def test_pipeline_defaults_to_white_objectized_background(monkeypatch, tmp_path:
     assert slides[0]["metadata"]["reconstructionSurfaceMode"] == "white_objectized"
     assert any(item["type"] == "text" for item in slides[0]["elements"])
     assert 0 < report["residualObjectizationRate"] <= 1
+    assert (tmp_path / "outputs" / "local-standard" / "objectization_debug.png").is_file()
+    assert (tmp_path / "outputs" / "local-standard" / "objectization_audit.json").is_file()
 
 
 def test_pipeline_keeps_legacy_background_option(monkeypatch, tmp_path: Path) -> None:

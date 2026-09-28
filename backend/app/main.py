@@ -320,8 +320,8 @@ def asset_media(project_id: str, file_name: str) -> FileResponse:
 @app.get("/api/projects/{project_id}/artifacts/{file_name}")
 def project_artifact(project_id: str, file_name: str) -> FileResponse:
     _get_project(project_id)
-    allowed = {"original.png", "background.png", "reconstructed_preview.png", "initial_preview.png", "final_preview.png", "source.png", "clean_background.png", "reconstruction_plan.json", "vision_debug.json", "difference.png", "visual_score.json", "visual_validation.json", "problem_report.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
-    page_artifact = re.fullmatch(r"(?:original|reconstructed_preview|difference|visual_score|visual_validation|problem_report)_[1-9][0-9]*\.(?:png|json)", file_name)
+    allowed = {"original.png", "background.png", "reconstructed_preview.png", "initial_preview.png", "final_preview.png", "source.png", "clean_background.png", "reconstruction_plan.json", "vision_debug.json", "difference.png", "visual_score.json", "visual_validation.json", "problem_report.json", "objectization_debug.png", "objectization_audit.json", "conversion_report.json", "scene_raw.json", "scene_refined.json", "routing.json", "output.pptx"}
+    page_artifact = re.fullmatch(r"(?:original|reconstructed_preview|difference|visual_score|visual_validation|problem_report|objectization_debug|objectization_audit)_[1-9][0-9]*\.(?:png|json)", file_name)
     if file_name not in allowed and not page_artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return _media_file(OUTPUTS_DIR / project_id / file_name)

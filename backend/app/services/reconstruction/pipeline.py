@@ -27,6 +27,7 @@ from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, mea
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
+from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
 
@@ -369,6 +370,10 @@ class ReconstructionPipeline:
             if white_objectized:
                 score["objectizationQA"] = object_qa
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
+                audit = audit_objectization(normalized_path, background_path, preview_path, layout, page_output / ("objectization_debug.png" if page_index == 1 else f"objectization_debug_{page_index}.png"))
+                score["objectizationAudit"] = audit
+                score["issues"].extend(audit["issues"])
+                self._write_json(page_output / ("objectization_audit.json" if page_index == 1 else f"objectization_audit_{page_index}.json"), audit)
             score["planCoverage"] = plan_coverage
             if plan_coverage.get("status") == "partial":
                 score.setdefault("issues", []).append({"problem": "partialPlanTextCoverage", "uncoveredTextIds": plan_coverage.get("uncoveredTextIds", [])})
@@ -378,6 +383,9 @@ class ReconstructionPipeline:
                     revision_status = "stagnated"
                     score.setdefault("issues", []).append({"problem": "replacementVisualRegression", "regions": replacement_qa["worsenedRegions"]})
             ghosting_count = count_text_ghosting(normalized_path, background_path, layout)
+            if white_objectized:
+                audit.update({"ghostingCount": ghosting_count, "squareCutoutIssues": sum(issue.get("problem") == "squareCutoutUnresolved" for issue in object_qa.get("issues", [])), "missingSupportCount": int(object_qa.get("unresolvedBackplates") or 0)})
+                self._write_json(page_output / ("objectization_audit.json" if page_index == 1 else f"objectization_audit_{page_index}.json"), audit)
             reconstruction_stats["ghostingCount"] += ghosting_count
             score["ghostingCount"] = ghosting_count
             score["editableTextMismatchCount"] = sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and (item.get("metadata") or {}).get("visualTextMismatch") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
@@ -405,7 +413,7 @@ class ReconstructionPipeline:
             if conversion_mode in {"high_quality", "maximum"} and score["editableTextMismatchCount"]:
                 revision_status = "stagnated"
                 score["textFidelityGate"] = "review_required"
-            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap"} for issue in score.get("issues", []))):
+            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap", "missingBackplate", "missingVisualObject", "blankVisualOwner", "assetBakedIntoBackground", "squareCutoutUnresolved"} for issue in score.get("issues", []))):
                 revision_status = "stagnated"
                 score["structuralGate"] = "review_required"
                 warnings.append("视觉对象或复杂背景仍有待修复区域，请复核本页质量报告。")

@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 
-def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_dir: Path, project_id: str) -> dict[str, Any]:
+def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_dir: Path, project_id: str, target_ids: set[str] | None = None) -> dict[str, Any]:
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     report: dict[str, Any] = {"checkedModules": 0, "missingBackplates": 0, "recoveredBackplates": 0, "reboundBackplates": 0, "moduleImageFallbacks": 0, "squareCutouts": 0, "repairedCutouts": 0, "roundCutoutsChecked": 0, "roundCutoutIssues": 0, "issues": []}
     if source is None:
@@ -23,6 +23,8 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         if group_id:
             groups.setdefault(str(group_id), []).append(item)
     for group_id, members in groups.items():
+        if target_ids is not None and not any(str(item.get("id")) in target_ids for item in members):
+            continue
         foreground = [item for item in members if item.get("type") in {"text", "image", "ellipse", "line", "arrow"} and (item.get("metadata") or {}).get("layerRole") != "container"]
         if not foreground:
             continue
@@ -75,6 +77,8 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             elements.append({"id": identifier, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": metadata})
             report["moduleImageFallbacks"] += 1
     for item in active:
+        if target_ids is not None and str(item.get("id")) not in target_ids:
+            continue
         if item.get("type") != "image" or not item.get("src") or (item.get("metadata") or {}).get("suppressed"):
             continue
         path = asset_dir / Path(str(item["src"])).name
