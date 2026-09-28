@@ -25,6 +25,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
             metadata.update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"})
     bordered_shapes, bordered_assets = _extract_bordered_containers(source, active, elements, occupied, asset_dir, project_id, page_index)
     container_count = _extract_flat_containers(source, active, elements, occupied, page_index)
+    detail_shapes, detail_assets = _extract_internal_details(source, active, elements, occupied, asset_dir, project_id, page_index)
     for item in active:
         box = _box(item, width, height)
         if box is None:
@@ -51,7 +52,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": len(residual_assets) + bordered_assets, "whiteObjectShapes": container_count + bordered_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+    return {"whiteObjectAssets": len(residual_assets) + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
 
 
 def layer_objectized_elements(elements: list[dict]) -> None:
@@ -172,6 +173,91 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
 
 def _hex_bgr(color: np.ndarray) -> str:
     return f"#{color[2]:02X}{color[1]:02X}{color[0]:02X}"
+
+
+def _extract_internal_details(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[int, int]:
+    """Recover bounded secondary surfaces relative to their parent, not the page.
+
+    A white inset on a colored bar is invisible to a page-white residual mask.
+    Its ownership instead comes from the bar's own fill and geometry.
+    """
+    height, width = source.shape[:2]
+    parents = [item for item in elements if item.get("type") in {"rectangle", "roundedRectangle"} and (item.get("style") or {}).get("fill") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    shapes = assets = 0
+    for parent in parents:
+        box = _box(parent, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        if w < 24 or h < 20 or w * h > width * height * 0.65:
+            continue
+        try:
+            rgb = bytes.fromhex(str(parent["style"]["fill"]).lstrip("#"))
+            if len(rgb) != 3:
+                continue
+            fill = np.frombuffer(rgb[::-1], dtype=np.uint8).astype(np.int16)
+        except ValueError:
+            continue
+        crop = source[y1:y2, x1:x2]
+        different = np.uint8(np.max(np.abs(crop.astype(np.int16) - fill), axis=2) >= 28) * 255
+        for item in active:
+            if item is parent or item.get("type") == "background":
+                continue
+            child_box = _box(item, width, height)
+            if child_box is None or not _intersects(_box_unclipped(item), box):
+                continue
+            cx1, cy1, cx2, cy2 = child_box
+            pad = 3 if item.get("type") == "text" else 2
+            different[max(0, cy1 - y1 - pad):min(h, cy2 - y1 + pad), max(0, cx1 - x1 - pad):min(w, cx2 - x1 + pad)] = 0
+        different = cv2.morphologyEx(different, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(different, 8)
+        for label in range(1, count):
+            dx, dy, dw, dh, pixels = [int(value) for value in stats[label]]
+            if dx < 2 or dy < 2 or dx + dw > w - 2 or dy + dh > h - 2:
+                continue
+            if dw < max(8, round(w * 0.12)) or dh < max(5, round(h * 0.10)) or pixels < max(12, round(w * h * 0.002)):
+                continue
+            detail_box = (x1 + dx, y1 + dy, x1 + dx + dw, y1 + dy + dh)
+            if any(_overlap_of_first(detail_box, _box(item, width, height)) > 0.75 for item in elements if item is not parent and item.get("type") not in {"text", "background", "group"} and _box(item, width, height)):
+                continue
+            region_mask = np.uint8(labels[dy:dy + dh, dx:dx + dw] == label) * 255
+            detail_contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not detail_contours or cv2.contourArea(max(detail_contours, key=cv2.contourArea)) / max(1, dw * dh) < 0.85:
+                # Round icons and irregular artwork belong to contour/residual
+                # extraction; a parent surface must not claim their pixels.
+                continue
+            region = crop[dy:dy + dh, dx:dx + dw]
+            selected = region[region_mask > 0]
+            if len(selected) == 0:
+                continue
+            median = np.median(selected, axis=0).astype(np.uint8)
+            color = _hex_bgr(median)
+            members = _module_members(active, box)
+            group_id = parent.get("groupId") or _bind_container_module(members, str(parent.get("id") or "container"))
+            parent["groupId"] = group_id
+            parent.setdefault("metadata", {})["groupId"] = group_id
+            detail_id = f"internal_detail_page_{page_index}_{shapes + assets + 1:03d}"
+            parent["metadata"].setdefault("moduleMemberIds", [item["id"] for item in members if item.get("id")])
+            parent["metadata"]["moduleMemberIds"].append(detail_id)
+            z_index = int(parent.get("zIndex") or 0) + 1
+            metadata = {"reconstructionStrategySource": "internal_surface", "layerRole": "container_detail", "groupId": group_id, "parentId": parent.get("id")}
+            solid = pixels / max(1, dw * dh) >= 0.78 and float(np.mean(np.max(np.abs(selected.astype(np.int16) - median.astype(np.int16)), axis=1) <= 9)) >= 0.80
+            if solid:
+                shapes += 1
+                metadata["reconstructionStrategy"] = "native_shape"
+                elements.append({"id": detail_id, "type": "rectangle", "x": detail_box[0], "y": detail_box[1], "width": dw, "height": dh, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": color, "stroke": color, "strokeWidth": 0, "opacity": 1}, "metadata": metadata})
+            else:
+                assets += 1
+                metadata["reconstructionStrategy"] = "cutout_image"
+                path = asset_dir / f"{detail_id}.png"
+                cv2.imwrite(str(path), np.dstack((region, region_mask)))
+                elements.append({"id": detail_id, "type": "image", "x": detail_box[0], "y": detail_box[1], "width": dw, "height": dh, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": metadata})
+            occupied[detail_box[1]:detail_box[3], detail_box[0]:detail_box[2]][region_mask > 0] = 255
+            for member in members:
+                if member is not parent:
+                    member["zIndex"] = max(int(member.get("zIndex") or 0), z_index + 1)
+    return shapes, assets
 
 
 def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, page_index: int) -> int:

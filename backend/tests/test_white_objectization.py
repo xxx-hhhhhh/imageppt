@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 from pptx import Presentation
@@ -105,6 +107,44 @@ def test_page_wide_pale_background_is_not_a_local_backplate(tmp_path):
     ]}
     objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "page-bg", 1)
     assert not [item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container"]
+
+
+def test_colored_title_surface_keeps_white_inner_frame_as_movable_detail(tmp_path):
+    source = np.full((240, 420, 3), 255, np.uint8)
+    cv2.rectangle(source, (42, 48), (352, 142), (165, 86, 38), -1)
+    cv2.rectangle(source, (54, 60), (340, 130), (255, 255, 255), 4)
+    cv2.putText(source, "TITLE", (130, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 420, "height": 240}, "elements": [
+        {"id": "title", "type": "text", "x": 125, "y": 78, "width": 110, "height": 35, "zIndex": 20, "groupId": "header", "text": "TITLE", "style": {"color": "#FFFFFF", "fontSize": 24}, "metadata": {"rawOCRBBox": [125, 78, 235, 113]}}
+    ]}
+    stats = objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "inner-frame", 1)
+    parents = [item for item in layout["elements"] if (item.get("metadata") or {}).get("layerRole") == "container" and item.get("type") in {"rectangle", "roundedRectangle"}]
+    details = [item for item in layout["elements"] if (item.get("metadata") or {}).get("layerRole") == "container_detail"]
+    assert parents and details and stats["whiteInternalDetails"] >= 1
+    parent = next(item for item in parents if item["x"] <= 42 and item["x"] + item["width"] >= 352)
+    detail = next(item for item in details if item["x"] <= 54 and item["x"] + item["width"] >= 340)
+    assert parent["groupId"] == detail["groupId"] == "header"
+    assert detail["id"] in parent["metadata"]["moduleMemberIds"]
+    assert parent["zIndex"] < detail["zIndex"] < layout["elements"][0]["zIndex"]
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    if detail["type"] == "image":
+        asset = cv2.imread(str(tmp_path / "assets" / Path(detail["src"]).name), cv2.IMREAD_UNCHANGED)
+        assert asset.shape[2] == 4 and np.count_nonzero(asset[:, :, 3]) > 0
+        assert asset[asset.shape[0] // 2, asset.shape[1] // 2, 3] == 0
+        detail["src"] = str(tmp_path / "assets" / Path(detail["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background_path, layout, preview)
+    pixels = cv2.imread(str(preview))
+    assert np.max(np.abs(pixels[60, 100].astype(int) - source[60, 100].astype(int))) < 12
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in (parent, detail, layout["elements"][0]):
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == 3
+    assert any(shape.has_text_frame and "TITLE" in shape.text for shape in slide.shapes)
 
 
 def test_outline_card_becomes_movable_container(tmp_path):

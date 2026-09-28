@@ -242,6 +242,39 @@ def test_background_module_owns_visual_member_but_not_text(tmp_path: Path) -> No
     assert not scene["elements"][1]["metadata"].get("suppressed")
 
 
+def test_white_surface_reclassifies_local_background_and_preserves_inner_frame(tmp_path: Path) -> None:
+    source = tmp_path / "title_strip.png"
+    with Image.new("RGB", (400, 240), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((45, 60, 295, 130), fill="#2458A8")
+        draw.rectangle((55, 70, 285, 120), outline="white", width=4)
+        draw.text((85, 83), "TITLE", fill="white")
+        image.save(source)
+    scene = {"canvas": {"width": 400, "height": 240}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "strip", "role": "title_bar", "reconstructionStrategy": "background", "bbox": {"left": .1125, "top": .25, "width": .625, "height": .2917}, "memberIds": ["label"], "confidence": .94},
+    ]}}, "elements": [_element("label", "text", (85, 83, 70, 18), "TITLE")]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False, white_surface=True)
+    module = scene["reconstructionPlan"]["modules"][0]
+    assert module["surfaceRole"] == "local_object"
+    assert module["resolvedStrategy"] == "cutout_image"
+    assert not scene["elements"][0]["metadata"].get("suppressed")
+    asset = next(item for item in scene["elements"] if item["type"] == "image")
+    with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as image:
+        assert image.getpixel((10, 10)) == (255, 255, 255)  # inner white frame
+        assert image.getpixel((5, 5)) == (36, 88, 168)  # blue title surface
+
+
+def test_white_surface_page_environment_keeps_bounded_visual_children(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (300, 200), "#f0f0f0").save(source)
+    scene = {"canvas": {"width": 300, "height": 200}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "page", "role": "background", "reconstructionStrategy": "background", "bbox": {"left": 0, "top": 0, "width": 1, "height": 1}, "memberIds": ["wash", "badge"], "confidence": .92},
+    ]}}, "elements": [_element("wash", "rectangle", (0, 0, 300, 200)), _element("badge", "ellipse", (60, 60, 48, 48))]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False, white_surface=True)
+    assert scene["elements"][0]["metadata"]["ownedBy"] == "page_blank_surface"
+    assert not scene["elements"][1]["metadata"].get("suppressed")
+
+
 def test_native_shape_suppresses_exact_duplicate_shape(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (200, 150), "white").save(source)

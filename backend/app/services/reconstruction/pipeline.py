@@ -212,7 +212,7 @@ class ReconstructionPipeline:
             self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
             scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
             planner = getattr(self, "reconstruction_planner", None) or AIReconstructionPlanner()
-            planner_stats = planner.apply(scene_refined, normalized_path, page_output / "assets", project_id, page_index)
+            planner_stats = planner.apply(scene_refined, normalized_path, page_output / "assets", project_id, page_index, white_surface=white_objectized)
             self._write_json(page_output / "reconstruction_plan.json" if page_index == 1 else page_output / f"reconstruction_plan_{page_index}.json", scene_refined.get("reconstructionPlan", {}))
             reconstruction_stats["mixedModules"] += sum(1 for item in (scene_refined.get("reconstructionPlan") or {}).get("modules", []) if item.get("reconstructionStrategy") == "mixed_component")
             for key, value in planner_stats.items():

@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from app.services.reconstruction.surface_classification import is_page_environment
+
 
 class AIReconstructionPlanner:
     """Turn Qwen's page-level plan into bounded, owned source-image regions.
@@ -25,6 +27,7 @@ class AIReconstructionPlanner:
         *,
         include_detected_visuals: bool = True,
         asset_prefix: str = "planner",
+        white_surface: bool = False,
     ) -> dict[str, int]:
         stats = {"plannedModules": 0, "wholeImageRegions": 0, "cutoutImages": 0, "nativeShapesPlanned": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
         vision = scene.get("vision") or {}
@@ -60,6 +63,10 @@ class AIReconstructionPlanner:
                 module_box = _pixel_box(module.get("bbox"), width, height, max_area=1.0 if strategy == "background" else 0.80)
                 if module_box is None:
                     continue
+                page_environment = strategy == "background" and is_page_environment(module, module_box, width, height)
+                local_surface = strategy == "background" and not page_environment and white_surface
+                if local_surface:
+                    strategy = "cutout_image"
                 module_id = str(module.get("id") or f"module_{stats['plannedModules'] + 1}")[:80]
                 member_ids = {str(value) for value in module.get("memberIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 editable_ids = {str(value) for value in module.get("editableIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
@@ -69,7 +76,7 @@ class AIReconstructionPlanner:
                 if strategy == "native_shape" and _is_flow_module(module) and _flow_needs_image(elements, module_box):
                     strategy = "mixed_component"
                 stats["plannedModules"] += 1
-                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "requestedStrategy": requested, "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
+                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "requestedStrategy": requested, "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "surfaceRole": "local_object" if local_surface else "page_environment" if page_environment else None, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
 
                 for item_id in member_ids | editable_ids:
                     item = by_id[item_id]
@@ -94,8 +101,14 @@ class AIReconstructionPlanner:
                         item = by_id[item_id]
                         if item.get("type") in {"text", "background", "group"}:
                             continue
+                        item_box = item.get("bbox") or {}
+                        item_area = float(item_box.get("width") or item.get("width") or 0) * float(item_box.get("height") or item.get("height") or 0)
+                        if white_surface and item_area < width * height * 0.60:
+                            # A page environment may contain bounded visual
+                            # children; those still need independent owners.
+                            continue
                         metadata = item.setdefault("metadata", {})
-                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "source_background", "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
+                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "page_blank_surface" if white_surface else "source_background", "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
                         stats["plannerSuppressedElements"] += 1
 
                 preserve_boxes = [
@@ -213,7 +226,7 @@ class AIReconstructionPlanner:
                 module_assets = [item["id"] for item in planned_assets[module_asset_start:]]
                 normalized_modules[-1]["assetIds"] = module_assets
                 if strategy in {"cutout_image", "mixed_component"} and not module_assets:
-                    normalized_modules[-1]["resolvedStrategy"] = "editable_text" if _text_occupancy(module_box, elements) > 0 else "background"
+                    normalized_modules[-1]["resolvedStrategy"] = "objectize_local_surface" if local_surface else "editable_text" if _text_occupancy(module_box, elements) > 0 else "background"
 
                 for item_id in ignore_ids:
                     item = by_id[item_id]
