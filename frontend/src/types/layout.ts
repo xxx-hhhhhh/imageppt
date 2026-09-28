@@ -46,6 +46,7 @@ export interface LayoutJSON {
   source?: string | null;
   backgroundUrl?: string | null;
   coordinateSystem?: string;
+  metadata?: { planCoverage?: { status?: 'partial' | 'complete'; textCoverage?: number; uncoveredTextIds?: string[] }; [key: string]: unknown };
   elements: LayoutElement[];
 }
 

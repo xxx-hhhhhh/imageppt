@@ -196,6 +196,9 @@ class ReconstructionPipeline:
             ]
             segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            plan_coverage = (scene_raw.get("vision") or {}).get("planCoverage") or {}
+            if plan_coverage.get("status") == "partial":
+                warnings.append(f"AI 已完成模块规划；{len(plan_coverage.get('uncoveredTextIds') or [])} 条未覆盖文字由 OCR 转为可编辑文本。")
             self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
             self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", self.scene_analyzer.vision_routing)
             if conversion_mode in {"high_quality", "maximum"} and not allow_fallback and not self.scene_analyzer.vision_routing.get("aiUsed"):
@@ -248,6 +251,7 @@ class ReconstructionPipeline:
                 if (item.get("metadata") or {}).get("reconstructionStrategySource") == "vision"
             )
             layout = self._apply_refined_scene(layout, scene_refined)
+            _ensure_uncovered_text_owners(layout, plan_coverage.get("uncoveredTextIds") or [])
             layout, typography_stats = typography_layout_refiner.refine(layout)
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
@@ -275,6 +279,7 @@ class ReconstructionPipeline:
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
                 reconstruction_stats[key] += int(typography_stats[key])
             layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "layoutProvider": self.scene_analyzer.layout_provider.name, "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats, "reconstructionPlan": scene_refined.get("reconstructionPlan", {})})
+            layout["metadata"]["planCoverage"] = plan_coverage
             self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
             self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", routing)
@@ -357,6 +362,9 @@ class ReconstructionPipeline:
                 reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
                 layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            score["planCoverage"] = plan_coverage
+            if plan_coverage.get("status") == "partial":
+                score.setdefault("issues", []).append({"problem": "partialPlanTextCoverage", "uncoveredTextIds": plan_coverage.get("uncoveredTextIds", [])})
             if white_objectized:
                 score["replacementQA"] = replacement_qa
                 if replacement_qa["worsenedRegions"] or replacement_qa["ghostingAfter"] > replacement_qa["ghostingBefore"]:
@@ -528,6 +536,24 @@ class ReconstructionPipeline:
 
 class AIUnavailableError(RuntimeError):
     """High quality analysis paused until the user explicitly chooses recovery."""
+
+
+def _ensure_uncovered_text_owners(layout: dict, uncovered_ids: list[str]) -> None:
+    """Keep OCR lines missed by the visual plan without duplicating merged lines."""
+    elements = layout.get("elements", [])
+    active = [item for item in elements if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    owned_ids = {str(source_id) for item in active for source_id in ((item.get("metadata") or {}).get("sourceOcrIds") or [item.get("id")])}
+    for text_id in uncovered_ids:
+        if text_id in owned_ids:
+            continue
+        item = next((entry for entry in elements if entry.get("id") == text_id and entry.get("type") == "text"), None)
+        if item is None:
+            continue
+        metadata = item.setdefault("metadata", {})
+        for key in ("suppressed", "suppressRender", "ownedBy"):
+            metadata.pop(key, None)
+        metadata.update({"reconstructionStrategy": "editable_text", "reconstructionStrategySource": "ocr_plan_fallback", "textOwner": text_id})
+        owned_ids.add(text_id)
 
 
 def _redact_debug_text(value: object) -> str:

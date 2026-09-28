@@ -64,11 +64,11 @@ def scene_user_prompt(ocr_elements: list[dict], context: dict | None = None) -> 
     return "先输出 reconstructionPlan 的一级模块和复杂视觉区域，再输出元素语义。候选元素 id 可用于模块归属与忽略规则；不要改写 OCR/CV 的精确文字或坐标。\nPAGE_CONTEXT:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def reconstruction_plan_user_prompt(context: dict | None = None) -> str:
+def reconstruction_plan_user_prompt(context: dict | None = None, uncovered_text_ids: list[str] | None = None) -> str:
     context = context or {}
     candidates = [
         {"id": item.get("id"), "type": item.get("type"), "bbox": item.get("bbox"), "text": str(item.get("text") or "")[:36]}
         for item in context.get("candidate_elements", [])[:120]
     ]
-    payload = {"width": context.get("width"), "height": context.get("height"), "candidate_elements": candidates}
+    payload = {"width": context.get("width"), "height": context.get("height"), "candidate_elements": candidates, "uncoveredTextIds": uncovered_text_ids or []}
     return "请先规划整页，特别逐一找出曲线图、小图表、卫星图/示意图组合和拼贴图的位置并标成 preserveRegions。\nPAGE_CONTEXT:\n" + json.dumps(payload, ensure_ascii=False)

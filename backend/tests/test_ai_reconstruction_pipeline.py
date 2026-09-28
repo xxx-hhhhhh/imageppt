@@ -10,6 +10,7 @@ from PIL import Image
 
 from app.services.reconstruction import pipeline as pipeline_module
 from app.services.reconstruction.pipeline import ReconstructionPipeline
+from app.services.reconstruction.pipeline import _ensure_uncovered_text_owners
 from app.services.reconstruction.router import ReconstructionRouter
 
 
@@ -314,6 +315,18 @@ def test_pipeline_keeps_legacy_background_option(monkeypatch, tmp_path: Path) ->
     background = tmp_path / "outputs" / "local-standard" / "backgrounds" / "page_1.png"
     assert not np.all(np.asarray(Image.open(background).convert("RGB")) == 255)
     assert slides[0].get("metadata", {}).get("reconstructionSurfaceMode") != "white_objectized"
+
+
+def test_uncovered_ocr_text_has_one_editable_owner() -> None:
+    layout = {"elements": [
+        {"id": "title", "type": "text", "text": "Title", "metadata": {"suppressed": True}},
+        {"id": "merged", "type": "text", "text": "Label", "metadata": {"sourceOcrIds": ["label", "label_part"]}},
+        {"id": "label", "type": "text", "text": "Label", "metadata": {"suppressed": True}},
+    ]}
+    _ensure_uncovered_text_owners(layout, ["title", "label"])
+    assert layout["elements"][0]["metadata"]["reconstructionStrategy"] == "editable_text"
+    assert "suppressed" not in layout["elements"][0]["metadata"]
+    assert layout["elements"][2]["metadata"]["suppressed"] is True
 
 
 def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkeypatch, tmp_path: Path) -> None:
