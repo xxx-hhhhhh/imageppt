@@ -23,6 +23,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
         metadata = item.setdefault("metadata", {})
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not item.get("src") and (item.get("style") or {}).get("fill") and metadata.get("reconstructionStrategy") in {None, "local_image", "background_image"}:
             metadata.update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"})
+    round_assets = _extract_round_assets(source, active, elements, occupied, asset_dir, project_id, page_index)
     bordered_shapes, bordered_assets = _extract_bordered_containers(source, active, elements, occupied, asset_dir, project_id, page_index)
     container_count = _extract_flat_containers(source, active, elements, occupied, page_index)
     detail_shapes, detail_assets = _extract_internal_details(source, active, elements, occupied, asset_dir, project_id, page_index)
@@ -53,7 +54,45 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": len(residual_assets) + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+
+
+def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> int:
+    """Claim a complete circular badge before its inner marks become shapes."""
+    height, width = source.shape[:2]
+    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
+    saturated = np.uint8((hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 35)) * 255
+    contours, _ = cv2.findContours(saturated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    created = 0
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if min(w, h) < 18 or w * h > width * height * 0.12 or max(w / h, h / w) > 1.25:
+            continue
+        circularity = 4 * np.pi * area / max(1.0, cv2.arcLength(contour, True) ** 2)
+        if circularity < 0.70 or area / max(1, w * h) < 0.60:
+            continue
+        pad = max(2, round(min(w, h) * 0.08))
+        x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(width, x + w + pad), min(height, y + h + pad)
+        box = (x1, y1, x2, y2)
+        if any(_overlap_of_first(box, _box(item, width, height)) > 0.75 for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
+            continue
+        if np.mean(occupied[y1:y2, x1:x2] > 0) > 0.1:
+            continue
+        scale = 4
+        alpha_large = np.zeros(((y2 - y1) * scale, (x2 - x1) * scale), np.uint8)
+        center = (round((x + w / 2 - x1) * scale), round((y + h / 2 - y1) * scale))
+        radius = round((max(w, h) / 2 + pad * 0.5) * scale)
+        cv2.circle(alpha_large, center, radius, 255, -1, cv2.LINE_AA)
+        alpha = cv2.resize(alpha_large, (x2 - x1, y2 - y1), interpolation=cv2.INTER_AREA)
+        crop = source[y1:y2, x1:x2]
+        path = asset_dir / f"round_visual_page_{page_index}_{created + 1:03d}.png"
+        if not cv2.imwrite(str(path), np.dstack((crop, alpha))):
+            continue
+        created += 1
+        elements.append({"id": path.stem, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "round_contour", "layerRole": "residual", "preserveWholeAsset": True, "contourQuality": round(float(circularity), 3)}})
+        occupied[y1:y2, x1:x2][alpha > 0] = 255
+    return created
 
 
 def _occupy_text_glyphs(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int]) -> None:
@@ -133,6 +172,8 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
         if np.mean(occupied[y:y + h, x:x + w] > 0) > 0.35:
             continue
         border = edges[y:y + h, x:x + w]
+        if not _has_card_corners(np.uint8(cv2.drawContours(np.zeros((h, w), np.uint8), [contour - np.array([[[x, y]]])], -1, 255, -1))):
+            continue
         band = max(2, min(w, h) // 18)
         if min(np.mean(border[:band] > 0), np.mean(border[-band:] > 0), np.mean(border[:, :band] > 0), np.mean(border[:, -band:] > 0)) < 0.045:
             continue
@@ -302,11 +343,14 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
+            x, y, w, h = _trim_surface_protrusions(mask, (x, y, w, h))
             area = w * h
             if w < 10 or h < 8 or area < minimum_area or area > width * height * 0.85:
                 continue
             fill_ratio = cv2.contourArea(contour) / area
-            if fill_ratio < 0.82:
+            if fill_ratio < 0.65:
+                continue
+            if not _has_card_corners(mask[y:y + h, x:x + w]):
                 continue
             region = source[y:y + h, x:x + w]
             matching = delta[y:y + h, x:x + w] <= 13
@@ -326,10 +370,13 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
     local_contours, _ = cv2.findContours(local_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for contour in local_contours:
         x, y, w, h = cv2.boundingRect(contour)
+        x, y, w, h = _trim_surface_protrusions(local_mask, (x, y, w, h))
         area = w * h
         if w < 10 or h < 8 or area < minimum_area or area > width * height * 0.60:
             continue
-        if cv2.contourArea(contour) / area < 0.80:
+        if cv2.contourArea(contour) / area < 0.65:
+            continue
+        if not _has_card_corners(local_mask[y:y + h, x:x + w]):
             continue
         box = (x, y, x + w, y + h)
         if not _module_members(active, box):
@@ -351,14 +398,17 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         box = (x, y, x + w, y + h)
         if np.mean(occupied[y:y + h, x:x + w] > 0) > 0.35:
             continue
-        if any(_overlap_min(box, previous) > 0.78 for previous in created_boxes):
+        if any(_overlap_of_first(box, text_box) > 0.7 and w * h < (text_box[2] - text_box[0]) * (text_box[3] - text_box[1]) * 0.5
+               for item in active if item.get("type") == "text" for text_box in [_box(item, width, height)] if text_box):
+            continue
+        if any(_box_iou(box, previous) > 0.78 for previous in created_boxes):
             continue
         if any(_overlap_of_first(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
             continue
         if any(_overlap_min(box, _box(item, width, height)) > 0.80 and item.get("style", {}).get("fill") == fill for item in elements if item.get("metadata", {}).get("reconstructionStrategySource") == "white_objectization" and _box(item, width, height)):
             continue
         members = _module_members(active, box)
-        if not members and (w * h > width * height * 0.20 or x == 0 or y == 0 or x + w >= width or y + h >= height):
+        if not members and (w * h > width * height * 0.60 or x == 0 or y == 0 or x + w >= width or y + h >= height):
             continue
         created += 1
         identifier = f"white_container_page_{page_index}_{created:03d}"
@@ -393,6 +443,13 @@ def _overlap_min(left: tuple[int, int, int, int], right: tuple[int, int, int, in
     return overlap / max(1, min((left[2] - left[0]) * (left[3] - left[1]), (right[2] - right[0]) * (right[3] - right[1])))
 
 
+def _box_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    overlap = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
+    left_area = (left[2] - left[0]) * (left[3] - left[1])
+    right_area = (right[2] - right[0]) * (right[3] - right[1])
+    return overlap / max(1, left_area + right_area - overlap)
+
+
 def _overlap_of_first(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
     overlap = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
     return overlap / max(1, (left[2] - left[0]) * (left[3] - left[1]))
@@ -408,6 +465,33 @@ def _rounded_corner_hint(mask: np.ndarray) -> bool:
     h, w = mask.shape
     size = max(2, min(w, h) // 8)
     return h >= 20 and w >= 20 and np.mean(mask[:size, :size]) < 180 and np.mean(mask[size:2 * size, size:2 * size]) > 180
+
+
+def _has_card_corners(mask: np.ndarray) -> bool:
+    """Reject circular silhouettes before converting a local surface to a box."""
+    h, w = mask.shape
+    if min(h, w) < 10:
+        return False
+    band = max(2, round(min(h, w) * 0.12))
+    corners = (mask[:band, :band], mask[:band, -band:], mask[-band:, :band], mask[-band:, -band:])
+    return sum(float(np.mean(corner > 0)) >= 0.20 for corner in corners) >= 3
+
+
+def _trim_surface_protrusions(mask: np.ndarray, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Remove a touching badge's narrow protrusion from a rectangular plate."""
+    x, y, w, h = box
+    if min(w, h) < 10:
+        return box
+    region = mask[y:y + h, x:x + w] > 0
+    rows = np.count_nonzero(region, axis=1)
+    cols = np.count_nonzero(region, axis=0)
+    good_rows = np.flatnonzero(rows >= max(3, np.max(rows) * 0.55))
+    good_cols = np.flatnonzero(cols >= max(3, np.max(cols) * 0.55))
+    if len(good_rows) < h * 0.55 or len(good_cols) < w * 0.55:
+        return box
+    left, right = int(good_cols[0]), int(good_cols[-1]) + 1
+    top, bottom = int(good_rows[0]), int(good_rows[-1]) + 1
+    return x + left, y + top, right - left, bottom - top
 
 
 def _clip(values: list, width: int, height: int) -> tuple[int, int, int, int]:

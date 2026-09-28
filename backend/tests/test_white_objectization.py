@@ -7,6 +7,7 @@ import numpy as np
 from pptx import Presentation
 
 from app.services.reconstruction.white_objectization import objectize_on_white
+from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.pptx.renderer import PPTXRenderer
 from app.services.visual_qa.analyzer import render_preview
 
@@ -192,7 +193,7 @@ def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     stats = objectize_on_white(source_path, tmp_path / "backgrounds" / "page_1.png", layout, tmp_path / "assets", "demo", 1)
 
     assert stats["whiteContainerShapes"] >= 1
-    assert stats["residualObjectsCount"] >= 1
+    assert stats["whiteObjectAssets"] >= 1
     residual = next(item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "residual" and 80 <= item["x"] <= 110)
     container = next(item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container")
     assert residual["zIndex"] > container["zIndex"]
@@ -237,3 +238,38 @@ def test_unplanned_complex_local_region_is_movable_fallback(tmp_path):
     stats = objectize_on_white(source_path, tmp_path / "backgrounds" / "page.png", layout, tmp_path / "assets", "fallback", 1)
     assert stats["whiteObjectAssets"] + stats["whiteObjectShapes"] >= 2
     assert any(item["x"] <= 88 <= item["x"] + item["width"] for item in layout["elements"])
+
+
+def test_round_badge_and_pale_support_remain_separate_movable_objects(tmp_path):
+    source = np.full((220, 320, 3), 255, np.uint8)
+    cv2.rectangle(source, (38, 95), (210, 177), (246, 248, 250), -1)
+    cv2.circle(source, (84, 92), 30, (35, 92, 185), -1, cv2.LINE_AA)
+    cv2.circle(source, (84, 92), 29, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.circle(source, (84, 92), 9, (230, 220, 55), -1, cv2.LINE_AA)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 320, "height": 220}, "elements": []}
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "round", 1)
+    badges = [item for item in layout["elements"] if item["type"] == "image" and item["x"] <= 84 <= item["x"] + item["width"] and item["y"] <= 70]
+    assert badges, [(item["type"], item["x"], item["y"], item["width"], item["height"]) for item in layout["elements"]]
+    badge = badges[0]
+    image = cv2.imread(str(tmp_path / "assets" / Path(badge["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert image.shape[2] == 4
+    assert image[0, 0, 3] < 32 and image[image.shape[0] // 2, image.shape[1] // 2, 3] > 220, [(item["type"], item["x"], item["y"], item["width"], item["height"], item.get("metadata", {}).get("layerRole")) for item in layout["elements"]]
+    assert any(item is not badge and item["x"] <= 45 and item["x"] + item["width"] >= 200 and item["y"] <= 110 <= item["y"] + item["height"] for item in layout["elements"]), [(item["type"], item["x"], item["y"], item["width"], item["height"], item.get("metadata", {}).get("layerRole")) for item in layout["elements"]]
+    assert np.all(cv2.imread(str(background)) == 255)
+    report = repair_objectized_modules(source_path, layout, tmp_path / "assets", "round")
+    assert report["roundCutoutsChecked"] >= 1 and report["roundCutoutIssues"] == 0
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(layout["elements"])
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    pixels = cv2.imread(str(preview))
+    assert np.max(np.abs(pixels[92, 84].astype(int) - source[92, 84].astype(int))) < 12
+    assert np.max(np.abs(pixels[130, 170].astype(int) - source[130, 170].astype(int))) < 12

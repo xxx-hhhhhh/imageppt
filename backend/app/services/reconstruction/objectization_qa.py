@@ -11,7 +11,7 @@ import numpy as np
 
 def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_dir: Path, project_id: str) -> dict[str, Any]:
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    report: dict[str, Any] = {"checkedModules": 0, "missingBackplates": 0, "recoveredBackplates": 0, "reboundBackplates": 0, "moduleImageFallbacks": 0, "squareCutouts": 0, "repairedCutouts": 0, "issues": []}
+    report: dict[str, Any] = {"checkedModules": 0, "missingBackplates": 0, "recoveredBackplates": 0, "reboundBackplates": 0, "moduleImageFallbacks": 0, "squareCutouts": 0, "repairedCutouts": 0, "roundCutoutsChecked": 0, "roundCutoutIssues": 0, "issues": []}
     if source is None:
         report["issues"].append({"problem": "sourceUnavailable"})
         return report
@@ -83,11 +83,18 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if image is None or image.ndim != 3:
             continue
-        if image.shape[2] == 4 and _transparent_corners(image[:, :, 3]):
+        is_round = (item.get("metadata") or {}).get("reconstructionStrategySource") == "round_contour"
+        if is_round:
+            report["roundCutoutsChecked"] += 1
+            if image.shape[2] == 4 and _round_cutout_quality(image[:, :, 3]):
+                continue
+        if image.shape[2] == 4 and _transparent_corners(image[:, :, 3]) and not is_round:
             continue
         shape = _matching_ellipse(item, elements)
-        alpha = _ellipse_mask(item, shape, image.shape[:2]) if shape is not None else _icon_contour_mask(item, image)
+        alpha = _ellipse_mask(item, shape or item, image.shape[:2]) if shape is not None or is_round else _icon_contour_mask(item, image)
         if alpha is None:
+            if is_round:
+                report["roundCutoutIssues"] += 1
             if shape is not None or _looks_like_opaque_icon(item, image):
                 report["squareCutouts"] += 1
                 report["issues"].append({"problem": "squareCutoutUnresolved", "elementId": item.get("id")})
@@ -95,13 +102,16 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         report["squareCutouts"] += 1
         repaired_path = asset_dir / f"qa_contour_{path.stem}.png"
         rgba = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2BGRA)
-        rgba[:, :, 3] = alpha if image.shape[2] == 3 else cv2.min(image[:, :, 3], alpha)
+        rgba[:, :, 3] = alpha if image.shape[2] == 3 or is_round else cv2.min(image[:, :, 3], alpha)
         if not cv2.imwrite(str(repaired_path), rgba):
             report["issues"].append({"problem": "cutoutRepairFailed", "elementId": item.get("id")})
             continue
         item["src"] = f"/media/assets/{project_id}/{repaired_path.name}"
         item.setdefault("metadata", {}).update({"transparent": True, "reconstructionStrategy": "transparent_image", "objectizationQAContourRepaired": True})
         report["repairedCutouts"] += 1
+        if is_round and not _round_cutout_quality(alpha):
+            report["roundCutoutIssues"] += 1
+            report["issues"].append({"problem": "roundCutoutQualityLow", "elementId": item.get("id")})
     report["unresolvedBackplates"] = report["missingBackplates"] - report["recoveredBackplates"] - report["reboundBackplates"] - report["moduleImageFallbacks"]
     return report
 
@@ -198,6 +208,14 @@ def _looks_like_opaque_icon(item: dict, image: np.ndarray) -> bool:
 
 def _transparent_corners(alpha: np.ndarray) -> bool:
     return max(int(alpha[0, 0]), int(alpha[0, -1]), int(alpha[-1, 0]), int(alpha[-1, -1])) < 32
+
+
+def _round_cutout_quality(alpha: np.ndarray) -> bool:
+    height, width = alpha.shape
+    if min(height, width) < 12 or not _transparent_corners(alpha):
+        return False
+    coverage = float(np.mean(alpha > 128))
+    return 0.42 <= coverage <= 0.86 and int(alpha[height // 2, width // 2]) > 220
 
 
 def _box(item: dict) -> tuple[float, float, float, float]:

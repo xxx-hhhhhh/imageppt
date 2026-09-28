@@ -96,3 +96,21 @@ def test_textured_local_plate_falls_back_to_image_plus_editable_text(tmp_path):
     assert plate["metadata"]["moduleMemberIds"] == ["title"]
     assert layout["elements"][0]["metadata"]["suppressed"] is True
     assert layout["elements"][1]["type"] == "text" and not layout["elements"][1]["metadata"].get("suppressed")
+
+
+def test_round_cutout_quality_replaces_opaque_square_asset(tmp_path):
+    source = np.full((100, 100, 3), 255, np.uint8)
+    cv2.circle(source, (50, 50), 26, (40, 90, 180), -1)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    cv2.imwrite(str(asset_dir / "badge.png"), source[20:80, 20:80])
+    layout = {"elements": [{"id": "badge", "type": "image", "x": 20, "y": 20, "width": 60, "height": 60,
+                            "src": "/media/assets/demo/badge.png", "metadata": {"reconstructionStrategySource": "round_contour"}}]}
+    report = repair_objectized_modules(source_path, layout, asset_dir, "demo")
+    assert report["roundCutoutsChecked"] == 1
+    assert report["roundCutoutIssues"] == 0
+    assert report["repairedCutouts"] == 1
+    repaired = cv2.imread(str(asset_dir / Path(layout["elements"][0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert repaired.shape[2] == 4 and repaired[0, 0, 3] == 0 and repaired[30, 30, 3] == 255
