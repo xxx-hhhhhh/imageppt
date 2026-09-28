@@ -5,12 +5,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from app.models.project_store import ProjectStore
 from app import main as api_main
 from fastapi.testclient import TestClient
 from app.services.reconstruction import revision
 from app.services.reconstruction.revision import revise_problem_regions
+from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, recover_legacy_revision_assets
+from app.services.reconstruction.text_erasure import erase_editable_text_sources
+from app.services.pptx import renderer
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 
 
@@ -103,3 +107,135 @@ def test_accept_current_result_persists_decision(tmp_path: Path, monkeypatch) ->
     assert response.status_code == 200
     score = json.loads((tmp_path / project_id / "visual_score.json").read_text(encoding="utf-8"))
     assert score["revisionStatus"] == "user_accepted"
+
+
+def _image_project(tmp_path: Path, monkeypatch) -> tuple[ProjectStore, str]:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    monkeypatch.setattr(api_main, "OUTPUTS_DIR", tmp_path)
+    store, project_id, layout = _project(tmp_path, suppressed=True)
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    image = np.full((38, 54, 3), (180, 40, 20), np.uint8)
+    cv2.imwrite(str(root / "assets" / "visual.png"), image)
+    layout["elements"].append({"id": "visual", "type": "image", "x": 160, "y": 20, "width": 54, "height": 38, "zIndex": 1,
+                               "src": f"/media/assets/{project_id}/visual.png", "metadata": {"reconstructionStrategy": "cutout_image", "backgroundSeparated": True}})
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds" / "page_1.png", layout, root / "reconstructed_preview.png")
+    return store, project_id
+
+
+def test_image_survives_two_revisions_and_media_url_stays_valid(tmp_path: Path, monkeypatch) -> None:
+    store, project_id = _image_project(tmp_path, monkeypatch)
+    root = tmp_path / project_id
+    before = (root / "reconstructed_preview.png").read_bytes()
+    first = revise_problem_regions(store, project_id, 1)
+    second = revise_problem_regions(store, project_id, 1)
+    current = store.get_slide(project_id, 1)
+    assert first["accepted"] is True
+    assert first["assetsBefore"] == first["assetsAfter"] == 1
+    assert second["assetsAfter"] == 1
+    assert second["missingAssetCount"] == 0
+    assert inspect_assets(root, current)["missingAssetCount"] == 0
+    assert next(item for item in current["elements"] if item["id"] == "visual")["src"] == f"/media/assets/{project_id}/visual.png"
+    assert TestClient(api_main.app).get(f"/media/assets/{project_id}/visual.png").status_code == 200
+    assert (root / "reconstructed_preview.png").is_file()
+    assert (root / "reconstructed_preview.png").read_bytes() != before
+
+
+def test_missing_candidate_asset_rolls_back_without_changing_preview(tmp_path: Path, monkeypatch) -> None:
+    store, project_id = _image_project(tmp_path, monkeypatch)
+    root = tmp_path / project_id
+    baseline = store.get_slide(project_id, 1)
+    preview = (root / "reconstructed_preview.png").read_bytes()
+
+    def break_candidate(_background, candidate, **_kwargs):
+        next(item for item in candidate["elements"] if item["type"] == "image")["src"] = f"/media/assets/{project_id}/missing.png"
+        return {"backgroundTextErased": 0, "assetTextErased": 0}
+
+    monkeypatch.setattr(revision, "erase_editable_text_sources", break_candidate)
+    result = revise_problem_regions(store, project_id, 1)
+    assert result["accepted"] is False
+    assert result["rollbackTriggered"] is True
+    assert result["candidateMissingAssetCount"] == 1
+    assert result["missingAssetCount"] == 0
+    assert store.get_slide(project_id, 1) == baseline
+    assert (root / "reconstructed_preview.png").read_bytes() == preview
+
+
+def test_white_background_regression_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    before = np.full((100, 100, 3), 120, np.uint8)
+    after = np.full_like(before, 255)
+    for name, array in (("before_bg.png", before), ("before_preview.png", before), ("after_bg.png", after), ("after_preview.png", after)):
+        cv2.imwrite(str(root / name), array)
+    result = assess_revision(root, {"elements": []}, {"elements": []}, root / "before_bg.png", root / "after_bg.png", root / "before_preview.png", root / "after_preview.png")
+    assert "background_over_whitened" in result["integrityErrors"]
+    assert "preview_over_whitened" in result["integrityErrors"]
+
+
+def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    before = np.full((100, 100, 3), 100, np.uint8)
+    after = before.copy()
+    after[50:90, 50:90] = 180
+    cv2.imwrite(str(root / "before.png"), before)
+    cv2.imwrite(str(root / "after.png"), after)
+    result = assess_revision(root, {"elements": []}, {"elements": []}, root / "before.png", root / "before.png", root / "before.png", root / "after.png", [[0, 0, 20, 20]])
+    assert "untargeted_preview_change" in result["integrityErrors"]
+
+
+def test_legacy_revision_asset_url_can_be_recovered(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "assets").mkdir(parents=True)
+    (root / "revisions" / "assets").mkdir(parents=True)
+    cv2.imwrite(str(root / "assets" / "visual.png"), np.full((8, 8, 3), 100, np.uint8))
+    cv2.imwrite(str(root / "revisions" / "assets" / "revision_2_visual.png"), np.full((8, 8, 3), 255, np.uint8))
+    layout = {"elements": [{"id": "visual", "type": "image", "src": "/media/assets/revisions/revision_2_visual.png"}]}
+    assert recover_legacy_revision_assets(root, layout) == 1
+    assert layout["elements"][0]["src"] == "/media/assets/project/visual.png"
+    assert inspect_assets(root, layout)["missingAssetCount"] == 0
+
+
+def test_revision_text_cleaning_stages_valid_project_asset_and_protects_background(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    root = tmp_path / "project"
+    (root / "assets").mkdir(parents=True)
+    candidate_dir = root / "revisions" / "round_1"
+    candidate_dir.mkdir(parents=True)
+    background = np.full((80, 120, 3), (50, 70, 90), np.uint8)
+    cv2.imwrite(str(candidate_dir / "background.png"), background)
+    asset = np.full((40, 80, 3), (20, 50, 180), np.uint8)
+    cv2.putText(asset, "HELLO", (4, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.imwrite(str(root / "assets" / "visual.png"), asset)
+    layout = {"elements": [
+        {"id": "visual", "type": "image", "x": 10, "y": 10, "width": 80, "height": 40, "src": "/media/assets/project/visual.png"},
+        {"id": "text", "type": "text", "text": "HELLO", "x": 12, "y": 12, "width": 60, "height": 25, "metadata": {"rawOCRBBox": [12, 12, 72, 37]}},
+    ]}
+    erase_editable_text_sources(candidate_dir / "background.png", layout, target_text_ids={"text"}, copy_asset_prefix="revision_1", project_root=root, protect_background_elements=True)
+    assert layout["elements"][0]["src"].startswith("/media/assets/project/revision_1_")
+    assert inspect_assets(root, layout)["missingAssetCount"] == 0
+    assert cv2.imread(str(candidate_dir / "background.png")).tolist() == background.tolist()
+    assert cv2.imread(str(root / "assets" / "visual.png")).tolist() == asset.tolist()
+
+
+def test_commit_failure_restores_previous_preview_and_score(tmp_path: Path, monkeypatch) -> None:
+    store, project_id, layout = _project(tmp_path, suppressed=False)
+    root = tmp_path / project_id
+    workspace = root / "revisions" / "round_1"
+    workspace.mkdir(parents=True)
+    preview = root / "reconstructed_preview.png"
+    original_preview = preview.read_bytes()
+    original_score = (root / "visual_score.json").read_bytes()
+    changed = workspace / "changed.png"
+    cv2.imwrite(str(changed), np.zeros((100, 240, 3), np.uint8))
+
+    def fail_save(*_args):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(store, "save_slide", fail_save)
+    with pytest.raises(OSError, match="simulated"):
+        revision._commit_revision(store, project_id, 1, layout, workspace, {preview: changed}, {root / "visual_score.json": {"overall": 0}})
+    assert preview.read_bytes() == original_preview
+    assert (root / "visual_score.json").read_bytes() == original_score

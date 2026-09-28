@@ -90,5 +90,13 @@ export interface RevisionResponse {
   editableCoverageBefore: number;
   editableCoverageAfter: number;
   stagnationReason?: string | null;
+  assetsBefore: number;
+  assetsAfter: number;
+  missingAssetCount: number;
+  preservedAssetCount: number;
+  replacedAssetCount: number;
+  inpaintedRegions: number;
+  protectedRegions: number;
+  rollbackTriggered: boolean;
   regionalAnalysis?: { elementId?: string; problem: string; bbox: number[]; pixelDifference: number; edgeDifference: number; strategyChange: string }[];
 }

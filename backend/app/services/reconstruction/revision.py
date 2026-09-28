@@ -15,6 +15,7 @@ from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
+from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
@@ -75,6 +76,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     if not all(path.is_file() for path in (source, background, preview, score_path)):
         raise FileNotFoundError("Page analysis artifacts are not available")
     baseline = store.get_slide(project_id, page)
+    baseline_assets = inspect_assets(root, baseline)
+    if baseline_assets["missingAssetCount"]:
+        raise ValueError("Current slide has missing image assets; repair the existing result before revision")
     score_before = json.loads(score_path.read_text(encoding="utf-8"))
     history_path = root / f"revision_history_{page}.json"
     history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
@@ -94,12 +98,16 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_bg = candidate_dir / "background.png"
     candidate_preview = candidate_dir / "preview.png"
     shutil.copy2(background, candidate_bg)
+    shutil.copy2(background, candidate_dir / "baseline_background.png")
+    shutil.copy2(preview, candidate_dir / "baseline_preview.png")
+    (candidate_dir / "baseline_layout.json").write_text(json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8")
     inpainting = InpaintingService(INPAINT_PROVIDER)
-    local_cleaner = inpainting.clean_array if inpainting.provider.name == "local_lama" else None
+    local_cleaner = inpainting.clean_array if inpainting.provider.name == "local_lama" and any(issue["problem"] == "ghosting" for issue in target_issues) else None
     local_provider = inpainting.provider if inpainting.provider.name == "local_lama" else None
     touched_text: set[str] = set()
     erase_text: set[str] = set()
     changed_ids: set[str] = set()
+    inpainted_regions = 0
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
     regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
 
@@ -158,12 +166,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             item["width"] = max(4.0, float(raw[2]) - float(raw[0]))
             item["height"] = max(4.0, (float(raw[3]) - float(raw[1])) * 1.1)
     if erase_text:
-        erase_editable_text_sources(candidate_bg, candidate, complex_cleaner=local_cleaner, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}")
+        ghosting_ids = {str(issue.get("elementId")) for issue in target_issues if issue["problem"] == "ghosting"}
+        erasure = erase_editable_text_sources(candidate_bg, candidate, complex_cleaner=local_cleaner, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}", project_root=root, protect_background_elements=True, force_asset_reclean_ids=ghosting_ids)
+        inpainted_regions += erasure["backgroundTextErased"]
 
-    residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id]
+    residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id and not (by_id[str(issue["elementId"])].get("metadata") or {}).get("backgroundSeparated") and _background_contains_original(source, candidate_bg, by_id[str(issue["elementId"])])]
     if residual_assets:
-        separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
-    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list)][:4]
+        inpainted_regions += separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
+    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list) and not any(item.get("type") == "image" and _item_overlaps_box(item, issue["bbox"]) for item in protected_visuals(baseline))][:4]
     if baked:
         modules = []
         width, height = float(candidate["slide"]["width"]), float(candidate["slide"]["height"])
@@ -172,18 +182,30 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             modules.append({"id": f"revision_{round_number}_{len(modules)}", "role": "complex_visual", "strategy": "whole_image", "bbox": {"left": x1 / width, "top": y1 / height, "width": (x2 - x1) / width, "height": (y2 - y1) / height}, "confidence": 1.0})
         scene = {"canvas": {"width": width, "height": height}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": modules}}, "elements": [
             {**copy.deepcopy(item), "bbox": {"left": item.get("x", 0), "top": item.get("y", 0), "width": item.get("width", 0), "height": item.get("height", 0)}}
-            for item in candidate.get("elements", []) if item.get("type") != "background"
+            for item in candidate.get("elements", []) if item.get("type") == "text" and any(_item_overlaps_box(item, issue["bbox"]) for issue in baked)
         ]}
         before_ids = {item["id"] for item in candidate.get("elements", [])}
         AIReconstructionPlanner().apply(scene, source, root / "assets", project_id, page, include_detected_visuals=False, asset_prefix=f"revision_{round_number}")
         candidate = ReconstructionPipeline._apply_refined_scene(None, candidate, scene)
         new_assets = [item for item in candidate["elements"] if item["id"] not in before_ids and item.get("type") == "image"]
         if new_assets:
-            separate_foreground(candidate_bg, new_assets, professional_provider=local_provider)
+            unseparated = [item for item in new_assets if _background_contains_original(source, candidate_bg, item)]
+            if unseparated:
+                inpainted_regions += separate_foreground(candidate_bg, unseparated, professional_provider=local_provider)
             changed_ids.update(item["id"] for item in new_assets)
 
     render_preview(candidate_bg, candidate, candidate_preview)
+    target_boxes = [entry["bbox"] for entry in regional_analysis]
+    for layout_version in (baseline, candidate):
+        for item in layout_version.get("elements", []):
+            if item.get("id") in changed_ids:
+                x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+                target_boxes.append([x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)])
+    integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview, target_boxes)
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
+    for key in ("visionProvider", "visionModel", "requestedVisionProvider", "ocrProvider", "conversionMode"):
+        if key in score_before:
+            score_after[key] = score_before[key]
     for key, field in (("localInpaintAttempts", "attempts"), ("localInpaintSuccesses", "successes"), ("localInpaintFallbacks", "failures")):
         score_after[key] = int(score_before.get(key) or 0) + int(getattr(inpainting.provider, field, 0))
     if local_provider:
@@ -208,8 +230,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
-    accepted = bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
-    stagnation_reason = None if accepted else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
+    reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
+                          "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
+                          "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],
+                          "preservedAssetCount": integrity["preservedAssetCount"] if accepted else baseline_assets["assets"],
+                          "replacedAssetCount": integrity["replacedAssetCount"] if accepted else 0,
+                          "backgroundWhiteAfter": integrity["backgroundWhiteAfter"] if accepted else integrity["backgroundWhiteBefore"],
+                          "previewWhiteAfter": integrity["previewWhiteAfter"] if accepted else integrity["previewWhiteBefore"]}
+    stagnation_reason = None if accepted else "integrity_check_failed" if integrity["integrityErrors"] else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
     report = {
         "revisionRound": round_number, "accepted": accepted,
         "targetedIssues": target_issues,
@@ -218,32 +247,56 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         "visualAfter": float(score_after.get("overall") or 0),
         "editableCoverageBefore": coverage_before, "editableCoverageAfter": coverage_after,
         "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
+        **reported_integrity, "inpaintedRegions": inpainted_regions if accepted else 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": not accepted,
     }
-    history.append(report)
-    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-    (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if accepted:
-        shutil.copy2(candidate_bg, background)
-        shutil.copy2(candidate_preview, preview)
-        shutil.copy2(candidate_bg, root / ("clean_background.png" if page == 1 else f"clean_background_{page}.png"))
-        shutil.copy2(candidate_preview, root / ("final_preview.png" if page == 1 else f"final_preview_{page}.png"))
+        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
+        score_after.update({"revisionRound": round_number, "revisionStatus": "improving" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, **measure_text_coverage(candidate, detected), **reported_integrity, "inpaintedRegions": inpainted_regions, "rollbackTriggered": False})
+        validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
+        accepted_problem = {"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}
+        replacements = {background: candidate_bg, preview: candidate_preview,
+                        root / ("clean_background.png" if page == 1 else f"clean_background_{page}.png"): candidate_bg,
+                        root / ("final_preview.png" if page == 1 else f"final_preview_{page}.png"): candidate_preview}
         difference = candidate_dir / "difference.png"
         if difference.is_file():
-            shutil.copy2(difference, root / "difference.png")
-        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
-        score_after.update({"revisionRound": round_number, "revisionStatus": "improving" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, **measure_text_coverage(candidate, detected)})
-        score_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
-        validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
-        validation_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
-        problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
-        store.save_slide(project_id, page, candidate)
+            replacements[root / "difference.png"] = difference
+        _commit_revision(store, project_id, page, candidate, candidate_dir, replacements,
+                         {score_path: score_after, validation_path: score_after, problem_path: accepted_problem})
     else:
-        score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason})
+        score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, **reported_integrity, "inpaintedRegions": 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": True})
         score_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
         validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
         validation_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
         problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, "editableTextCoverage": coverage_before, "overall": score_before.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
+    history.append(report)
+    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
+
+
+def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:
+    backups: dict[Path, Path | None] = {}
+    targets = [*replacements, *payloads]
+    for index, target in enumerate(targets):
+        backup = candidate_dir / f"commit_backup_{index}{target.suffix}"
+        if target.is_file():
+            shutil.copy2(target, backup)
+            backups[target] = backup
+        else:
+            backups[target] = None
+    try:
+        for target, source in replacements.items():
+            shutil.copy2(source, target)
+        for target, payload in payloads.items():
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        store.save_slide(project_id, page, candidate)
+    except Exception:
+        for target, backup in backups.items():
+            if backup is None:
+                target.unlink(missing_ok=True)
+            else:
+                shutil.copy2(backup, target)
+        raise
 
 
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
@@ -318,6 +371,29 @@ def _overlap_fraction(box: tuple[float, float, float, float], item: dict) -> flo
     right, bottom = x + float(item.get("width") or 0), y + float(item.get("height") or 0)
     overlap = max(0, min(box[2], right) - max(box[0], x)) * max(0, min(box[3], bottom) - max(box[1], y))
     return overlap / max(1, (box[2] - box[0]) * (box[3] - box[1]))
+
+
+def _item_overlaps_box(item: dict, box: list[float]) -> bool:
+    x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+    w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+    overlap = max(0.0, min(x + w, float(box[2])) - max(x, float(box[0]))) * max(0.0, min(y + h, float(box[3])) - max(y, float(box[1])))
+    return overlap / max(1.0, min(w * h, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))) >= 0.15
+
+
+def _background_contains_original(source_path: Path, background_path: Path, item: dict) -> bool:
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    if source is None or background is None or source.shape != background.shape:
+        return False
+    height, width = source.shape[:2]
+    x1, y1 = max(0, int(float(item.get("x") or 0))), max(0, int(float(item.get("y") or 0)))
+    x2 = min(width, x1 + int(float(item.get("width") or 0)))
+    y2 = min(height, y1 + int(float(item.get("height") or 0)))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    original = source[y1:y2, x1:x2]
+    current = background[y1:y2, x1:x2]
+    return float(np.mean(cv2.absdiff(original, current))) < 35 and float(np.std(original)) > 10
 
 
 def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], by_id: dict[str, dict], output: Path) -> list[dict]:

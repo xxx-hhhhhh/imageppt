@@ -101,3 +101,11 @@ class RevisionResponse(BaseModel):
     editableCoverageAfter: float
     stagnationReason: str | None = None
     regionalAnalysis: list[dict[str, Any]] = Field(default_factory=list)
+    assetsBefore: int = 0
+    assetsAfter: int = 0
+    missingAssetCount: int = 0
+    preservedAssetCount: int = 0
+    replacedAssetCount: int = 0
+    inpaintedRegions: int = 0
+    protectedRegions: int = 0
+    rollbackTriggered: bool = False

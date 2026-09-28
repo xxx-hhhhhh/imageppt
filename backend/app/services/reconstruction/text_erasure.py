@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
-import shutil
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -21,6 +21,9 @@ def erase_editable_text_sources(
     target_text_ids: set[str] | None = None,
     copy_asset_prefix: str | None = None,
     clean_background: bool = True,
+    project_root: Path | None = None,
+    protect_background_elements: bool = False,
+    force_asset_reclean_ids: set[str] | None = None,
 ) -> dict[str, int]:
     """Remove source glyphs from every layer beneath an editable OCR line.
 
@@ -57,6 +60,14 @@ def erase_editable_text_sources(
     background_mask = np.zeros((height, width), np.uint8)
     for _, box in texts:
         _mark(background_mask, box, 2)
+    if protect_background_elements:
+        for element in layout.get("elements", []):
+            meta = element.get("metadata") or {}
+            if element.get("type") not in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"} or any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+                continue
+            x1, y1 = int(float(element.get("x") or 0)), int(float(element.get("y") or 0))
+            x2, y2 = x1 + int(float(element.get("width") or 0)), y1 + int(float(element.get("height") or 0))
+            background_mask[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 0
     if clean_background:
         background = _clean(background, background_mask, complex_cleaner)
         cv2.imwrite(str(background_path), background)
@@ -70,14 +81,6 @@ def erase_editable_text_sources(
         path = Path(raw_src) if Path(raw_src).is_absolute() else _path_from_src(raw_src)
         if not path or not path.is_file():
             continue
-        project_root = background_path.parent.parent
-        if copy_asset_prefix or project_root not in path.parents:
-            local_assets = project_root / "assets"
-            local_assets.mkdir(parents=True, exist_ok=True)
-            local_path = local_assets / f"{copy_asset_prefix or 'text_clean'}_{asset['id']}.png"
-            shutil.copy2(path, local_path)
-            path = local_path
-            asset["src"] = f"/media/assets/{project_root.name}/{local_path.name}"
         original = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if original is None or original.ndim != 3:
             continue
@@ -100,6 +103,8 @@ def erase_editable_text_sources(
             owned_text.append(item["id"])
         if not owned_text:
             continue
+        if meta.get("textCleaned") and set(owned_text).issubset(set(meta.get("editableTextIds") or [])) and not set(owned_text).intersection(force_asset_reclean_ids or set()):
+            continue
         if original.shape[2] == 4 and meta.get("layerRole") == "residual":
             original[:, :, 3][mask > 0] = 0
         elif original.shape[2] == 4:
@@ -107,7 +112,16 @@ def erase_editable_text_sources(
             original[:, :, :3] = rgb
         else:
             original = _clean(original, mask, complex_cleaner)
-        cv2.imwrite(str(path), original)
+        owner_root = project_root or background_path.parent.parent
+        output_path = path
+        if copy_asset_prefix or owner_root not in path.parents:
+            local_assets = owner_root / "assets"
+            local_assets.mkdir(parents=True, exist_ok=True)
+            output_path = local_assets / f"{copy_asset_prefix or 'text_clean'}_{asset['id']}_{uuid4().hex[:8]}.png"
+        if not cv2.imwrite(str(output_path), original):
+            raise OSError(f"Could not write cleaned image asset: {output_path}")
+        if output_path != path:
+            asset["src"] = f"/media/assets/{owner_root.name}/{output_path.name}"
         meta["textCleaned"] = True
         meta["editableTextIds"] = sorted(set((meta.get("editableTextIds") or []) + owned_text))
         cleaned_assets += 1
