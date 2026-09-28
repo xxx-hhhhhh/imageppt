@@ -54,4 +54,5 @@ def test_page_sized_environment_is_not_repackaged_as_background_image(tmp_path):
 
     assert assets == []
     assert stats["residualObjectsCount"] == 0
-    assert stats["residualObjectizationRate"] == 0
+    assert stats["residualCandidateArea"] == 0  # page environment is excluded from local coverage
+    assert stats["residualObjectizationRate"] == 1

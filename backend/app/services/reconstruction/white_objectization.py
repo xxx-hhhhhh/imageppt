@@ -31,13 +31,14 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
         if box is None:
             continue
         x1, y1, x2, y2 = box
-        # Text is owned by its textbox. Its source glyphs must never enter a cutout.
+        # Only source glyphs belong to the textbox. A plate inside the OCR box
+        # remains available for a separate shape or movable image owner.
         if item.get("type") == "text":
             raw = (item.get("metadata") or {}).get("rawOCRBBox")
             if isinstance(raw, list) and len(raw) == 4:
                 x1, y1, x2, y2 = _clip(raw, width, height)
-            pad = max(3, round((y2 - y1) * 0.15))
-            x1, y1, x2, y2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
+            _occupy_text_glyphs(source, occupied, (x1, y1, x2, y2))
+            continue
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse"} and (item.get("style") or {}).get("fill"):
             _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["fill"]))
             if item["style"].get("stroke"):
@@ -53,6 +54,27 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
     return {"whiteObjectAssets": len(residual_assets) + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+
+
+def _occupy_text_glyphs(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int]) -> None:
+    x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        return
+    region = source[y1:y2, x1:x2]
+    # The median represents the local supporting surface for ordinary OCR
+    # lines. Large contrasting components are plates/artwork, not glyphs.
+    base = np.median(region.reshape(-1, 3), axis=0)
+    delta = np.max(np.abs(region.astype(np.float32) - base), axis=2)
+    candidate = np.uint8(delta >= 24) * 255
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    glyphs = np.zeros(candidate.shape, np.uint8)
+    area = candidate.size
+    for label in range(1, count):
+        _, _, w, h, pixels = [int(value) for value in stats[label]]
+        if pixels <= area * 0.18 and w * h <= area * 0.38:
+            glyphs[labels == label] = 255
+    glyphs = cv2.dilate(glyphs, np.ones((3, 3), np.uint8), iterations=1)
+    occupied[y1:y2, x1:x2][glyphs != 0] = 255
 
 
 def layer_objectized_elements(elements: list[dict]) -> None:

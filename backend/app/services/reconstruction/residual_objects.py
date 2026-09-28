@@ -12,10 +12,12 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
     height, width = source.shape[:2]
     baseline = _border_color(source)
     difference = np.max(np.abs(source.astype(np.int16) - baseline), axis=2)
-    raw = np.uint8((difference > 14) & (occupied == 0)) * 255
+    # A pale label/card may differ from the page by only a few levels. Keep
+    # bounded low-contrast regions; page-sized washes are rejected below.
+    raw = np.uint8((difference >= 5) & (occupied == 0)) * 255
     raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     raw[occupied != 0] = 0
-    potential_area = int(np.count_nonzero(raw))
+    potential_area = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(raw, 8)
     minimum = max(12, round(width * height * 0.000015))
     components = []
@@ -23,6 +25,9 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         x, y, w, h, pixels = [int(value) for value in stats[label]]
         if pixels < minimum or w < 2 or h < 2:
             continue
+        if w * h > width * height * 0.62 and w > width * 0.75 and h > height * 0.75:
+            continue
+        potential_area += pixels
         values = source[labels == label]
         color = np.median(values, axis=0) if len(values) else baseline
         components.append({"label": label, "box": (x, y, x + w, y + h), "pixels": pixels, "color": color})

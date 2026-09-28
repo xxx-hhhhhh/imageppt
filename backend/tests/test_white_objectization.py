@@ -200,3 +200,40 @@ def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     preview = tmp_path / "preview.png"
     render_preview(tmp_path / "backgrounds" / "page_1.png", layout, preview)
     assert np.max(np.abs(cv2.imread(str(preview))[105, 105].astype(int) - source[105, 105].astype(int))) < 8
+
+
+def test_ocr_box_does_not_erase_its_pale_supporting_strip(tmp_path):
+    source = np.full((150, 320, 3), 255, np.uint8)
+    cv2.rectangle(source, (45, 52), (265, 92), (249, 250, 249), -1)
+    cv2.putText(source, "LABEL", (85, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (25, 25, 25), 2)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 320, "height": 150}, "elements": [
+        {"id": "label", "type": "text", "x": 40, "y": 47, "width": 230, "height": 50,
+         "text": "LABEL", "zIndex": 20, "metadata": {"rawOCRBBox": [40, 47, 270, 97]}}
+    ]}
+    stats = objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "pale", 1)
+    visuals = [item for item in layout["elements"] if item["type"] != "text"]
+    assert visuals and stats["whiteObjectAssets"] + stats["whiteObjectShapes"] > 0
+    assert any(item["x"] <= 50 and item["x"] + item["width"] >= 260 for item in visuals)
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    for item in visuals:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background_path, layout, preview)
+    assert np.max(np.abs(cv2.imread(str(preview))[55, 55].astype(int) - source[55, 55].astype(int))) < 8
+
+
+def test_unplanned_complex_local_region_is_movable_fallback(tmp_path):
+    source = np.full((170, 300, 3), 255, np.uint8)
+    for row in range(40, 120):
+        source[row, 35:140] = (235 + row % 3, 240, 244)
+    cv2.circle(source, (88, 80), 19, (80, 100, 190), -1)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 300, "height": 170}, "elements": []}
+    stats = objectize_on_white(source_path, tmp_path / "backgrounds" / "page.png", layout, tmp_path / "assets", "fallback", 1)
+    assert stats["whiteObjectAssets"] + stats["whiteObjectShapes"] >= 2
+    assert any(item["x"] <= 88 <= item["x"] + item["width"] for item in layout["elements"])

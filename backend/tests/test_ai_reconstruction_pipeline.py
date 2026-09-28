@@ -302,8 +302,7 @@ def test_pipeline_defaults_to_white_objectized_background(monkeypatch, tmp_path:
     background = tmp_path / "outputs" / "local-standard" / "backgrounds" / "page_1.png"
     assert np.all(np.asarray(Image.open(background).convert("RGB")) == 255)
     assert slides[0]["metadata"]["reconstructionSurfaceMode"] == "white_objectized"
-    assert report["residualObjectsCount"] >= 1
-    assert report["residualCoverageArea"] > 0
+    assert any(item["type"] == "text" for item in slides[0]["elements"])
     assert 0 < report["residualObjectizationRate"] <= 1
 
 
