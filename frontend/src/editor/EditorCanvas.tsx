@@ -16,6 +16,23 @@ const objectId = (object: any): string | undefined => object?.elementId;
 const isVisibleElement = (element: LayoutElement): boolean =>
   element.type !== 'group' && !element.metadata?.suppressed && !element.metadata?.suppressRender && !element.metadata?.ownedBy;
 
+function movableModuleIds(page: LayoutJSON, elementId: string): string[] {
+  const plate = page.elements.find((item) => item.metadata?.layerRole === 'container' &&
+    (item.id === elementId || (Array.isArray(item.metadata.moduleMemberIds) && item.metadata.moduleMemberIds.includes(elementId))));
+  if (!plate) return [elementId];
+  return [plate.id, ...(Array.isArray(plate.metadata?.moduleMemberIds) ? plate.metadata.moduleMemberIds.filter((id): id is string => typeof id === 'string') : [])]
+    .filter((id) => page.elements.some((item) => item.id === id && isVisibleElement(item)));
+}
+
+function boundedModuleDelta(page: LayoutJSON, ids: string[], dx: number, dy: number): [number, number] {
+  const members = page.elements.filter((item) => ids.includes(item.id));
+  const left = Math.min(...members.map((item) => item.x));
+  const top = Math.min(...members.map((item) => item.y));
+  const right = Math.max(...members.map((item) => item.x + item.width));
+  const bottom = Math.max(...members.map((item) => item.y + item.height));
+  return [Math.max(-left, Math.min(page.slide.width - right, dx)), Math.max(-top, Math.min(page.slide.height - bottom, dy))];
+}
+
 function colorWithOpacity(color: string | undefined, opacity = 1): string {
   if (!color || opacity >= 1) return color || '#17365D';
   const raw = color.replace('#', '');
@@ -50,7 +67,17 @@ export function EditorCanvas({ page, zoomFactor = 1, selectedIds, onSelection, o
     fabricCanvas.on('selection:created', emitSelection);
     fabricCanvas.on('selection:updated', emitSelection);
     fabricCanvas.on('selection:cleared', () => onSelection([]));
-    fabricCanvas.on('object:modified', () => onChange(readLayout(fabricCanvas, page)));
+    fabricCanvas.on('object:modified', (event: any) => {
+      const next = readLayout(fabricCanvas, page);
+      const id = objectId(event.target);
+      const before = page.elements.find((item) => item.id === id);
+      const after = next.elements.find((item) => item.id === id);
+      if (id && before && after && event.transform?.action === 'drag') {
+        const ids = movableModuleIds(page, id);
+        const [dx, dy] = boundedModuleDelta(page, ids, after.x - before.x, after.y - before.y);
+        onChange({ ...next, elements: next.elements.map((item) => ids.includes(item.id) && item.id !== id ? { ...item, x: item.x + dx, y: item.y + dy } : item) });
+      } else onChange(next);
+    });
     fabricCanvas.on('text:changed', () => onChange(readLayout(fabricCanvas, page)));
 
     let disposed = false;
@@ -105,17 +132,28 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     if (element.type === 'background') return;
     event.preventDefault();
     event.stopPropagation();
+    const movingIds = movableModuleIds(page, element.id);
     onSelect([element.id]);
     const target = event.currentTarget;
     const startX = event.clientX;
     const startY = event.clientY;
-    const startLeft = element.x;
-    const startTop = element.y;
     const stageBounds = (event.currentTarget.closest('.canvas-stage') as HTMLElement | null)?.getBoundingClientRect();
     const scaleX = stageBounds && page.slide.width ? stageBounds.width / page.slide.width : 1;
     const scaleY = stageBounds && page.slide.height ? stageBounds.height / page.slide.height : 1;
-    const move = (moveEvent: PointerEvent) => { target.style.transform = `translate(${(moveEvent.clientX - startX) / scaleX}px, ${(moveEvent.clientY - startY) / scaleY}px) rotate(${element.rotation}deg)`; };
-    const up = (upEvent: PointerEvent) => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, x: Math.max(0, Math.min(page.slide.width - item.width, startLeft + (upEvent.clientX - startX) / scaleX)), y: Math.max(0, Math.min(page.slide.height - item.height, startTop + (upEvent.clientY - startY) / scaleY)) } : item) }); };
+    const move = (moveEvent: PointerEvent) => {
+      const [dx, dy] = boundedModuleDelta(page, movingIds, (moveEvent.clientX - startX) / scaleX, (moveEvent.clientY - startY) / scaleY);
+      target.closest('.canvas-overlay')?.querySelectorAll<HTMLElement>('[data-element-id]').forEach((node) => {
+        if (movingIds.includes(node.dataset.elementId || '')) {
+          const member = page.elements.find((item) => item.id === node.dataset.elementId);
+          node.style.transform = `translate(${dx}px, ${dy}px) rotate(${member?.rotation || 0}deg)`;
+        }
+      });
+    };
+    const up = (upEvent: PointerEvent) => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      const [dx, dy] = boundedModuleDelta(page, movingIds, (upEvent.clientX - startX) / scaleX, (upEvent.clientY - startY) / scaleY);
+      onChange({ ...page, elements: page.elements.map((item) => movingIds.includes(item.id) ? { ...item, x: item.x + dx, y: item.y + dy } : item) });
+    };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up, { once: true });
   };
@@ -130,18 +168,18 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true });
   };
   const beginTextEdit = (event: ReactMouseEvent<HTMLDivElement>) => { if (element.type !== 'text') return; const target = event.currentTarget; target.contentEditable = 'true'; target.focus(); const finish = () => { target.contentEditable = 'false'; onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, text: target.innerText } : item) }); target.removeEventListener('blur', finish); }; target.addEventListener('blur', finish); };
-  if (element.type === 'background' && element.src) return <img className="visual-image" src={assetUrl(element.src)} alt="" style={{ ...base, objectFit: 'cover' }} />;
+  if (element.type === 'background' && element.src) return <img data-element-id={element.id} className="visual-image" src={assetUrl(element.src)} alt="" style={{ ...base, objectFit: 'cover' }} />;
   if (element.type === 'image' && element.src) {
     const crop = element.crop || {};
     const left = Math.min(.95, Math.max(0, crop.left || 0));
     const right = Math.min(.95 - left, Math.max(0, crop.right || 0));
     const top = Math.min(.95, Math.max(0, crop.top || 0));
     const bottom = Math.min(.95 - top, Math.max(0, crop.bottom || 0));
-    return <div className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+    return <div data-element-id={element.id} className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   }
-  if (element.type === 'text') return <div className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}>{element.text}{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
-  if (element.type === 'line' || element.type === 'arrow') return <div className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
-  if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}>{element.text}{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'line' || element.type === 'arrow') return <div data-element-id={element.id} className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div data-element-id={element.id} className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   return null;
 }
 

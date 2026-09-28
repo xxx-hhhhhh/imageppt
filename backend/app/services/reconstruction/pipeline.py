@@ -26,6 +26,7 @@ from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
+from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
 
@@ -259,6 +260,9 @@ class ReconstructionPipeline:
                 white_stats = objectize_on_white(normalized_path, background_path, layout, page_output / "assets", project_id, page_index)
                 reconstruction_stats.update(white_stats)
                 layout.setdefault("metadata", {}).update({key: white_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate")})
+                object_qa = repair_objectized_modules(normalized_path, layout, page_output / "assets", project_id)
+                layout["metadata"]["objectizationQA"] = object_qa
+                self._write_json(page_output / ("objectization_qa.json" if page_index == 1 else f"objectization_qa_{page_index}.json"), object_qa)
             asset_repairs: list[dict] = []
             local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
             asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
@@ -362,6 +366,9 @@ class ReconstructionPipeline:
                 reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
                 layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            if white_objectized:
+                score["objectizationQA"] = object_qa
+                score.setdefault("issues", []).extend(object_qa.get("issues", []))
             score["planCoverage"] = plan_coverage
             if plan_coverage.get("status") == "partial":
                 score.setdefault("issues", []).append({"problem": "partialPlanTextCoverage", "uncoveredTextIds": plan_coverage.get("uncoveredTextIds", [])})
