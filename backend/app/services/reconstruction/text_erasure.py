@@ -20,6 +20,7 @@ def erase_editable_text_sources(
     complex_cleaner: ComplexTextCleaner | None = None,
     target_text_ids: set[str] | None = None,
     copy_asset_prefix: str | None = None,
+    clean_background: bool = True,
 ) -> dict[str, int]:
     """Remove source glyphs from every layer beneath an editable OCR line.
 
@@ -40,6 +41,10 @@ def erase_editable_text_sources(
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
+        meta.pop("ghostingDetected", None)
+        if not (isinstance(raw, list) and len(raw) == 4):
+            x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+            raw = [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]
         if isinstance(raw, list) and len(raw) == 4:
             x1, y1, x2, y2 = [int(round(float(value))) for value in raw]
             box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
@@ -52,8 +57,9 @@ def erase_editable_text_sources(
     background_mask = np.zeros((height, width), np.uint8)
     for _, box in texts:
         _mark(background_mask, box, 2)
-    background = _clean(background, background_mask, complex_cleaner)
-    cv2.imwrite(str(background_path), background)
+    if clean_background:
+        background = _clean(background, background_mask, complex_cleaner)
+        cv2.imwrite(str(background_path), background)
 
     cleaned_assets = 0
     for asset in layout.get("elements", []):
@@ -94,7 +100,9 @@ def erase_editable_text_sources(
             owned_text.append(item["id"])
         if not owned_text:
             continue
-        if original.shape[2] == 4:
+        if original.shape[2] == 4 and meta.get("layerRole") == "residual":
+            original[:, :, 3][mask > 0] = 0
+        elif original.shape[2] == 4:
             rgb = _clean(original[:, :, :3], mask, complex_cleaner)
             original[:, :, :3] = rgb
         else:
@@ -118,10 +126,14 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
     for item in layout.get("elements", []):
         meta = item.get("metadata") or {}
         raw = meta.get("rawOCRBBox")
-        if item.get("type") != "text" or not str(item.get("text") or "").strip() or not isinstance(raw, list) or len(raw) != 4:
+        if item.get("type") != "text" or not str(item.get("text") or "").strip():
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
+        meta.pop("ghostingDetected", None)
+        if not (isinstance(raw, list) and len(raw) == 4):
+            x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+            raw = [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]
         x1, y1, x2, y2 = [int(round(float(value))) for value in raw]
         box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
         if box[2] <= box[0] or box[3] <= box[1]:

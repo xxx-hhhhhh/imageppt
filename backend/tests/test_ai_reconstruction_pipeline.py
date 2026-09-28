@@ -333,6 +333,7 @@ def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkey
         return output
 
     provider.inpaint = fake_local_call
+    monkeypatch.setattr(pipeline_module, "RECONSTRUCTION_SURFACE_MODE", "legacy")
     monkeypatch.setattr("app.services.inpainting.service.create_inpainting_provider", lambda preferred: (provider, []))
     slides, report, debug = _run_pipeline(monkeypatch, tmp_path, False, with_plan=True, inpainting_factory=InpaintingService)
     score = json.loads((tmp_path / "outputs" / "local-standard" / "visual_score.json").read_text(encoding="utf-8"))

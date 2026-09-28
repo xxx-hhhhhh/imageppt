@@ -46,11 +46,37 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
 
     residual_assets, residual_stats = extract_residual_objects(source, occupied, asset_dir, project_id, page_index)
     elements.extend(residual_assets)
+    layer_objectized_elements(elements)
     background_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
     return {"whiteObjectAssets": len(residual_assets) + bordered_assets, "whiteObjectShapes": container_count + bordered_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+
+
+def layer_objectized_elements(elements: list[dict]) -> None:
+    """Keep card fill below its visual details and editable labels above both."""
+    containers = [item for item in elements if (item.get("metadata") or {}).get("layerRole") == "container"]
+    residuals = [item for item in elements if (item.get("metadata") or {}).get("layerRole") == "residual"]
+    texts = [item for item in elements if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    for asset in residuals:
+        asset_box = _box_unclipped(asset)
+        below = [item for item in containers if _intersects(asset_box, _box_unclipped(item))]
+        asset["zIndex"] = max([int(item.get("zIndex") or 0) for item in below], default=0) + 1
+    for text in texts:
+        box = _box_unclipped(text)
+        below = [item for item in containers + residuals if _intersects(box, _box_unclipped(item))]
+        if below:
+            text["zIndex"] = max(int(text.get("zIndex") or 0), max(int(item.get("zIndex") or 0) for item in below) + 1)
+
+
+def _box_unclipped(item: dict) -> tuple[float, float, float, float]:
+    x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+    return x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)
+
+
+def _intersects(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> bool:
+    return min(left[2], right[2]) > max(left[0], right[0]) and min(left[3], right[3]) > max(left[1], right[1])
 
 
 def _occupy_shape_color(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int], fill: str) -> None:

@@ -110,4 +110,10 @@ def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
 
     assert stats["whiteContainerShapes"] >= 1
     assert stats["residualObjectsCount"] >= 1
-    assert any(item.get("metadata", {}).get("layerRole") == "residual" and 80 <= item["x"] <= 110 for item in layout["elements"])
+    residual = next(item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "residual" and 80 <= item["x"] <= 110)
+    container = next(item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container")
+    assert residual["zIndex"] > container["zIndex"]
+    residual["src"] = str(tmp_path / "assets" / f"{residual['id']}.png")
+    preview = tmp_path / "preview.png"
+    render_preview(tmp_path / "backgrounds" / "page_1.png", layout, preview)
+    assert np.max(np.abs(cv2.imread(str(preview))[105, 105].astype(int) - source[105, 105].astype(int))) < 8

@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from PIL import Image
 
 from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, RECONSTRUCTION_SURFACE_MODE, SEGMENTATION_PROVIDER, VISION_PROVIDER
 from app.services.fusion.adjustment_validator import apply_safe_adjustments
@@ -24,7 +25,8 @@ from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
-from app.services.reconstruction.white_objectization import objectize_on_white
+from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
+from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -215,7 +217,11 @@ class ReconstructionPipeline:
                 if (item.get("metadata") or {}).get("reconstructionStrategySource") == "planner" and item.get("type") == "image":
                     box = item["bbox"]
                     preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
-            inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
+            if white_objectized:
+                background_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (width, height), "white").save(background_path)
+            else:
+                inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
             reconstruction_stats["aiBackgroundRepairs"] += int(getattr(inpainting, "ai_repaired_regions", 0))
             _apply_preserved_text_ownership(layout, inpainting.last_strategies)
             for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
@@ -255,7 +261,11 @@ class ReconstructionPipeline:
             if not white_objectized:
                 reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
             reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
-            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None)
+            if white_objectized:
+                pre_cleanup_path = page_output / ("pre_cleanup_preview.png" if page_index == 1 else f"pre_cleanup_preview_{page_index}.png")
+                render_preview(background_path, layout, pre_cleanup_path)
+                ghosting_before_cleanup = count_text_ghosting(normalized_path, background_path, layout)
+            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None, clean_background=not white_objectized)
             for key, value in erasure_stats.items():
                 reconstruction_stats[key] += value
             if local_provider:
@@ -271,6 +281,11 @@ class ReconstructionPipeline:
             shutil.copy2(background_path, page_output / "background.png" if page_index == 1 else page_output / f"background_{page_index}.png")
             preview_path = page_output / "reconstructed_preview.png" if page_index == 1 else page_output / f"reconstructed_preview_{page_index}.png"
             render_preview(background_path, layout, preview_path)
+            if white_objectized:
+                ghosting_after_cleanup = count_text_ghosting(normalized_path, background_path, layout)
+                replacement_qa = check_replacement_regions(normalized_path, pre_cleanup_path, preview_path, layout, page_output / ("replacement_qa.json" if page_index == 1 else f"replacement_qa_{page_index}.json"), page_output / ("replacement_compare.png" if page_index == 1 else f"replacement_compare_{page_index}.png"), ghosting_before_cleanup, ghosting_after_cleanup)
+                reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
+                layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
             shutil.copy2(preview_path, page_output / "initial_preview.png" if page_index == 1 else page_output / f"initial_preview_{page_index}.png")
             if conversion_mode in {"high_quality", "maximum"} and not white_objectized:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
@@ -314,6 +329,8 @@ class ReconstructionPipeline:
                     layout, _ = typography_layout_refiner.refine(layout)
                     fit_text_to_ocr_lines(layout)
                     suppress_text_like_assets(layout)
+                    if white_objectized:
+                        layer_objectized_elements(layout.get("elements", []))
                     render_preview(background_path, layout, preview_path)
                     candidate_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
                     improvement = float(candidate_score.get("overall", 0)) - float(best_score.get("overall", 0))
@@ -335,7 +352,16 @@ class ReconstructionPipeline:
             if critic_reports:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
                 self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
+            if white_objectized and critic_reports:
+                replacement_qa = check_replacement_regions(normalized_path, pre_cleanup_path, preview_path, layout, page_output / ("replacement_qa.json" if page_index == 1 else f"replacement_qa_{page_index}.json"), page_output / ("replacement_compare.png" if page_index == 1 else f"replacement_compare_{page_index}.png"), ghosting_before_cleanup, count_text_ghosting(normalized_path, background_path, layout))
+                reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
+                layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            if white_objectized:
+                score["replacementQA"] = replacement_qa
+                if replacement_qa["worsenedRegions"] or replacement_qa["ghostingAfter"] > replacement_qa["ghostingBefore"]:
+                    revision_status = "stagnated"
+                    score.setdefault("issues", []).append({"problem": "replacementVisualRegression", "regions": replacement_qa["worsenedRegions"]})
             ghosting_count = count_text_ghosting(normalized_path, background_path, layout)
             reconstruction_stats["ghostingCount"] += ghosting_count
             score["ghostingCount"] = ghosting_count
@@ -406,6 +432,9 @@ class ReconstructionPipeline:
                 "scene_refined.json": page_output / ("scene_refined.json" if page_index == 1 else f"scene_refined_{page_index}.json"),
                 "initial_preview.png": page_output / ("initial_preview.png" if page_index == 1 else f"initial_preview_{page_index}.png"),
                 "final_preview.png": preview_path,
+                "pre_cleanup_preview.png": page_output / ("pre_cleanup_preview.png" if page_index == 1 else f"pre_cleanup_preview_{page_index}.png"),
+                "replacement_compare.png": page_output / ("replacement_compare.png" if page_index == 1 else f"replacement_compare_{page_index}.png"),
+                "replacement_qa.json": page_output / ("replacement_qa.json" if page_index == 1 else f"replacement_qa_{page_index}.json"),
                 "visual_validation.json": page_output / ("visual_validation.json" if page_index == 1 else f"visual_validation_{page_index}.json"),
                 "vision_debug.json": page_output / "vision_debug.json",
             }
@@ -460,6 +489,7 @@ class ReconstructionPipeline:
                 "backgroundSeparatedRegions": reconstruction_stats["backgroundSeparatedRegions"],
                 "movableAssetCount": reconstruction_stats["movableAssetCount"],
                 "backgroundResidualCount": reconstruction_stats["backgroundResidualCount"],
+                "replacementQAWorsenedRegions": reconstruction_stats.get("replacementQAWorsenedRegions", 0),
                 "residualObjectsCount": reconstruction_stats["residualObjectsCount"],
                 "residualCoverageArea": reconstruction_stats["residualCoverageArea"],
                 "residualCandidateArea": reconstruction_stats["residualCandidateArea"],

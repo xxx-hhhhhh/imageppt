@@ -28,6 +28,9 @@ def _path_from_src(src: str | None) -> Path | None:
     if not src:
         return None
     clean = src.split("?", 1)[0]
+    direct = Path(clean)
+    if direct.is_absolute() and not clean.replace("\\", "/").startswith("/media/"):
+        return direct
     parts = clean.replace("\\", "/").split("/")
     try:
         if "backgrounds" in parts:
