@@ -7,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.services.reconstruction.residual_objects import extract_residual_objects
+
 
 def objectize_on_white(source_path: Path, background_path: Path, layout: dict, asset_dir: Path, project_id: str, page_index: int) -> dict[str, int]:
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
@@ -35,53 +37,35 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
                 x1, y1, x2, y2 = _clip(raw, width, height)
             pad = max(3, round((y2 - y1) * 0.15))
             x1, y1, x2, y2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
-        occupied[y1:y2, x1:x2] = 255
+        if item.get("type") in {"rectangle", "roundedRectangle", "ellipse"} and (item.get("style") or {}).get("fill"):
+            _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["fill"]))
+            if item["style"].get("stroke"):
+                _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["stroke"]))
+        else:
+            occupied[y1:y2, x1:x2] = 255
 
-    # Inspect only pixels without a current owner. The full-page source is never
-    # used as an output layer; bounded residual components become movable assets.
-    distance = np.max(255 - source.astype(np.int16), axis=2)
-    foreground = np.uint8((distance > 12) & (occupied == 0)) * 255
-    foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        if w * h < max(80, width * height * 0.00008):
-            continue
-        if w < 5 or h < 5:
-            continue
-        candidates.append((x, y, w, h, contour))
-    candidates.sort(key=lambda entry: entry[2] * entry[3], reverse=True)
-    added = 0
-    native_shapes = 0
-    for x, y, w, h, contour in candidates[:100]:
-        pad = 2
-        x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(width, x + w + pad), min(height, y + h + pad)
-        region = foreground[y1:y2, x1:x2]
-        if np.count_nonzero(region) < 30:
-            continue
-        crop = source[y1:y2, x1:x2]
-        if w * h > width * height * 0.65:
-            # A large uniform panel is still an object, represented natively.
-            visible = crop[region > 0]
-            if len(visible) and float(np.mean(np.std(visible.astype(np.float32), axis=0))) < 9:
-                color = np.median(visible, axis=0).astype(np.uint8)
-                native_shapes += 1
-                elements.append({"id": f"white_panel_page_{page_index}_{native_shapes:03d}", "type": "rectangle", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "style": {"fill": f"#{color[2]:02X}{color[1]:02X}{color[0]:02X}", "strokeWidth": 0}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"}})
-            continue
-        alpha = cv2.dilate(region, np.ones((3, 3), np.uint8), iterations=1)
-        alpha[occupied[y1:y2, x1:x2] != 0] = 0
-        rgba = np.dstack((crop, alpha))
-        added += 1
-        asset_id = f"white_object_page_{page_index}_{added:03d}"
-        path = asset_dir / f"{asset_id}.png"
-        cv2.imwrite(str(path), rgba)
-        elements.append({"id": asset_id, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "preserveWholeAsset": True, "doNotVectorize": True}})
+    residual_assets, residual_stats = extract_residual_objects(source, occupied, asset_dir, project_id, page_index)
+    elements.extend(residual_assets)
     background_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": added + bordered_assets, "whiteObjectShapes": native_shapes + container_count + bordered_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets, "whiteBackgroundPixels": width * height}
+    return {"whiteObjectAssets": len(residual_assets) + bordered_assets, "whiteObjectShapes": container_count + bordered_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+
+
+def _occupy_shape_color(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int], fill: str) -> None:
+    x1, y1, x2, y2 = box
+    try:
+        rgb = bytes.fromhex(fill.lstrip("#"))
+        if len(rgb) != 3:
+            raise ValueError
+        color = np.frombuffer(rgb[::-1], dtype=np.uint8).astype(np.int16)
+    except ValueError:
+        occupied[y1:y2, x1:x2] = 255
+        return
+    region = source[y1:y2, x1:x2]
+    matching = np.max(np.abs(region.astype(np.int16) - color), axis=2) <= 18
+    occupied[y1:y2, x1:x2][matching] = 255
 
 
 def _extract_bordered_containers(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[int, int]:
@@ -132,10 +116,12 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
         clean_pixels = inner[text_mask[inset:h - inset, inset:w - inset] == 0]
         if len(clean_pixels) < 12:
             continue
-        flat = float(np.max(np.std(clean_pixels.astype(np.float32), axis=0))) < 12
+        dominant_fill = np.median(clean_pixels, axis=0).astype(np.uint8)
+        dominant_fraction = float(np.mean(np.max(np.abs(clean_pixels.astype(np.int16) - dominant_fill.astype(np.int16)), axis=1) <= 12))
+        flat = float(np.max(np.std(clean_pixels.astype(np.float32), axis=0))) < 12 or dominant_fraction >= 0.78
         z_index = min([int(item.get("zIndex") or 20) for item in texts], default=10) - 1
         if flat:
-            fill_color = np.median(clean_pixels, axis=0).astype(np.uint8)
+            fill_color = dominant_fill
             border_color = np.median(crop[edges[y:y + h, x:x + w] > 0], axis=0).astype(np.uint8)
             shapes += 1
             elements.append({"id": f"white_border_page_{page_index}_{shapes:03d}", "type": "roundedRectangle" if rounded else "rectangle", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "style": {"fill": _hex_bgr(fill_color), "stroke": _hex_bgr(border_color), "strokeWidth": 1, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container"}})
@@ -148,7 +134,11 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             path = asset_dir / f"white_border_page_{page_index}_{assets:03d}.png"
             cv2.imwrite(str(path), np.dstack((clean, alpha)))
             elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "textCleaned": bool(texts)}})
-        occupied[y:y + h, x:x + w] = 255
+        if flat:
+            _occupy_shape_color(source, occupied, box, _hex_bgr(fill_color))
+            _occupy_shape_color(source, occupied, box, _hex_bgr(border_color))
+        else:
+            occupied[y:y + h, x:x + w] = 255
         selected.append(box)
     return shapes, assets
 
@@ -181,7 +171,7 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
             if w < 10 or h < 8 or area < minimum_area or area > width * height * 0.85:
                 continue
             fill_ratio = cv2.contourArea(contour) / area
-            if fill_ratio < 0.70:
+            if fill_ratio < 0.82:
                 continue
             region = source[y:y + h, x:x + w]
             matching = delta[y:y + h, x:x + w] <= 13
@@ -211,7 +201,7 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         identifier = f"white_container_page_{page_index}_{created:03d}"
         contained_text = [item for item in active if item.get("type") == "text" and _text_inside(item, box)]
         elements.append({"id": identifier, "type": kind, "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": min([int(item.get("zIndex") or 20) for item in contained_text], default=10) - 1, "style": {"fill": fill, "stroke": fill, "strokeWidth": 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container"}})
-        occupied[y:y + h, x:x + w] = 255
+        _occupy_shape_color(source, occupied, box, fill)
         created_boxes.append(box)
     return created
 

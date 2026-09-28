@@ -96,3 +96,18 @@ def test_textured_bordered_panel_uses_independent_text_clean_image(tmp_path):
     assert assets and assets[0]["zIndex"] < 20
     assert assets[0]["metadata"]["textCleaned"] is True
     assert (tmp_path / "assets" / f"{assets[0]['id']}.png").exists()
+
+
+def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
+    source = np.full((220, 360, 3), 255, np.uint8)
+    cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)
+    cv2.circle(source, (105, 105), 20, (180, 55, 25), -1)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 360, "height": 220}, "elements": []}
+
+    stats = objectize_on_white(source_path, tmp_path / "backgrounds" / "page_1.png", layout, tmp_path / "assets", "demo", 1)
+
+    assert stats["whiteContainerShapes"] >= 1
+    assert stats["residualObjectsCount"] >= 1
+    assert any(item.get("metadata", {}).get("layerRole") == "residual" and 80 <= item["x"] <= 110 for item in layout["elements"])

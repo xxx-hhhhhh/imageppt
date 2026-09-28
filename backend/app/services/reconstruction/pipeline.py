@@ -150,6 +150,10 @@ class ReconstructionPipeline:
             "backgroundSeparatedRegions": 0,
             "movableAssetCount": 0,
             "backgroundResidualCount": 0,
+            "residualObjectsCount": 0,
+            "residualCoverageArea": 0,
+            "residualCandidateArea": 0,
+            "residualObjectizationRate": 0.0,
             "movableVisualCoverage": 0.0,
             "textFallbackCutouts": 0,
             "plannerSuppressedElements": 0,
@@ -244,6 +248,7 @@ class ReconstructionPipeline:
             if white_objectized:
                 white_stats = objectize_on_white(normalized_path, background_path, layout, page_output / "assets", project_id, page_index)
                 reconstruction_stats.update(white_stats)
+                layout.setdefault("metadata", {}).update({key: white_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate")})
             asset_repairs: list[dict] = []
             local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
             asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
@@ -338,6 +343,7 @@ class ReconstructionPipeline:
             asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
             reconstruction_stats.update(asset_metrics)
             score.update(asset_metrics)
+            score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate")})
             text_coverage = measure_text_coverage(layout, len(regions))
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
@@ -454,6 +460,10 @@ class ReconstructionPipeline:
                 "backgroundSeparatedRegions": reconstruction_stats["backgroundSeparatedRegions"],
                 "movableAssetCount": reconstruction_stats["movableAssetCount"],
                 "backgroundResidualCount": reconstruction_stats["backgroundResidualCount"],
+                "residualObjectsCount": reconstruction_stats["residualObjectsCount"],
+                "residualCoverageArea": reconstruction_stats["residualCoverageArea"],
+                "residualCandidateArea": reconstruction_stats["residualCandidateArea"],
+                "residualObjectizationRate": reconstruction_stats["residualObjectizationRate"],
                 "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],

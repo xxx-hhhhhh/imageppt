@@ -297,10 +297,13 @@ def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, t
 def test_pipeline_defaults_to_white_objectized_background(monkeypatch, tmp_path: Path) -> None:
     import numpy as np
 
-    slides, _, _ = _run_pipeline(monkeypatch, tmp_path, False)
+    slides, report, _ = _run_pipeline(monkeypatch, tmp_path, False)
     background = tmp_path / "outputs" / "local-standard" / "backgrounds" / "page_1.png"
     assert np.all(np.asarray(Image.open(background).convert("RGB")) == 255)
     assert slides[0]["metadata"]["reconstructionSurfaceMode"] == "white_objectized"
+    assert report["residualObjectsCount"] >= 1
+    assert report["residualCoverageArea"] > 0
+    assert 0 < report["residualObjectizationRate"] <= 1
 
 
 def test_pipeline_keeps_legacy_background_option(monkeypatch, tmp_path: Path) -> None:
