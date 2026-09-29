@@ -93,7 +93,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     score_before["objectizationAudit"] = baseline_audit
     saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
     issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene), *baseline_audit["issues"]]}.values())
-    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "missingBackplate": 2, "missingVisualObject": 2, "blankVisualOwner": 2, "squareCutoutUnresolved": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
+    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "missingBackplate": 2, "missingVisualObject": 2, "blankVisualOwner": 2, "visualContentMismatch": 2, "squareCutoutUnresolved": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
@@ -202,6 +202,23 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     recovered = repair_missing_regions(source, candidate, target_issues, root / "assets", project_id, round_number)
     changed_ids.update(str(item["id"]) for item in recovered)
     for issue in target_issues:
+        if issue["problem"] != "visualContentMismatch" or not isinstance(issue.get("bbox"), list):
+            continue
+        x1, y1, x2, y2 = issue["bbox"]
+        issue_area = max(1, (x2 - x1) * (y2 - y1))
+        for old in baseline.get("elements", []):
+            if old.get("type") not in {"rectangle", "roundedRectangle", "ellipse", "image"}:
+                continue
+            ox1, oy1 = float(old.get("x") or 0), float(old.get("y") or 0)
+            ox2, oy2 = ox1 + float(old.get("width") or 0), oy1 + float(old.get("height") or 0)
+            old_area = max(1, (ox2 - ox1) * (oy2 - oy1))
+            overlap = max(0, min(x2, ox2) - max(x1, ox1)) * max(0, min(y2, oy2) - max(y1, oy1))
+            if overlap / old_area >= 0.9 and old_area <= issue_area * 1.25:
+                current = by_id.get(str(old.get("id")))
+                if current is not None:
+                    current.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True})
+                    changed_ids.add(str(current["id"]))
+    for issue in target_issues:
         if issue["problem"] == "blankVisualOwner" and any(item["metadata"]["qaIssue"] == "blankVisualOwner" for item in recovered):
             old = by_id.get(str(issue.get("elementId")))
             if old:
@@ -225,6 +242,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
     if _visual_retention_regressed(baseline_audit, candidate_audit):
         integrity["integrityErrors"].append("source_visual_loss")
+    if any(issue.get("problem") == "visualContentMismatch" for issue in target_issues):
+        before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")
+        after_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in candidate_audit["issues"] if issue.get("problem") == "visualContentMismatch")
+        if after_mismatch >= before_mismatch:
+            integrity["integrityErrors"].append("visual_mismatch_not_improved")
     score_after["objectizationAudit"] = candidate_audit
     score_after.setdefault("issues", []).extend(candidate_audit["issues"])
     for key in ("visionProvider", "visionModel", "requestedVisionProvider", "ocrProvider", "conversionMode"):
@@ -251,7 +273,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "missingBackplate", "missingVisualObject", "blankVisualOwner", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
     accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
@@ -331,7 +353,7 @@ def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate:
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "missingBackplate", "missingVisualObject", "blankVisualOwner", "squareCutoutUnresolved"}:
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
             issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)

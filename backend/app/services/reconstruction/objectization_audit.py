@@ -17,6 +17,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
+              "visualMismatchRegions": 0,
               "missingVisualPixels": 0, "retainedVisualCoverage": 1.0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
@@ -56,6 +57,11 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report["missingVisualPixels"] = missing_pixels
     report["retainedVisualCoverage"] = round(1 - missing_pixels / max(1, int(np.count_nonzero(salient))), 4)
     minimum = max(24, round(width * height * 0.0001))
+    color_error = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
+    mismatched = salient & (color_error >= 48) & ~np.all(preview >= 253, axis=2)
+    for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
+        report["visualMismatchRegions"] += 1
+        report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
     missing = _bounded_components(np.uint8(lost) * 255, minimum, width, height)
     for x, y, w, h, pixels in missing:
         patch = source[y:y + h, x:x + w]
@@ -111,7 +117,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
     asset_dir.mkdir(parents=True, exist_ok=True)
     created = []
     for issue in issues:
-        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "blankVisualOwner"}:
+        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch"}:
             continue
         box = issue.get("bbox")
         if not isinstance(box, list) or len(box) != 4:
@@ -123,7 +129,10 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
         crop = source[y1:y2, x1:x2].copy()
         existing = [item for item in layout.get("elements", []) if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")) and _box(item, width, height) and _overlaps((x1, y1, x2, y2), _box(item, width, height))]
         group = next((str(item.get("groupId")) for item in existing if item.get("groupId")), None)
-        z_index = min((int(item.get("zIndex") or 20) for item in existing), default=10) - 1
+        visual_below = [item for item in layout.get("elements", []) if item.get("type") in VISUAL_TYPES and _box(item, width, height) and _overlaps((x1, y1, x2, y2), _box(item, width, height))]
+        z_index = max((int(item.get("zIndex") or 0) for item in visual_below), default=8) + 1
+        if existing:
+            z_index = min(z_index, min(int(item.get("zIndex") or 20) for item in existing) - 1)
         identifier = f"revision_{revision_round}_object_{len(created) + 1:03d}"
         metadata = {"reconstructionStrategySource": "objectization_audit", "layerRole": "container" if issue["problem"] == "missingBackplate" else "residual", "qaIssue": issue["problem"]}
         median = np.median(crop.reshape(-1, 3), axis=0).astype(np.uint8)

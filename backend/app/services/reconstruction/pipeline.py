@@ -413,7 +413,7 @@ class ReconstructionPipeline:
             if conversion_mode in {"high_quality", "maximum"} and score["editableTextMismatchCount"]:
                 revision_status = "stagnated"
                 score["textFidelityGate"] = "review_required"
-            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap", "missingBackplate", "missingVisualObject", "blankVisualOwner", "assetBakedIntoBackground", "squareCutoutUnresolved"} for issue in score.get("issues", []))):
+            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "squareCutoutUnresolved"} for issue in score.get("issues", []))):
                 revision_status = "stagnated"
                 score["structuralGate"] = "review_required"
                 warnings.append("视觉对象或复杂背景仍有待修复区域，请复核本页质量报告。")

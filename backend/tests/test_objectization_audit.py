@@ -91,6 +91,43 @@ def test_revision_repairs_only_missing_local_plate(tmp_path):
     assert cv2.imread(str(root / "reconstructed_preview.png"))[60, 60, 0] < 255
 
 
+def test_revision_repairs_wrong_colored_local_plate_without_removing_other_visuals(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("mismatch-revision")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (18, 25), (270, 145), (80, 130, 190), -1)
+    cv2.rectangle(source, (45, 48), (180, 112), (242, 246, 250), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "outer", "type": "rectangle", "x": 18, "y": 25, "width": 253, "height": 121, "zIndex": 1,
+         "style": {"fill": "#BE8250", "stroke": "#BE8250", "strokeWidth": 0, "opacity": 1}},
+        {"id": "wrong_plate", "type": "rectangle", "x": 45, "y": 48, "width": 136, "height": 65, "zIndex": 2,
+         "style": {"fill": "#BE8250", "stroke": "#BE8250", "strokeWidth": 0, "opacity": 1}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds" / "page_1.png", layout, root / "reconstructed_preview.png")
+    before = cv2.imread(str(root / "reconstructed_preview.png"))
+    assert np.max(np.abs(before[70, 70].astype(int) - source[70, 70].astype(int))) > 48
+    report = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", root / "reconstructed_preview.png", layout)
+    assert report["visualMismatchRegions"] >= 1
+    score = run_visual_qa(root / "source.png", root / "reconstructed_preview.png", root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    result = revise_problem_regions(store, project_id, 1)
+    assert result["accepted"] is True
+    assert not any(issue["problem"] == "visualContentMismatch" for issue in result["issuesAfter"])
+    after = cv2.imread(str(root / "reconstructed_preview.png"))
+    assert np.max(np.abs(after[70, 70].astype(int) - source[70, 70].astype(int))) < 12
+    assert np.max(np.abs(after[35, 35].astype(int) - source[35, 35].astype(int))) < 12
+    revised = store.get_slide(project_id, 1)["elements"]
+    assert len([item for item in revised if item["type"] == "rectangle" and not (item.get("metadata") or {}).get("suppressed")]) == 1
+    assert len([item for item in revised if item["type"] == "image" and not (item.get("metadata") or {}).get("suppressed")]) == 1
+    assert result["missingAssetCount"] == 0
+
+
 def test_revision_recovers_complex_unowned_visual_as_movable_image(tmp_path, monkeypatch):
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
@@ -156,5 +193,6 @@ def test_complex_fixture_white_objectized_end_to_end(tmp_path, variant):
     report = audit_objectization(source_path, background, preview, layout, tmp_path / "debug.png")
     assert report["whiteBackground"] is True
     assert report["backgroundResidualRegions"] == 0
+    assert report["visualMismatchRegions"] == 0
     assert all(item["owner"] in {"editable_text", "movable_image", "native_shape"} for item in report["ownerRegions"])
     assert (tmp_path / "debug.png").is_file()
