@@ -47,6 +47,27 @@ def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     assert any(item["problem"] == "blankVisualOwner" and item["elementId"] == "badge" for item in report["issues"])
 
 
+def test_transparent_image_bbox_does_not_hide_missing_visual_content(tmp_path):
+    source = np.full((150, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (30, 45), (75, 100), (40, 90, 180), -1)
+    cv2.rectangle(source, (175, 45), (220, 100), (50, 120, 70), -1)
+    background = np.full_like(source, 255)
+    preview = background.copy()
+    preview[45:101, 30:76] = source[45:101, 30:76]
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    asset = np.zeros((80, 220, 4), np.uint8)
+    asset[:, :, :3] = 255
+    asset[0:56, 0:46, 3] = 255
+    cv2.imwrite(str(asset_dir / "partial.png"), asset)
+    for name, image in (("source.png", source), ("background.png", background), ("preview.png", preview)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "partial", "type": "image", "x": 30, "y": 45, "width": 220, "height": 80, "src": "/media/assets/demo/partial.png"}]}
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png", tmp_path / "preview.png", layout)
+    assert report["missingVisualObjects"] >= 1
+    assert any(issue["bbox"][0] <= 175 <= issue["bbox"][2] for issue in report["issues"] if issue["problem"] == "missingVisualObject")
+
+
 def test_revision_repairs_only_missing_local_plate(tmp_path):
     store = ProjectStore(tmp_path)
     project_id = store.create("plate-revision")["id"]

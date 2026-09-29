@@ -273,3 +273,35 @@ def test_round_badge_and_pale_support_remain_separate_movable_objects(tmp_path):
     pixels = cv2.imread(str(preview))
     assert np.max(np.abs(pixels[92, 84].astype(int) - source[92, 84].astype(int))) < 12
     assert np.max(np.abs(pixels[130, 170].astype(int) - source[130, 170].astype(int))) < 12
+
+
+def test_large_map_silk_and_pale_card_survive_white_objectization(tmp_path):
+    source = np.full((400, 700, 3), 255, np.uint8)
+    map_contour = np.array([[45, 55], [300, 18], [650, 48], [675, 170], [620, 270], [490, 300], [270, 320], [65, 275]], np.int32)
+    cv2.fillPoly(source, [map_contour], (105, 145, 175))
+    cv2.rectangle(source, (450, 75), (590, 145), (245, 248, 250), -1)
+    silk = np.array([[80, 350], [270, 340], [460, 358], [625, 335], [590, 383], [310, 375]], np.int32)
+    cv2.fillPoly(source, [silk], (35, 50, 195))
+    path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(path), source)
+    layout = {"slide": {"width": 700, "height": 400}, "elements": []}
+    stats = objectize_on_white(path, background, layout, tmp_path / "assets", "complex", 1)
+    assert stats["whiteObjectAssets"] >= 2
+    assert any(item["type"] == "image" and item["width"] > 500 for item in layout["elements"])
+    assert any(item["y"] >= 330 and item["type"] == "image" for item in layout["elements"])
+    assert np.all(cv2.imread(str(background)) == 255)
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    pixels = cv2.imread(str(preview))
+    for y, x in ((150, 170), (370, 420), (100, 500)):
+        assert np.max(np.abs(pixels[y, x].astype(int) - source[y, x].astype(int))) < 15
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in layout["elements"]:
+        PPTXRenderer()._add_element(slide, item, 0.01, 0.01)
+    assert len(slide.shapes) == len(layout["elements"])
+    assert sum(shape.shape_type == 13 for shape in slide.shapes) >= 2

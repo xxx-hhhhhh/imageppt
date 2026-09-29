@@ -25,7 +25,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         x, y, w, h, pixels = [int(value) for value in stats[label]]
         if pixels < minimum or w < 2 or h < 2:
             continue
-        if w * h > width * height * 0.62 and w > width * 0.75 and h > height * 0.75:
+        if _page_environment((x, y, x + w, y + h), pixels, width, height):
             continue
         potential_area += pixels
         values = source[labels == label]
@@ -44,11 +44,10 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         y1 = min(components[index]["box"][1] for index in group)
         x2 = max(components[index]["box"][2] for index in group)
         y2 = max(components[index]["box"][3] for index in group)
-        box_area = (x2 - x1) * (y2 - y1)
         pixels = sum(components[index]["pixels"] for index in group)
         # A diffuse page-sized component is environmental background, not a
         # selectable visual object. Do not repackage the slide as one image.
-        if box_area > width * height * 0.62 and x2 - x1 > width * 0.75 and y2 - y1 > height * 0.75:
+        if _page_environment((x1, y1, x2, y2), pixels, width, height):
             continue
         if len(assets) >= max_objects:
             break
@@ -66,6 +65,19 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         assets.append({"id": asset_id, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "residual_detection", "layerRole": "residual", "preserveWholeAsset": True, "doNotVectorize": True, "sourcePixelArea": pixels}})
         covered += pixels
     return assets, {"residualObjectsCount": len(assets), "residualCoverageArea": covered, "residualCandidateArea": potential_area, "residualObjectizationRate": round(covered / potential_area, 4) if potential_area else 1.0}
+
+
+def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, height: int) -> bool:
+    """Only broad, dense, edge-reaching washes qualify as page environment.
+
+    Large maps and artwork can occupy most of a slide while remaining a
+    bounded, irregular visual object. Their area alone must not erase them.
+    """
+    x1, y1, x2, y2 = box
+    box_area = max(1, (x2 - x1) * (y2 - y1))
+    margin_x, margin_y = max(5, round(width * 0.03)), max(5, round(height * 0.03))
+    near_all_edges = x1 <= margin_x and y1 <= margin_y and x2 >= width - margin_x and y2 >= height - margin_y
+    return near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.82
 
 
 def _border_color(source: np.ndarray) -> np.ndarray:

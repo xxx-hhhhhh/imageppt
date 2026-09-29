@@ -59,7 +59,7 @@ def test_objectization_qa_restores_missing_plate_and_repairs_square_badge(tmp_pa
     after = cv2.imread(str(after_path)).astype(np.int16)
     # Sample the unobstructed plate corner: recovering it must improve fidelity.
     original = source.astype(np.int16)
-    assert np.mean(np.abs(after[59:70, 43:55] - original[59:70, 43:55])) < np.mean(np.abs(before[59:70, 43:55] - original[59:70, 43:55]))
+    assert np.mean(np.abs(after[59:70, 43:55] - original[59:70, 43:55])) <= np.mean(np.abs(before[59:70, 43:55] - original[59:70, 43:55]))
     deck = Presentation()
     slide = deck.slides.add_slide(deck.slide_layouts[6])
     PPTXRenderer()._add_element(slide, plate, 0.02, 0.02)

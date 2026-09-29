@@ -56,3 +56,17 @@ def test_page_sized_environment_is_not_repackaged_as_background_image(tmp_path):
     assert stats["residualObjectsCount"] == 0
     assert stats["residualCandidateArea"] == 0  # page environment is excluded from local coverage
     assert stats["residualObjectizationRate"] == 1
+
+
+def test_large_irregular_map_and_silk_remain_separate_movable_assets(tmp_path):
+    image = np.full((400, 700, 3), 255, np.uint8)
+    contour = np.array([[45, 55], [300, 18], [650, 48], [675, 170], [620, 270], [490, 300], [270, 320], [65, 275]], np.int32)
+    cv2.fillPoly(image, [contour], (105, 145, 175))
+    cv2.line(image, (100, 170), (570, 140), (40, 90, 135), 8)
+    silk = np.array([[80, 350], [270, 340], [460, 358], [625, 335], [590, 383], [310, 375]], np.int32)
+    cv2.fillPoly(image, [silk], (35, 50, 195))
+    assets, stats = extract_residual_objects(image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1)
+    assert len(assets) >= 2
+    assert any(item["width"] > 500 and item["height"] > 250 for item in assets)
+    assert any(item["y"] >= 330 and item["height"] < 60 for item in assets)
+    assert stats["residualObjectizationRate"] > 0.95

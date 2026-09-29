@@ -174,6 +174,17 @@ def test_white_background_regression_is_rejected(tmp_path: Path) -> None:
     assert "preview_over_whitened" in result["integrityErrors"]
 
 
+def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None:
+    assert revision._visual_retention_regressed(
+        {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10},
+        {"retainedVisualCoverage": 0.91, "missingVisualPixels": 48},
+    )
+    assert not revision._visual_retention_regressed(
+        {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10},
+        {"retainedVisualCoverage": 0.981, "missingVisualPixels": 9},
+    )
+
+
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()

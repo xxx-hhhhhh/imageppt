@@ -17,6 +17,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
+              "missingVisualPixels": 0, "retainedVisualCoverage": 1.0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
@@ -33,7 +34,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         report["ownerRegions"].append({"elementId": item.get("id"), "owner": role, "bbox": list(box)})
         if item.get("type") in VISUAL_TYPES:
             x1, y1, x2, y2 = box
-            owner_mask[y1:y2, x1:x2] = 255
+            owner_mask[y1:y2, x1:x2] = cv2.max(owner_mask[y1:y2, x1:x2], _visual_mask(item, box, source_path))
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
     lost = (contrast >= 5) & np.all(preview >= 253, axis=2) & (owner_mask == 0)
@@ -44,6 +45,16 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             if box:
                 x1, y1, x2, y2 = box
                 lost[y1:y2, x1:x2] = False
+    salient = contrast >= 5
+    for item in layout.get("elements", []):
+        if item.get("type") == "text":
+            box = _box(item, width, height)
+            if box:
+                x1, y1, x2, y2 = box
+                salient[y1:y2, x1:x2] = False
+    missing_pixels = int(np.count_nonzero(salient & np.all(preview >= 253, axis=2)))
+    report["missingVisualPixels"] = missing_pixels
+    report["retainedVisualCoverage"] = round(1 - missing_pixels / max(1, int(np.count_nonzero(salient))), 4)
     minimum = max(24, round(width * height * 0.0001))
     missing = _bounded_components(np.uint8(lost) * 255, minimum, width, height)
     for x, y, w, h, pixels in missing:
@@ -146,6 +157,31 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
 
 def _overlaps(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
     return min(left[2], right[2]) > max(left[0], right[0]) and min(left[3], right[3]) > max(left[1], right[1])
+
+
+def _visual_mask(item: dict, box: tuple[int, int, int, int], source_path: Path) -> np.ndarray:
+    x1, y1, x2, y2 = box
+    width, height = x2 - x1, y2 - y1
+    kind = item.get("type")
+    if kind == "image":
+        src = str(item.get("src") or "")
+        path = Path(src)
+        if not path.is_file():
+            path = source_path.parent / "assets" / Path(src).name
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        if image is not None and image.ndim == 3 and image.shape[2] == 4:
+            alpha = cv2.resize(image[:, :, 3], (width, height), interpolation=cv2.INTER_LINEAR)
+            return np.uint8(alpha > 32) * 255
+        return np.full((height, width), 255, np.uint8) if image is not None else np.zeros((height, width), np.uint8)
+    if kind == "ellipse":
+        mask = np.zeros((height, width), np.uint8)
+        cv2.ellipse(mask, (width // 2, height // 2), (max(1, width // 2), max(1, height // 2)), 0, 0, 360, 255, -1)
+        return mask
+    if kind in {"line", "arrow"}:
+        mask = np.zeros((height, width), np.uint8)
+        cv2.line(mask, (0, height // 2), (width - 1, height // 2), 255, max(2, int(float((item.get("style") or {}).get("strokeWidth") or 2)) + 2))
+        return mask
+    return np.full((height, width), 255, np.uint8)
 
 
 def _bounded_components(mask: np.ndarray, minimum: int, width: int, height: int) -> list[tuple[int, int, int, int, int]]:

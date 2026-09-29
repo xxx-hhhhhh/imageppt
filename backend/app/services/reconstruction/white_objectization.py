@@ -354,7 +354,7 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
                 continue
             region = source[y:y + h, x:x + w]
             matching = delta[y:y + h, x:x + w] <= 13
-            if np.mean(matching) < 0.65:
+            if np.mean(matching) < 0.92:
                 continue
             median = np.median(region[matching], axis=0).astype(np.uint8)
             fill = f"#{median[2]:02X}{median[1]:02X}{median[0]:02X}"
@@ -385,7 +385,7 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         median = np.median(region.reshape(-1, 3), axis=0).astype(np.int16)
         if np.max(np.abs(median - page_color)) < 5:
             continue
-        if np.mean(np.max(np.abs(region.astype(np.int16) - median), axis=2) <= 5) < 0.63:
+        if np.mean(np.max(np.abs(region.astype(np.int16) - median), axis=2) <= 5) < 0.92:
             continue
         fill = _hex_bgr(median.astype(np.uint8))
         radius = _rounded_corner_hint(local_mask[y:y + h, x:x + w])

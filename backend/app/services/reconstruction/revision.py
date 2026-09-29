@@ -223,6 +223,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview, target_boxes)
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
+    if _visual_retention_regressed(baseline_audit, candidate_audit):
+        integrity["integrityErrors"].append("source_visual_loss")
     score_after["objectizationAudit"] = candidate_audit
     score_after.setdefault("issues", []).extend(candidate_audit["issues"])
     for key in ("visionProvider", "visionModel", "requestedVisionProvider", "ocrProvider", "conversionMode"):
@@ -294,6 +296,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
+
+
+def _visual_retention_regressed(before: dict, after: dict) -> bool:
+    return (float(after.get("retainedVisualCoverage", 1)) < float(before.get("retainedVisualCoverage", 1)) - 0.01
+            and int(after.get("missingVisualPixels") or 0) > int(before.get("missingVisualPixels") or 0) + 24)
 
 
 def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:
