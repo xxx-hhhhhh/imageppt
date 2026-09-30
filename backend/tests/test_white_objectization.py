@@ -378,3 +378,50 @@ def test_thin_decorative_strips_are_movable_and_detected_by_qa(tmp_path):
     for item in strips:
         PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
     assert len(slide.shapes) == len(strips)
+
+
+def test_group_and_line_bounds_do_not_hide_unrelated_artwork(tmp_path):
+    source = np.full((200, 340, 3), 255, np.uint8)
+    cv2.line(source, (35, 80), (300, 80), (50, 95, 185), 2)
+    icon = np.array([[140, 118], [195, 108], [210, 160], [155, 175]], np.int32)
+    cv2.fillPoly(source, [icon], (70, 145, 40))
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 340, "height": 200}, "elements": [
+        {"id": "module_group", "type": "group", "x": 20, "y": 30, "width": 300, "height": 150,
+         "metadata": {"reconstructionStrategy": "group"}},
+        {"id": "rule", "type": "line", "x": 35, "y": 35, "width": 265, "height": 90,
+         "style": {"stroke": "#B95F32", "strokeWidth": 2},
+         "metadata": {"reconstructionStrategy": "native_shape"}},
+    ]}
+
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "group", 1)
+
+    recovered = [item for item in layout["elements"] if item["type"] == "image" and item["x"] <= 175 <= item["x"] + item["width"]]
+    assert recovered
+    assert all(item["width"] < 100 for item in recovered)
+    for item in recovered:
+        item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    assert np.max(np.abs(cv2.imread(str(preview))[140, 170].astype(int) - source[140, 170].astype(int))) < 10
+    assert np.all(cv2.imread(str(background)) == 255)
+
+
+def test_logical_group_does_not_block_round_asset_classification(tmp_path):
+    source = np.full((160, 260, 3), 255, np.uint8)
+    cv2.circle(source, (90, 80), 27, (45, 95, 185), -1)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 260, "height": 160}, "elements": [
+        {"id": "logical_group", "type": "group", "x": 30, "y": 20, "width": 190, "height": 125,
+         "metadata": {"reconstructionStrategy": "group"}}
+    ]}
+
+    objectize_on_white(source_path, tmp_path / "background.png", layout, tmp_path / "assets", "group", 1)
+
+    badges = [item for item in layout["elements"] if (item.get("metadata") or {}).get("reconstructionStrategySource") == "round_contour"]
+    assert len(badges) == 1
+    asset = cv2.imread(str(tmp_path / "assets" / Path(badges[0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert asset.shape[2] == 4 and asset[0, 0, 3] < 32 and asset[asset.shape[0] // 2, asset.shape[1] // 2, 3] > 220

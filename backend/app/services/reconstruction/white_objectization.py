@@ -18,7 +18,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     asset_dir.mkdir(parents=True, exist_ok=True)
     occupied = np.zeros((height, width), np.uint8)
     elements = layout.setdefault("elements", [])
-    active = [item for item in elements if item.get("type") != "background" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    active = [item for item in elements if item.get("type") not in {"background", "group"} and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for item in active:
         metadata = item.setdefault("metadata", {})
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not item.get("src") and (item.get("style") or {}).get("fill") and metadata.get("reconstructionStrategy") in {None, "local_image", "background_image"}:
@@ -46,6 +46,8 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
                 _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["stroke"]))
         elif item.get("type") == "image":
             _occupy_existing_image(item, occupied, (x1, y1, x2, y2), asset_dir)
+        elif item.get("type") in {"line", "arrow"}:
+            _occupy_existing_stroke(source, occupied, (x1, y1, x2, y2), item.get("style") or {})
         else:
             occupied[y1:y2, x1:x2] = 255
 
@@ -173,6 +175,27 @@ def _occupy_existing_image(item: dict, occupied: np.ndarray, box: tuple[int, int
         occupied[y1:y2, x1:x2][alpha > 32] = 255
     else:
         occupied[y1:y2, x1:x2] = 255
+
+
+def _occupy_existing_stroke(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int], style: dict) -> None:
+    """Claim the connected stroke, leaving unrelated artwork inside its bbox."""
+    x1, y1, x2, y2 = box
+    try:
+        rgb = bytes.fromhex(str(style.get("stroke") or "#17365D").lstrip("#"))
+        if len(rgb) != 3:
+            return
+        color = np.frombuffer(rgb[::-1], dtype=np.uint8).astype(np.int16)
+    except ValueError:
+        return
+    matching = np.uint8(np.max(np.abs(source[y1:y2, x1:x2].astype(np.int16) - color), axis=2) <= 25) * 255
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(matching, 8)
+    center = (y2 - y1) // 2
+    band = max(2, round(float(style.get("strokeWidth") or 2) * 1.5))
+    seed = labels[max(0, center - band):min(y2 - y1, center + band + 1)]
+    selected = set(np.unique(seed)) - {0}
+    for label in selected:
+        if label < count and stats[label, cv2.CC_STAT_AREA] >= 3:
+            occupied[y1:y2, x1:x2][labels == label] = 255
 
 
 def _extract_bordered_containers(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[int, int]:
