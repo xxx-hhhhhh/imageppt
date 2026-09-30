@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.services.reconstruction.residual_objects import is_meaningful_stroke
+from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
 
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
@@ -39,8 +39,9 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             x1, y1, x2, y2 = box
             owner_mask[y1:y2, x1:x2] = cv2.max(owner_mask[y1:y2, x1:x2], _visual_mask(item, box, source_path))
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
+    salient = visual_candidate_mask(source)
     contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
-    lost = (contrast >= 5) & np.all(preview >= 253, axis=2) & (owner_mask == 0)
+    lost = salient & np.all(preview >= 253, axis=2) & (owner_mask == 0)
     # Editable glyphs need not land on precisely the same raster pixels.
     for item in layout.get("elements", []):
         if item.get("type") == "text":
@@ -48,7 +49,6 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             if box:
                 x1, y1, x2, y2 = box
                 lost[y1:y2, x1:x2] = False
-    salient = contrast >= 5
     for item in layout.get("elements", []):
         if item.get("type") == "text":
             box = _box(item, width, height)

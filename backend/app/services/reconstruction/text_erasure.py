@@ -106,7 +106,14 @@ def erase_editable_text_sources(
         if meta.get("textCleaned") and set(owned_text).issubset(set(meta.get("editableTextIds") or [])) and not set(owned_text).intersection(force_asset_reclean_ids or set()):
             continue
         if original.shape[2] == 4 and meta.get("layerRole") == "residual":
-            original[:, :, 3][mask > 0] = 0
+            # A residual asset may be a pale card or ribbon carrying editable
+            # text. Clearing its whole textbox alpha punches a white rectangle
+            # through that support. Reconstruct the local surface instead.
+            alpha = original[:, :, 3]
+            original[:, :, :3] = _clean_residual_surface(original[:, :, :3], alpha, mask, complex_cleaner)
+            nearby_support = cv2.dilate(alpha, np.ones((9, 9), np.uint8))
+            refill = (mask > 0) & (nearby_support > 32)
+            alpha[refill] = np.maximum(alpha[refill], nearby_support[refill])
         elif original.shape[2] == 4:
             rgb = _clean(original[:, :, :3], mask, complex_cleaner)
             original[:, :, :3] = rgb
@@ -126,6 +133,21 @@ def erase_editable_text_sources(
         meta["editableTextIds"] = sorted(set((meta.get("editableTextIds") or []) + owned_text))
         cleaned_assets += 1
     return {"backgroundTextErased": len(texts), "assetTextErased": cleaned_assets}
+
+
+def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray,
+                            complex_cleaner: ComplexTextCleaner | None) -> np.ndarray:
+    """Prefer a flat local plate color when nearby artwork would bleed inward."""
+    ring = cv2.dilate(mask, np.ones((17, 17), np.uint8))
+    samples = rgb[(ring > 0) & (mask == 0) & (alpha > 32)]
+    if len(samples) >= 30:
+        median = np.median(samples, axis=0)
+        flat_fraction = float(np.mean(np.max(np.abs(samples.astype(np.float32) - median), axis=1) <= 12))
+        if flat_fraction >= 0.65:
+            cleaned = rgb.copy()
+            cleaned[mask > 0] = np.uint8(np.round(median))
+            return cleaned
+    return _clean(rgb, mask, complex_cleaner)
 
 
 def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) -> int:

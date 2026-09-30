@@ -5,7 +5,7 @@ import numpy as np
 from pptx import Presentation
 
 from app.services.pptx import renderer as renderer_module
-from app.services.reconstruction.residual_objects import extract_residual_objects
+from app.services.reconstruction.residual_objects import extract_residual_objects, visual_candidate_mask
 
 
 def test_disconnected_visual_parts_group_into_movable_ppt_images(tmp_path, monkeypatch):
@@ -70,3 +70,44 @@ def test_large_irregular_map_and_silk_remain_separate_movable_assets(tmp_path):
     assert any(item["width"] > 500 and item["height"] > 250 for item in assets)
     assert any(item["y"] >= 330 and item["height"] < 60 for item in assets)
     assert stats["residualObjectizationRate"] > 0.95
+
+
+def test_near_white_page_gradient_keeps_cards_and_ribbon_as_local_assets(tmp_path):
+    height, width = 240, 420
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        image[y, :] = (shade, min(255, shade + 1), min(255, shade + 3))
+    cv2.rectangle(image, (35, 45), (175, 145), (244, 244, 253), -1)
+    cv2.rectangle(image, (225, 55), (370, 150), (241, 245, 251), -1)
+    ribbon = np.array([[20, 190], [140, 178], [280, 198], [400, 180], [400, 239], [20, 239]], np.int32)
+    cv2.fillPoly(image, [ribbon], (30, 45, 195))
+
+    mask = visual_candidate_mask(image)
+    assert np.mean(mask) < 0.7
+    assert mask[90, 100] and mask[100, 300] and mask[220, 200]
+    assets, stats = extract_residual_objects(image, np.zeros((height, width), np.uint8), tmp_path / "demo" / "assets", "demo", 1)
+
+    assert stats["residualCoverageArea"] > 25000
+    assert any(item["x"] <= 100 <= item["x"] + item["width"] and item["y"] <= 90 <= item["y"] + item["height"] for item in assets)
+    assert any(item["x"] <= 300 <= item["x"] + item["width"] and item["y"] <= 100 <= item["y"] + item["height"] for item in assets)
+    assert not any(item["x"] <= 100 <= item["x"] + item["width"] and item["x"] <= 300 <= item["x"] + item["width"] and item["y"] <= 90 <= item["y"] + item["height"] for item in assets)
+    assert any(item["y"] >= 175 and item["width"] >= 350 for item in assets)
+    assert all(item["width"] * item["height"] < width * height * 0.5 for item in assets)
+
+
+def test_dense_dark_page_does_not_use_near_white_gradient_filter():
+    image = np.full((120, 220, 3), (30, 32, 35), np.uint8)
+    cv2.rectangle(image, (30, 25), (185, 95), (240, 240, 240), -1)
+    mask = visual_candidate_mask(image)
+    assert mask[50, 100]
+
+
+def test_irregular_ring_keeps_transparent_center_when_extracted(tmp_path):
+    image = np.full((190, 240, 3), 255, np.uint8)
+    cv2.circle(image, (95, 90), 48, (40, 85, 190), 13)
+    assets, _ = extract_residual_objects(image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1)
+    ring = next(item for item in assets if item["x"] <= 95 <= item["x"] + item["width"])
+    png = cv2.imread(str(tmp_path / "demo" / "assets" / ring["src"].split("/")[-1]), cv2.IMREAD_UNCHANGED)
+    assert png.shape[2] == 4
+    assert png[90 - ring["y"], 95 - ring["x"], 3] == 0

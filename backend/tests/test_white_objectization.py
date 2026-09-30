@@ -9,6 +9,7 @@ from pptx import Presentation
 from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization
+from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.pptx.renderer import PPTXRenderer
 from app.services.visual_qa.analyzer import render_preview
 
@@ -425,3 +426,54 @@ def test_logical_group_does_not_block_round_asset_classification(tmp_path):
     assert len(badges) == 1
     asset = cv2.imread(str(tmp_path / "assets" / Path(badges[0]["src"]).name), cv2.IMREAD_UNCHANGED)
     assert asset.shape[2] == 4 and asset[0, 0, 3] < 32 and asset[asset.shape[0] // 2, asset.shape[1] // 2, 3] > 220
+
+
+def test_gradient_page_keeps_card_surfaces_and_ribbon_after_text_cleanup(tmp_path):
+    height, width = 240, 420
+    source = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        source[y, :] = (shade, min(255, shade + 1), min(255, shade + 3))
+    cv2.rectangle(source, (30, 40), (175, 150), (244, 244, 253), -1)
+    cv2.rectangle(source, (220, 40), (375, 150), (242, 245, 252), -1)
+    cv2.putText(source, "CARD", (62, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
+    ribbon = np.array([[15, 185], [140, 175], [280, 192], [405, 177], [405, 239], [15, 239]], np.int32)
+    cv2.fillPoly(source, [ribbon], (30, 45, 190))
+    cv2.putText(source, "MOVE", (170, 217), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 230, 250), 2)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": [
+        {"id": "card_text", "type": "text", "x": 58, "y": 78, "width": 95, "height": 34, "zIndex": 20,
+         "text": "CARD", "metadata": {"rawOCRBBox": [58, 78, 153, 112]}},
+        {"id": "ribbon_text", "type": "text", "x": 166, "y": 193, "width": 95, "height": 32, "zIndex": 20,
+         "text": "MOVE", "metadata": {"rawOCRBBox": [166, 193, 261, 225]}},
+    ]}
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    before = audit_objectization(source_path, background, background, layout)
+    assert before["retainedVisualCoverage"] < 0.4
+    assert before["missingVisualObjects"] + before["missingBackplates"] >= 2
+
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "gradient", 1)
+    visuals = [item for item in layout["elements"] if item["type"] in {"image", "rectangle", "roundedRectangle"}]
+    assert any(item["x"] <= 40 and item["x"] + item["width"] >= 160 for item in visuals)
+    assert any(item["x"] <= 230 and item["x"] + item["width"] >= 360 for item in visuals)
+    assert any(item["y"] >= 170 and item["width"] >= 350 for item in visuals)
+    assert all(item["width"] * item["height"] < width * height * 0.5 for item in visuals if item["type"] == "image")
+    for item in visuals:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    erase_editable_text_sources(background, layout, clean_background=False, project_root=tmp_path)
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    pixels = cv2.imread(str(preview))
+    assert np.all(cv2.imread(str(background)) == 255)
+    assert np.max(np.abs(pixels[60, 45].astype(int) - source[60, 45].astype(int))) < 15
+    assert np.max(np.abs(pixels[205, 100].astype(int) - source[205, 100].astype(int))) < 20
+    report = audit_objectization(source_path, background, preview, layout)
+    assert report["retainedVisualCoverage"] > 0.9
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in visuals:
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(visuals)
