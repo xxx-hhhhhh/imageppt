@@ -44,6 +44,8 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
             _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["fill"]))
             if item["style"].get("stroke"):
                 _occupy_shape_color(source, occupied, (x1, y1, x2, y2), str(item["style"]["stroke"]))
+        elif item.get("type") == "image":
+            _occupy_existing_image(item, occupied, (x1, y1, x2, y2), asset_dir)
         else:
             occupied[y1:y2, x1:x2] = 255
 
@@ -154,6 +156,23 @@ def _occupy_shape_color(source: np.ndarray, occupied: np.ndarray, box: tuple[int
     region = source[y1:y2, x1:x2]
     matching = np.max(np.abs(region.astype(np.int16) - color), axis=2) <= 18
     occupied[y1:y2, x1:x2][matching] = 255
+
+
+def _occupy_existing_image(item: dict, occupied: np.ndarray, box: tuple[int, int, int, int], asset_dir: Path) -> None:
+    """Reserve rendered pixels, not the transparent part of an image's bbox."""
+    x1, y1, x2, y2 = box
+    src = str(item.get("src") or "")
+    path = Path(src)
+    if not path.is_file():
+        path = asset_dir / Path(src).name
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+    if image is None:
+        return
+    if image.ndim == 3 and image.shape[2] == 4:
+        alpha = cv2.resize(image[:, :, 3], (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+        occupied[y1:y2, x1:x2][alpha > 32] = 255
+    else:
+        occupied[y1:y2, x1:x2] = 255
 
 
 def _extract_bordered_containers(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[int, int]:

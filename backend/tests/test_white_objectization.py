@@ -305,3 +305,41 @@ def test_large_map_silk_and_pale_card_survive_white_objectization(tmp_path):
         PPTXRenderer()._add_element(slide, item, 0.01, 0.01)
     assert len(slide.shapes) == len(layout["elements"])
     assert sum(shape.shape_type == 13 for shape in slide.shapes) >= 2
+
+
+def test_transparent_existing_image_does_not_claim_separate_visual_in_its_bbox(tmp_path):
+    source = np.full((180, 320, 3), 255, np.uint8)
+    first = np.array([[35, 45], [95, 35], [110, 105], [55, 125]], np.int32)
+    second = np.array([[190, 55], [260, 35], [275, 110], [210, 125]], np.int32)
+    cv2.fillPoly(source, [first], (50, 105, 185))
+    cv2.fillPoly(source, [second], (80, 145, 70))
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    cv2.imwrite(str(source_path), source)
+    existing = np.zeros((120, 270, 4), np.uint8)
+    existing[:, :, :3] = source[20:140, 25:295]
+    mask = np.zeros(source.shape[:2], np.uint8)
+    cv2.fillPoly(mask, [first], 255)
+    existing[:, :, 3] = mask[20:140, 25:295]
+    existing_path = asset_dir / "existing.png"
+    cv2.imwrite(str(existing_path), existing)
+    layout = {"slide": {"width": 320, "height": 180}, "elements": [
+        {"id": "existing", "type": "image", "x": 25, "y": 20, "width": 270, "height": 120,
+         "zIndex": 2, "src": str(existing_path), "metadata": {"reconstructionStrategy": "cutout_image"}}
+    ]}
+
+    objectize_on_white(source_path, background, layout, asset_dir, "transparent", 1)
+
+    recovered = [item for item in layout["elements"] if item["id"] != "existing" and item["type"] == "image" and item["x"] <= 230 <= item["x"] + item["width"]]
+    assert recovered, [(item["id"], item["type"], item["x"], item["width"]) for item in layout["elements"]]
+    assert all(item["width"] < 120 for item in recovered)
+    for item in recovered:
+        item["src"] = str(asset_dir / Path(item["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    pixels = cv2.imread(str(preview))
+    for y, x in ((75, 75), (70, 235)):
+        assert np.max(np.abs(pixels[y, x].astype(int) - source[y, x].astype(int))) < 10
+    assert np.all(cv2.imread(str(background)) == 255)
