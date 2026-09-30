@@ -8,6 +8,7 @@ from pptx import Presentation
 
 from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
+from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.pptx.renderer import PPTXRenderer
 from app.services.visual_qa.analyzer import render_preview
 
@@ -343,3 +344,37 @@ def test_transparent_existing_image_does_not_claim_separate_visual_in_its_bbox(t
     for y, x in ((75, 75), (70, 235)):
         assert np.max(np.abs(pixels[y, x].astype(int) - source[y, x].astype(int))) < 10
     assert np.all(cv2.imread(str(background)) == 255)
+
+
+def test_thin_decorative_strips_are_movable_and_detected_by_qa(tmp_path):
+    source = np.full((180, 320, 3), 255, np.uint8)
+    source[42, 30:230] = (50, 95, 185)
+    source[65:155, 275] = (40, 150, 80)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    preview = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    missing = audit_objectization(source_path, background, background, {"elements": []})
+    assert missing["missingVisualObjects"] == 2
+    layout = {"slide": {"width": 320, "height": 180}, "elements": []}
+
+    stats = objectize_on_white(source_path, background, layout, tmp_path / "assets", "strips", 1)
+
+    strips = [item for item in layout["elements"] if item["type"] == "image"]
+    assert stats["whiteObjectAssets"] >= 2 and len(strips) >= 2
+    assert any(item["height"] <= 5 and item["width"] >= 190 for item in strips)
+    assert any(item["width"] <= 5 and item["height"] >= 85 for item in strips)
+    for item in strips:
+        item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background, layout, preview)
+    report = audit_objectization(source_path, background, preview, layout)
+    assert report["missingVisualObjects"] == 0
+    pixels = cv2.imread(str(preview))
+    assert np.max(np.abs(pixels[42, 100].astype(int) - source[42, 100].astype(int))) < 10
+    assert np.max(np.abs(pixels[100, 275].astype(int) - source[100, 275].astype(int))) < 10
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in strips:
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(strips)

@@ -23,7 +23,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
     components = []
     for label in range(1, count):
         x, y, w, h, pixels = [int(value) for value in stats[label]]
-        if pixels < minimum or w < 2 or h < 2:
+        if pixels < minimum or ((w < 2 or h < 2) and not is_meaningful_stroke(w, h, pixels, width, height)):
             continue
         if _page_environment((x, y, x + w, y + h), pixels, width, height):
             continue
@@ -78,6 +78,12 @@ def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, h
     margin_x, margin_y = max(5, round(width * 0.03)), max(5, round(height * 0.03))
     near_all_edges = x1 <= margin_x and y1 <= margin_y and x2 >= width - margin_x and y2 >= height - margin_y
     return near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.82
+
+
+def is_meaningful_stroke(w: int, h: int, pixels: int, width: int, height: int) -> bool:
+    """Keep long narrow accents while rejecting isolated single-pixel noise."""
+    short, long = min(w, h), max(w, h)
+    return short <= 3 and long >= max(24, round(max(width, height) * 0.06)) and long / max(1, short) >= 8 and pixels >= max(12, round(long * 0.55))
 
 
 def _border_color(source: np.ndarray) -> np.ndarray:

@@ -157,6 +157,34 @@ def test_revision_recovers_complex_unowned_visual_as_movable_image(tmp_path, mon
     assert len(slide.shapes) == 1
 
 
+def test_revision_recovers_missing_thin_decorative_strip(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("strip-revision")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 320, 3), 255, np.uint8)
+    source[70, 45:245] = (45, 90, 185)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"slide": {"width": 320, "height": 180}, "elements": []}
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds" / "page_1.png", layout, root / "reconstructed_preview.png")
+    score = run_visual_qa(root / "source.png", root / "reconstructed_preview.png", root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is True
+    assert any(issue["problem"] == "missingVisualObject" for issue in result["issuesBefore"])
+    assert not any(issue["problem"] == "missingVisualObject" for issue in result["issuesAfter"])
+    images = [item for item in store.get_slide(project_id, 1)["elements"] if item["type"] == "image"]
+    assert len(images) == 1 and images[0]["height"] <= 3
+    assert (root / "assets" / Path(images[0]["src"]).name).is_file()
+    actual = cv2.imread(str(root / "reconstructed_preview.png"))
+    assert np.max(np.abs(actual[70, 100].astype(int) - source[70, 100].astype(int))) < 10
+
+
 def test_debug_artifact_is_retrievable_from_existing_project_route(tmp_path, monkeypatch):
     store = ProjectStore(tmp_path)
     project_id = store.create("debug-audit")["id"]

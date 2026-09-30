@@ -7,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.services.reconstruction.residual_objects import is_meaningful_stroke
+
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
 
@@ -199,7 +201,7 @@ def _bounded_components(mask: np.ndarray, minimum: int, width: int, height: int)
     result = []
     for index in range(1, count):
         x, y, w, h, pixels = [int(value) for value in stats[index]]
-        if pixels < minimum or w < 5 or h < 4 or w * h > width * height * 0.62:
+        if pixels < minimum or ((w < 5 or h < 4) and not is_meaningful_stroke(w, h, pixels, width, height)) or w * h > width * height * 0.62:
             continue
         result.append((x, y, w, h, pixels))
     return result[:50]
