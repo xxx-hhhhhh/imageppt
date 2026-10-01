@@ -160,6 +160,7 @@ class ReconstructionPipeline:
             "residualCoverageArea": 0,
             "residualCandidateArea": 0,
             "residualObjectizationRate": 0.0,
+            "initialRecoveredVisuals": 0,
             "movableVisualCoverage": 0.0,
             "textFallbackCutouts": 0,
             "plannerSuppressedElements": 0,
@@ -372,9 +373,10 @@ class ReconstructionPipeline:
                 reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
                 layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
             if white_objectized:
-                reconstruction_stats["initialRecoveredVisuals"] = recover_initial_missing_regions(
+                reconstruction_stats["initialRecoveredVisuals"] += recover_initial_missing_regions(
                     normalized_path, background_path, preview_path, layout, page_output / "assets", project_id, page_index)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            score["initialRecoveredVisuals"] = reconstruction_stats["initialRecoveredVisuals"]
             if white_objectized:
                 score["objectizationQA"] = object_qa
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
@@ -526,6 +528,7 @@ class ReconstructionPipeline:
                 "residualCoverageArea": reconstruction_stats["residualCoverageArea"],
                 "residualCandidateArea": reconstruction_stats["residualCandidateArea"],
                 "residualObjectizationRate": reconstruction_stats["residualObjectizationRate"],
+                "initialRecoveredVisuals": reconstruction_stats["initialRecoveredVisuals"],
                 "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],

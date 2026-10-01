@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from pptx import Presentation
 
-from app.services.reconstruction.white_objectization import objectize_on_white
+from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
@@ -515,6 +515,42 @@ def test_group_and_line_bounds_do_not_hide_unrelated_artwork(tmp_path):
     render_preview(background, layout, preview)
     assert np.max(np.abs(cv2.imread(str(preview))[140, 170].astype(int) - source[140, 170].astype(int))) < 10
     assert np.all(cv2.imread(str(background)) == 255)
+
+
+def test_native_white_card_stays_below_chart_detail_asset(tmp_path):
+    source = np.full((120, 220, 3), 255, np.uint8)
+    cv2.line(source, (50, 80), (170, 45), (45, 75, 130), 4)
+    alpha = np.zeros(source.shape[:2], np.uint8)
+    cv2.line(alpha, (50, 80), (170, 45), 255, 4)
+    asset = tmp_path / "chart.png"
+    cv2.imwrite(str(asset), np.dstack((source, alpha)))
+    layout = {"slide": {"width": 220, "height": 120}, "elements": [
+        {"id": "chart_detail", "type": "image", "x": 0, "y": 0, "width": 220, "height": 120,
+         "zIndex": 1, "src": str(asset), "metadata": {"layerRole": "residual", "reconstructionStrategy": "cutout_image"}},
+        {"id": "card", "type": "roundedRectangle", "x": 35, "y": 30, "width": 150, "height": 65,
+         "zIndex": 10, "style": {"fill": "#FEFEFE", "stroke": "#FEFEFE"},
+         "metadata": {"reconstructionStrategy": "native_shape"}},
+    ]}
+
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    before_preview = tmp_path / "before.png"
+    render_preview(background, layout, before_preview)
+    before = audit_objectization(source_path, background, before_preview, layout)
+    assert before["coveredMissingVisualPixels"] > 100
+    assert before["missingVisualObjects"] >= 1
+
+    layer_objectized_elements(layout["elements"])
+
+    assert layout["elements"][0]["zIndex"] > layout["elements"][1]["zIndex"]
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    rendered = cv2.imread(str(preview))
+    assert np.max(np.abs(rendered[65, 105].astype(np.int16) - source[65, 105].astype(np.int16))) < 5
+    after = audit_objectization(source_path, background, preview, layout)
+    assert after["coveredMissingVisualPixels"] < before["coveredMissingVisualPixels"]
 
 
 def test_logical_group_does_not_block_round_asset_classification(tmp_path):

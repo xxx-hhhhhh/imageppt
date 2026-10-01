@@ -22,7 +22,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
-              "missingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
+              "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
@@ -46,7 +46,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     # White details inside a badge or card can be intentional. Only count pixels
     # that actually changed to white, rather than every white source pixel.
     erased = np.all(preview >= 253, axis=2) & (np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2) >= 2)
-    lost = salient & erased & (owner_mask == 0)
+    lost = salient & erased
     # Editable glyphs need not land on precisely the same raster pixels.
     for item in layout.get("elements", []):
         if item.get("type") == "text":
@@ -70,6 +70,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report["largestMissingVisualRegion"] = int(np.max(component_stats[1:, cv2.CC_STAT_AREA])) if component_count > 1 else 0
     report["salientVisualPixels"] = int(np.count_nonzero(salient))
     report["missingVisualPixels"] = missing_pixels
+    report["coveredMissingVisualPixels"] = int(np.count_nonzero(missing_mask & (owner_mask != 0)))
     report["retainedVisualCoverage"] = round(1 - missing_pixels / max(1, int(np.count_nonzero(salient))), 4)
     minimum = max(24, round(width * height * 0.0001))
     color_error = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
@@ -81,8 +82,11 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     missing = _bounded_components(np.uint8(lost) * 255, max(40, round(width * height * 0.00003)), width, height)
     for x, y, w, h, pixels in missing:
         patch = source[y:y + h, x:x + w]
-        median = np.median(patch.reshape(-1, 3), axis=0)
-        flat = float(np.mean(np.max(np.abs(patch.astype(np.float32) - median), axis=2) <= 9)) >= 0.65
+        # Judge the missing pixels, not their often-white bounding rectangle.
+        # A thin chart line inside a large white box is still a visual object.
+        colors = patch[lost[y:y + h, x:x + w]]
+        median = np.median(colors, axis=0)
+        flat = float(np.mean(np.max(np.abs(colors.astype(np.float32) - median), axis=1) <= 9)) >= 0.65
         pale = float(np.max(np.abs(median - page_color))) <= 35
         problem = "missingBackplate" if flat and pale else "missingVisualObject"
         report["missingBackplates" if problem == "missingBackplate" else "missingVisualObjects"] += 1

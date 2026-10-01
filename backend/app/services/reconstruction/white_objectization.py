@@ -177,7 +177,9 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
 
 def layer_objectized_elements(elements: list[dict]) -> None:
     """Keep card fill below its visual details and editable labels above both."""
-    containers = [item for item in elements if (item.get("metadata") or {}).get("layerRole") == "container"]
+    containers = [item for item in elements if not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
+                  and ((item.get("metadata") or {}).get("layerRole") == "container"
+                       or item.get("type") in {"rectangle", "roundedRectangle", "ellipse"} and (item.get("style") or {}).get("fill"))]
     residuals = [item for item in elements if (item.get("metadata") or {}).get("layerRole") == "residual"]
     texts = [item for item in elements if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for asset in residuals:
