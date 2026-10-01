@@ -78,29 +78,32 @@ def visual_candidate_mask(source: np.ndarray) -> np.ndarray:
     baseline = _border_color(source)
     difference = np.max(np.abs(source.astype(np.int16) - baseline), axis=2)
     candidate = difference >= 5
-    if float(np.mean(candidate)) < 0.70:
-        return candidate
+    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
+    background_hsv = cv2.cvtColor(np.uint8([[baseline.astype(np.uint8)]]), cv2.COLOR_BGR2HSV)[0, 0]
+    pale_background = int(background_hsv[2]) >= 235 and int(background_hsv[1]) <= 25
+    saturation_floor = max(6, int(background_hsv[1]) + 2)
+    diffuse_candidate = float(np.mean(candidate)) >= 0.70
+    neutral_plates = (_neutral_local_surfaces(hsv, saturation_floor, min_contrast=5 if diffuse_candidate else 1)
+                      if pale_background else np.zeros(candidate.shape, np.bool_))
+    if not diffuse_candidate:
+        return candidate | neutral_plates
     # A near-white gradient can differ from the sampled border by five levels
     # across most of a page. Preserve chromatic and dark artwork while dropping
     # that diffuse wash. Bounded pale surfaces remain detectable on simpler pages.
-    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
-    background_hsv = cv2.cvtColor(np.uint8([[baseline.astype(np.uint8)]]), cv2.COLOR_BGR2HSV)[0, 0]
-    if int(background_hsv[2]) < 235 or int(background_hsv[1]) > 25:
+    if not pale_background:
         return candidate
-    saturation_floor = max(6, int(background_hsv[1]) + 2)
     dark_ceiling = min(235, int(background_hsv[2]) - 16)
     chromatic_or_dark = (hsv[:, :, 1] >= saturation_floor) | (hsv[:, :, 2] <= dark_ceiling)
-    neutral_plates = _neutral_local_surfaces(hsv, saturation_floor)
-    return candidate & (chromatic_or_dark | neutral_plates)
+    return (candidate & chromatic_or_dark) | neutral_plates
 
 
-def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int) -> np.ndarray:
+def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contrast: int = 5) -> np.ndarray:
     """Recover bounded pale gray plates without claiming a page-wide wash."""
     height, width = hsv.shape[:2]
     band = max(4, round(width * 0.04))
     edge_values = np.concatenate((hsv[:, :band, 2], hsv[:, -band:, 2]), axis=1)
     row_value = np.median(edge_values, axis=1).astype(np.int16)
-    darker = row_value[:, None] - hsv[:, :, 2].astype(np.int16) >= 5
+    darker = row_value[:, None] - hsv[:, :, 2].astype(np.int16) >= min_contrast
     mask = np.uint8((hsv[:, :, 1] < saturation_floor) & darker) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
@@ -111,7 +114,10 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int) -> np.ndarra
         area = w * h
         if pixels < minimum or w < 10 or h < 8 or area > width * height * 0.4:
             continue
-        if x == 0 or y == 0 or x + w == width or y + h == height:
+        if w > width * 0.8 or h > height * 0.8:
+            continue
+        margin_x, margin_y = max(2, round(width * 0.02)), max(2, round(height * 0.02))
+        if x < margin_x or y < margin_y or x + w > width - margin_x or y + h > height - margin_y:
             continue
         if pixels / max(1, area) < 0.72:
             continue

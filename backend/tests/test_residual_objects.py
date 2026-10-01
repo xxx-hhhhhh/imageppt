@@ -116,6 +116,25 @@ def test_near_white_page_gradient_keeps_cards_and_ribbon_as_local_assets(tmp_pat
     assert all(item["width"] * item["height"] < width * height * 0.5 for item in assets)
 
 
+def test_neutral_plate_one_level_darker_than_gradient_is_movable(tmp_path):
+    height, width = 240, 420
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        image[y, :] = (shade, shade, shade)
+    assert not np.any(visual_candidate_mask(image))
+    cv2.rectangle(image, (70, 60), (190, 150), (248, 248, 248), -1)
+
+    assets, stats = extract_residual_objects(
+        image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1,
+    )
+
+    assert len(assets) == 1
+    assert assets[0]["x"] <= 70 and assets[0]["y"] <= 60
+    assert assets[0]["x"] + assets[0]["width"] >= 190
+    assert stats["residualObjectizationRate"] > 0.99
+
+
 def test_dense_dark_page_does_not_use_near_white_gradient_filter():
     image = np.full((120, 220, 3), (30, 32, 35), np.uint8)
     cv2.rectangle(image, (30, 25), (185, 95), (240, 240, 240), -1)
