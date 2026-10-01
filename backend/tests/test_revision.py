@@ -410,6 +410,35 @@ def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, 
     assert cv2.imread(str(preview))[150, 150].tolist() == [52, 31, 21]
 
 
+def test_revision_restores_large_textured_visual_without_whitening(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("large-texture-revision")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((200, 400, 3), 255, np.uint8)
+    for y in range(20, 180):
+        source[y, 20:380] = (50 + y // 4, 110, 190)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"slide": {"width": 400, "height": 200}, "elements": []}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is True, result.get("integrityErrors")
+    assert any(issue["problem"] == "largeVisualLoss" for issue in result["issuesBefore"])
+    assert result["missingAssetCount"] == 0
+    assert not result["rollbackTriggered"]
+    assert any(item["type"] == "image" for item in store.get_slide(project_id, 1)["elements"])
+    assert cv2.imread(str(preview))[100, 100].tolist() == source[100, 100].tolist()
+
+
 def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)

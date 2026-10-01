@@ -169,6 +169,56 @@ def test_audit_flags_tiny_solid_corner_mark_lost_on_large_slide(tmp_path):
     assert report["issues"][-1]["bbox"][0] <= 130
 
 
+def test_large_bounded_visual_loss_is_reported_and_recovered_as_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    root = tmp_path / "demo"
+    (root / "backgrounds").mkdir(parents=True)
+    source = np.full((200, 400, 3), 255, np.uint8)
+    cv2.rectangle(source, (20, 20), (379, 179), (50, 110, 190), -1)
+    source_path = root / "source.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    preview_path = root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(preview_path), np.full_like(source, 255))
+    layout = {"slide": {"width": 400, "height": 200}, "elements": []}
+
+    before = audit_objectization(source_path, background_path, preview_path, layout)
+    assert before["missingVisualPixels"] > 50000
+    assert any(issue["problem"] == "largeVisualLoss" for issue in before["issues"])
+    recovered = recover_initial_missing_regions(source_path, background_path, preview_path,
+                                                layout, root / "assets", "demo", 1)
+
+    assert recovered == 1
+    assert layout["elements"][0]["type"] == "rectangle"
+    assert audit_objectization(source_path, background_path, preview_path, layout)["missingVisualPixels"] == 0
+    assert np.all(cv2.imread(str(background_path)) == 255)
+
+
+def test_large_textured_visual_loss_recovers_as_movable_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    root = tmp_path / "demo"
+    (root / "backgrounds").mkdir(parents=True)
+    source = np.full((200, 400, 3), 255, np.uint8)
+    for y in range(20, 180):
+        source[y, 20:380] = (50 + y // 4, 110, 190)
+    source_path = root / "source.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    preview_path = root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(preview_path), np.full_like(source, 255))
+    layout = {"slide": {"width": 400, "height": 200}, "elements": []}
+
+    recovered = recover_initial_missing_regions(source_path, background_path, preview_path,
+                                                layout, root / "assets", "demo", 1)
+
+    assert recovered == 1
+    assert layout["elements"][0]["type"] == "image"
+    assert (root / "assets" / Path(layout["elements"][0]["src"]).name).is_file()
+    assert audit_objectization(source_path, background_path, preview_path, layout)["missingVisualPixels"] == 0
+
+
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)

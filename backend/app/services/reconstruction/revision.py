@@ -24,7 +24,7 @@ from app.services.reconstruction.text_erasure import count_text_ghosting, erase_
 from app.services.reconstruction.white_objectization import detect_flat_page_surface
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
-OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "pageSurfaceLost", "monolithicPageImage"}
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "pageSurfaceLost", "monolithicPageImage"}
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -111,7 +111,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         issue.get("problem") == "missingEditableText"
         and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
     )]
-    priority = {"ghosting": 0, "pageSurfaceLost": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
+    priority = {"ghosting": 0, "pageSurfaceLost": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
                 "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
                 "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
@@ -344,7 +344,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "monolithicPageImage", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
@@ -465,7 +465,7 @@ def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate:
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "monolithicPageImage", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
             issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)

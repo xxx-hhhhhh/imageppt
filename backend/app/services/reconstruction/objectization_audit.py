@@ -129,6 +129,12 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     missing_pixels = int(np.count_nonzero(missing_mask))
     component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(missing_mask, 8)
     report["largestMissingVisualRegion"] = int(np.max(component_stats[1:, cv2.CC_STAT_AREA])) if component_count > 1 else 0
+    for index in range(1, component_count):
+        x, y, w, h, pixels = [int(value) for value in component_stats[index]]
+        if pixels >= width * height * 0.62:
+            report["missingVisualObjects"] += 1
+            report["issues"].append({"problem": "largeVisualLoss", "elementId": f"large_unowned_{x}_{y}",
+                                     "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
     report["salientVisualPixels"] = int(np.count_nonzero(salient))
     report["missingVisualPixels"] = missing_pixels
     report["coveredMissingVisualPixels"] = int(np.count_nonzero(missing_mask & (owner_mask != 0)))
@@ -218,7 +224,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
     asset_dir.mkdir(parents=True, exist_ok=True)
     created = []
     for issue in issues:
-        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch"}:
+        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch"}:
             continue
         box = issue.get("bbox")
         if not isinstance(box, list) or len(box) != 4:
@@ -239,7 +245,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
         median = np.median(crop.reshape(-1, 3), axis=0).astype(np.uint8)
         flat = float(np.mean(np.max(np.abs(crop.astype(np.int16) - median.astype(np.int16)), axis=2) <= 9)) >= 0.75
         common = {"id": identifier, "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "zIndex": z_index, "rotation": 0, "groupId": group, "metadata": metadata}
-        if issue["problem"] == "missingBackplate" and flat:
+        if issue["problem"] in {"missingBackplate", "largeVisualLoss"} and flat:
             color = f"#{median[2]:02X}{median[1]:02X}{median[0]:02X}"
             common.update({"type": "rectangle", "style": {"fill": color, "stroke": color, "strokeWidth": 0, "opacity": 1}})
             metadata["reconstructionStrategy"] = "native_shape"
@@ -298,7 +304,7 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
     from app.services.visual_qa.analyzer import render_preview
 
     before = audit_objectization(source_path, background_path, preview_path, layout)
-    issues = [issue for issue in before["issues"] if issue.get("problem") in {"missingBackplate", "missingVisualObject"}]
+    issues = [issue for issue in before["issues"] if issue.get("problem") in {"missingBackplate", "missingVisualObject", "largeVisualLoss"}]
     candidate = copy.deepcopy(layout)
     created = repair_missing_regions(source_path, candidate, issues, asset_dir, project_id, 0,
                                      asset_prefix=f"initial_page_{page_index}", preview_path=preview_path)
