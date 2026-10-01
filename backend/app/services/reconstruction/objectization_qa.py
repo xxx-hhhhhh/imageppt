@@ -75,8 +75,12 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
                     cv2.ellipse(visual_mask, ((left + right) // 2, (top + bottom) // 2),
                                 (max(1, (right - left) // 2), max(1, (bottom - top) // 2)),
                                 0, 0, 360, 255, -1)
+                elif item.get("type") == "image" and _mark_image_alpha(visual_mask, item, asset_dir, (x, y, w, h)):
+                    pass
                 else:
                     visual_mask[top:bottom, left:right] = 255
+            if np.any(visual_mask):
+                visual_mask = cv2.dilate(visual_mask, np.ones((3, 3), np.uint8))
             repair_mask = cv2.max(text_mask, visual_mask)
             clean = cv2.inpaint(crop, repair_mask, 3, cv2.INPAINT_TELEA) if np.any(repair_mask) else crop
             alpha = np.zeros((h, w), np.uint8)
@@ -133,6 +137,30 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             report["issues"].append({"problem": "roundCutoutQualityLow", "elementId": item.get("id")})
     report["unresolvedBackplates"] = report["missingBackplates"] - report["recoveredBackplates"] - report["reboundBackplates"] - report["moduleImageFallbacks"]
     return report
+
+
+def _mark_image_alpha(mask: np.ndarray, item: dict, asset_dir: Path,
+                      plate: tuple[int, int, int, int]) -> bool:
+    """Mask only visible pixels of a transparent foreground image."""
+    path = asset_dir / Path(str(item.get("src") or "")).name
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+    if image is None or image.ndim != 3 or image.shape[2] != 4:
+        return False
+    px, py, width, height = plate
+    ix1, iy1, ix2, iy2 = _box(item)
+    left, top = max(0, round(ix1 - px)), max(0, round(iy1 - py))
+    right, bottom = min(width, round(ix2 - px)), min(height, round(iy2 - py))
+    if right <= left or bottom <= top:
+        return False
+    scaled = cv2.resize(image[:, :, 3], (max(1, round(ix2 - ix1)), max(1, round(iy2 - iy1))),
+                        interpolation=cv2.INTER_LINEAR)
+    offset_x, offset_y = left - round(ix1 - px), top - round(iy1 - py)
+    visible = scaled[offset_y:offset_y + bottom - top, offset_x:offset_x + right - left]
+    if visible.shape != (bottom - top, right - left):
+        return False
+    region = mask[top:bottom, left:right]
+    region[visible > 32] = 255
+    return True
 
 
 def _local_plate(source: np.ndarray, foreground: list[dict]) -> tuple[int, int, int, int, str, bool, np.ndarray] | None:

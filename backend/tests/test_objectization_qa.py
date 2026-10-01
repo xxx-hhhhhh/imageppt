@@ -130,6 +130,7 @@ def test_textured_backplate_keeps_image_icon_independently_movable(tmp_path, mon
     plate = next(item for item in layout["elements"] if (item.get("metadata") or {}).get("layerRole") == "container")
     assert plate["metadata"]["foregroundCleaned"] is True
     cleaned = cv2.imread(str(asset_dir / Path(plate["src"]).name), cv2.IMREAD_UNCHANGED)
+    np.testing.assert_array_equal(cleaned[63 - plate["y"], 60 - plate["x"], :3], source[63, 60])
     assert np.max(np.abs(cleaned[78 - plate["y"], 75 - plate["x"], :3].astype(int)
                          - np.array([30, 100, 190]))) > 50
     deck = Presentation()
