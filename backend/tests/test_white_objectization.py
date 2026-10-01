@@ -14,6 +14,31 @@ from app.services.pptx.renderer import PPTXRenderer
 from app.services.visual_qa.analyzer import render_preview
 
 
+def test_dark_flat_page_is_a_movable_shape_over_white_base(tmp_path):
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.putText(source, "Dark", (35, 75), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "title", "type": "text", "x": 35, "y": 45, "width": 100, "height": 45,
+         "text": "Dark", "zIndex": 1, "style": {"color": "#f5f5f5", "fontSize": 32},
+         "metadata": {"rawOCRBBox": [35, 45, 135, 90]}}]}
+    objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "demo", 1)
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    surfaces = [item for item in layout["elements"] if (item.get("metadata") or {}).get("pageSurface")]
+    assert len(surfaces) == 1
+    assert surfaces[0]["type"] == "rectangle"
+    assert surfaces[0]["style"]["fill"].lower() == "#151f34"
+    assert surfaces[0]["zIndex"] < layout["elements"][0]["zIndex"]
+    assert layout["elements"][0]["type"] == "text"
+    preview_path = tmp_path / "preview.png"
+    render_preview(background_path, layout, preview_path)
+    preview = cv2.imread(str(preview_path))
+    assert np.array_equal(preview[150, 150], np.array([52, 31, 21]))
+    assert audit_objectization(source_path, background_path, preview_path, layout)["pageSurfaceMismatchPixels"] < 1000
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)

@@ -10,6 +10,20 @@ import numpy as np
 from app.services.reconstruction.residual_objects import dense_visual_artwork, extract_residual_objects
 
 
+def detect_flat_page_surface(source: np.ndarray) -> np.ndarray | None:
+    """Find a genuinely flat page fill so it can be an editable shape."""
+    height, width = source.shape[:2]
+    border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+    color = np.median(border, axis=0).astype(np.uint8)
+    if int(np.max(255 - color)) < 12:
+        return None
+    difference = np.max(np.abs(source.astype(np.int16) - color.astype(np.int16)), axis=2)
+    border_difference = np.max(np.abs(border.astype(np.int16) - color.astype(np.int16)), axis=1)
+    if float(np.mean(border_difference <= 10)) < 0.90 or float(np.mean(difference <= 10)) < 0.85:
+        return None
+    return color
+
+
 def objectize_on_white(source_path: Path, background_path: Path, layout: dict, asset_dir: Path, project_id: str, page_index: int) -> dict[str, int]:
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
@@ -18,6 +32,9 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     asset_dir.mkdir(parents=True, exist_ok=True)
     occupied = np.zeros((height, width), np.uint8)
     elements = layout.setdefault("elements", [])
+    for item in elements:
+        if item.get("type") == "background":
+            item["zIndex"] = -1000
     active = [item for item in elements if item.get("type") not in {"background", "group"} and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for item in active:
         metadata = item.setdefault("metadata", {})
@@ -69,12 +86,20 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     residual_stats["residualObjectizationRate"] = round(covered_pixels / candidate_pixels, 4) if candidate_pixels else 1.0
     residual_stats["textShadowDiscardedCount"] = len(shadow_assets)
     elements.extend(residual_assets)
+    page_surface = detect_flat_page_surface(source)
+    if page_surface is not None:
+        elements.append({"id": f"page_surface_{page_index}", "type": "rectangle", "x": 0, "y": 0,
+                         "width": width, "height": height, "rotation": 0, "zIndex": -999,
+                         "style": {"fill": _hex_bgr(page_surface), "opacity": 1},
+                         "metadata": {"reconstructionStrategy": "native_shape",
+                                      "reconstructionStrategySource": "flat_page_surface",
+                                      "layerRole": "page_surface", "pageSurface": True}})
     layer_objectized_elements(elements)
     background_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes, "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
 
 
 def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> int:
@@ -177,7 +202,7 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
 
 def layer_objectized_elements(elements: list[dict]) -> None:
     """Keep card fill below its visual details and editable labels above both."""
-    containers = [item for item in elements if not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
+    containers = [item for item in elements if not (item.get("metadata") or {}).get("pageSurface") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
                   and ((item.get("metadata") or {}).get("layerRole") == "container"
                        or item.get("type") in {"rectangle", "roundedRectangle", "ellipse"} and (item.get("style") or {}).get("fill"))]
     visuals = [item for item in elements if item.get("type") == "image"

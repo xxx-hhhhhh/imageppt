@@ -11,6 +11,7 @@ import numpy as np
 
 from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
 from app.services.reconstruction.visual_asset_ownership import count_duplicate_planned_visual_pixels
+from app.services.reconstruction.white_objectization import detect_flat_page_surface
 
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
@@ -24,12 +25,20 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
-              "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0,
+              "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
         return report
     height, width = source.shape[:2]
+    page_surface = detect_flat_page_surface(source)
+    if page_surface is not None:
+        source_difference = np.max(np.abs(source.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
+        preview_difference = np.max(np.abs(preview.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
+        report["pageSurfaceMismatchPixels"] = int(np.count_nonzero((source_difference <= 10) & (preview_difference >= 20)))
+        if report["pageSurfaceMismatchPixels"] > max(100, round(width * height * 0.02)):
+            report["issues"].append({"problem": "pageSurfaceLost", "bbox": [0, 0, width, height],
+                                     "pixelArea": report["pageSurfaceMismatchPixels"]})
     report["duplicatePlannedVisualPixels"] = count_duplicate_planned_visual_pixels(layout, source_path.parent / "assets")
     if report["duplicatePlannedVisualPixels"] >= max(100, round(width * height * 0.0001)):
         report["issues"].append({"problem": "duplicatePlannedVisualOwnership",

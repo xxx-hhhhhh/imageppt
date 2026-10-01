@@ -408,7 +408,8 @@ def _visual_retention_regressed(before: dict, after: dict) -> bool:
     pale_before = int(before.get("paleAssetGapPixels") or 0)
     pale_growth = int(after.get("paleAssetGapPixels") or 0) - pale_before
     lost_pale_support = pale_growth > max(48, min(300, round(pale_before * 0.015)))
-    return lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support
+    surface_growth = int(after.get("pageSurfaceMismatchPixels") or 0) - int(before.get("pageSurfaceMismatchPixels") or 0)
+    return lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support or surface_growth > 100
 
 
 def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:

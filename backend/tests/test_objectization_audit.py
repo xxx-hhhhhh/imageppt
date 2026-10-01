@@ -21,6 +21,18 @@ from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 FIXTURE = Path(__file__).parent / "fixtures" / "complex_modules.png"
 
 
+def test_audit_catches_flat_dark_surface_lost_to_white(tmp_path):
+    source = np.full((120, 200, 3), (52, 31, 21), np.uint8)
+    cv2.putText(source, "A", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+    assert report["pageSurfaceMismatchPixels"] > 20000
+    assert any(issue["problem"] == "pageSurfaceLost" for issue in report["issues"])
+
+
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)
