@@ -152,6 +152,12 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     const up = (upEvent: PointerEvent) => {
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
       const [dx, dy] = boundedModuleDelta(page, movingIds, (upEvent.clientX - startX) / scaleX, (upEvent.clientY - startY) / scaleY);
+      target.closest('.canvas-overlay')?.querySelectorAll<HTMLElement>('[data-element-id]').forEach((node) => {
+        if (movingIds.includes(node.dataset.elementId || '')) {
+          const member = page.elements.find((item) => item.id === node.dataset.elementId);
+          node.style.transform = `rotate(${member?.rotation || 0}deg)`;
+        }
+      });
       onChange({ ...page, elements: page.elements.map((item) => movingIds.includes(item.id) ? { ...item, x: item.x + dx, y: item.y + dy } : item) });
     };
     window.addEventListener('pointermove', move);

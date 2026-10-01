@@ -286,6 +286,7 @@ class ReconstructionPipeline:
                 reconstruction_stats[key] += value
             if white_objectized:
                 reconstruction_stats.update(extract_colored_text_supports(normalized_path, layout, page_output / "assets", project_id, page_index))
+                layer_objectized_elements(layout.get("elements", []))
             if local_provider:
                 reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))

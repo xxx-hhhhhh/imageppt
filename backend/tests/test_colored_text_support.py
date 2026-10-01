@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from app.services.reconstruction.colored_text_support import extract_colored_text_supports
+from app.services.reconstruction.white_objectization import layer_objectized_elements
 
 
 def test_colored_title_strip_becomes_single_movable_owner_with_editable_text(tmp_path: Path) -> None:
@@ -48,6 +49,12 @@ def test_colored_title_strip_becomes_single_movable_owner_with_editable_text(tmp
     rx, ry = 70 - new["x"], 45 - new["y"]
     cleaned_letters = replacement[ry:ry + 32, rx:rx + 110, :3][source_letters]
     assert np.mean(np.all(cleaned_letters >= 245, axis=1)) < 0.05
+    layer_objectized_elements(layout["elements"])
+    assert previous_owner["zIndex"] < new["zIndex"] < next(
+        item for item in layout["elements"] if item["id"] == "title")["zIndex"]
+    ordering = (previous_owner["zIndex"], new["zIndex"])
+    layer_objectized_elements(layout["elements"])
+    assert (previous_owner["zIndex"], new["zIndex"]) == ordering
     assert next(item for item in layout["elements"] if item["id"] == "bar_shape")["metadata"]["suppressed"] is True
     first_asset_path = asset_dir / Path(new["src"]).name
     first_asset_bytes = first_asset_path.read_bytes()
