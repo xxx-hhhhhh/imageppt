@@ -22,7 +22,7 @@ from app.services.reconstruction.residual_objects import extract_residual_object
 from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
-from app.services.reconstruction.white_objectization import detect_flat_page_surface
+from app.services.reconstruction.white_objectization import _occupy_text_glyphs, detect_flat_page_surface
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
 OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
@@ -162,18 +162,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 existing.update({"zIndex": -999, "style": {"fill": fill, "opacity": 1}})
             changed_ids.add(surface_id)
             if any(issue.get("problem") == "pageSurfaceBakedIntoBackground" for issue in target_issues):
-                occupied = np.zeros(image.shape[:2], np.uint8)
-                for item in candidate.get("elements", []):
-                    if item.get("id") == surface_id or item.get("type") in {"background", "group"}:
-                        continue
-                    if any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
-                        continue
-                    x1 = max(0, round(float(item.get("x") or 0)))
-                    y1 = max(0, round(float(item.get("y") or 0)))
-                    x2 = min(image.shape[1], round(float(item.get("x") or 0) + float(item.get("width") or 0)))
-                    y2 = min(image.shape[0], round(float(item.get("y") or 0) + float(item.get("height") or 0)))
-                    if x2 > x1 and y2 > y1:
-                        occupied[y1:y2, x1:x2] = 255
+                occupied = _surface_residual_occupancy(image, candidate, surface_id)
                 residuals, _ = extract_residual_objects(image, occupied, root / "assets", project_id, page,
                                                         asset_prefix=f"revision_{round_number}_surface_page_{page}")
                 candidate["elements"].extend(residuals)
@@ -412,6 +401,34 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
+
+
+def _surface_residual_occupancy(source: np.ndarray, layout: dict, surface_id: str) -> np.ndarray:
+    """Reserve existing objects without hiding visual support inside textboxes."""
+    occupied = np.zeros(source.shape[:2], np.uint8)
+    for item in layout.get("elements", []):
+        if item.get("id") == surface_id or item.get("type") in {"background", "group"}:
+            continue
+        if any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw_text_box = (item.get("metadata") or {}).get("rawOCRBBox") if item.get("type") == "text" else None
+        if isinstance(raw_text_box, list) and len(raw_text_box) == 4:
+            try:
+                left, top, right, bottom = (float(value) for value in raw_text_box)
+            except (TypeError, ValueError):
+                raw_text_box = None
+        if not isinstance(raw_text_box, list) or len(raw_text_box) != 4:
+            left, top = float(item.get("x") or 0), float(item.get("y") or 0)
+            right = left + float(item.get("width") or 0)
+            bottom = top + float(item.get("height") or 0)
+        x1, y1 = max(0, round(left)), max(0, round(top))
+        x2, y2 = min(source.shape[1], round(right)), min(source.shape[0], round(bottom))
+        if x2 > x1 and y2 > y1:
+            if item.get("type") == "text":
+                _occupy_text_glyphs(source, occupied, (x1, y1, x2, y2))
+            else:
+                occupied[y1:y2, x1:x2] = 255
+    return occupied
 
 
 def _discard_candidate_assets(root: Path, candidate: dict, preexisting: set[Path]) -> int:

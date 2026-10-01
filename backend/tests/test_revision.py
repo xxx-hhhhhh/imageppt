@@ -478,6 +478,20 @@ def test_revision_objectizes_unowned_visual_on_legacy_page_surface(tmp_path: Pat
     assert np.array_equal(cv2.imread(str(preview))[90, 150], source[90, 150])
 
 
+def test_surface_residual_occupancy_keeps_support_inside_large_textbox() -> None:
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.putText(source, "T", (25, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
+    cv2.circle(source, (150, 90), 22, (245, 245, 245), -1)
+    layout = {"elements": [{"id": "label", "type": "text", "text": "T", "x": 20, "y": 20,
+                            "width": 240, "height": 120,
+                            "metadata": {"rawOCRBBox": [20, 25, 55, 65]}}]}
+
+    occupied = revision._surface_residual_occupancy(source, layout, "page_surface_1")
+
+    assert np.count_nonzero(occupied[25:65, 20:55]) > 0
+    assert occupied[90, 150] == 0
+
+
 def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
