@@ -60,7 +60,8 @@ class AIReconstructionPlanner:
                 strategy = {"editable": "editable_text", "whole_image": "cutout_image", "movable_image": "cutout_image", "hybrid": "mixed_component"}.get(requested, requested)
                 if strategy not in {"editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"}:
                     continue
-                module_box = _pixel_box(module.get("bbox"), width, height, max_area=1.0 if strategy == "background" else 0.80)
+                module_box = _pixel_box(module.get("bbox"), width, height,
+                                        max_area=1.0 if strategy == "background" else 0.90 if requested == "whole_image" else 0.80)
                 if module_box is None:
                     continue
                 page_environment = strategy == "background" and is_page_environment(module, module_box, width, height)

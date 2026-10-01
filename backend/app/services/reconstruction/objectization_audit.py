@@ -176,7 +176,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if box is None:
             continue
         x1, y1, x2, y2 = box
-        if (x2 - x1) * (y2 - y1) >= width * height * 0.80:
+        if (x2 - x1) * (y2 - y1) >= width * height * 0.90:
             asset_alpha = _visual_mask(item, box, source_path)
             occupied_fraction = float(np.mean(asset_alpha > 32))
             if occupied_fraction >= 0.95:

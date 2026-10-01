@@ -387,7 +387,8 @@ def test_audited_baked_visual_reaches_revision_without_scene_regions() -> None:
                and issue["bbox"] == [20, 20, 380, 180] for issue in issues)
 
 
-def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("visual_box", [(20, 20, 380, 180), (10, 10, 390, 190)])
+def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, monkeypatch, visual_box) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
     project_id = store.create("baked-large-visual")["id"]
@@ -395,7 +396,8 @@ def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, 
     (root / "assets").mkdir()
     (root / "backgrounds").mkdir()
     source = np.full((200, 400, 3), 255, np.uint8)
-    source[20:180, 20:380] = (40, 110, 190)
+    x1, y1, x2, y2 = visual_box
+    source[y1:y2, x1:x2] = (40, 110, 190)
     cv2.imwrite(str(root / "source.png"), source)
     background = root / "backgrounds" / "page_1.png"
     cv2.imwrite(str(background), source)
