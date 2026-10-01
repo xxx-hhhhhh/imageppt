@@ -62,7 +62,23 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             if np.count_nonzero(text_mask) / max(1, text_mask.size) > 0.20:
                 report["issues"].append({"problem": "moduleTextTooLargeForCleanFallback", "groupId": group_id})
                 continue
-            clean = cv2.inpaint(crop, text_mask, 3, cv2.INPAINT_TELEA) if np.any(text_mask) else crop
+            visual_mask = np.zeros((h, w), np.uint8)
+            for item in foreground:
+                if item.get("type") == "text":
+                    continue
+                ix1, iy1, ix2, iy2 = _box(item)
+                left, top = max(0, round(ix1 - x)), max(0, round(iy1 - y))
+                right, bottom = min(w, round(ix2 - x)), min(h, round(iy2 - y))
+                if right <= left or bottom <= top:
+                    continue
+                if item.get("type") == "ellipse":
+                    cv2.ellipse(visual_mask, ((left + right) // 2, (top + bottom) // 2),
+                                (max(1, (right - left) // 2), max(1, (bottom - top) // 2)),
+                                0, 0, 360, 255, -1)
+                else:
+                    visual_mask[top:bottom, left:right] = 255
+            repair_mask = cv2.max(text_mask, visual_mask)
+            clean = cv2.inpaint(crop, repair_mask, 3, cv2.INPAINT_TELEA) if np.any(repair_mask) else crop
             alpha = np.zeros((h, w), np.uint8)
             cv2.drawContours(alpha, [contour - np.array([[[x, y]]])], -1, 255, -1, cv2.LINE_AA)
             path = asset_dir / f"{identifier}.png"
@@ -70,10 +86,9 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             if not cv2.imwrite(str(path), np.dstack((clean, alpha))):
                 report["issues"].append({"problem": "moduleFallbackWriteFailed", "groupId": group_id})
                 continue
-            for item in foreground:
-                if item.get("type") != "text":
-                    item.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True, "ownedBy": identifier})
-            metadata.update({"reconstructionStrategy": "cutout_image", "moduleMemberIds": [item["id"] for item in foreground if item.get("type") == "text" and item.get("id")], "textCleaned": bool(np.any(text_mask)), "fallbackReason": "texturedModuleBackplate"})
+            metadata.update({"reconstructionStrategy": "cutout_image", "moduleMemberIds": [item["id"] for item in foreground if item.get("id")],
+                             "textCleaned": bool(np.any(text_mask)), "foregroundCleaned": bool(np.any(visual_mask)),
+                             "fallbackReason": "texturedModuleBackplate"})
             elements.append({"id": identifier, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": metadata})
             report["moduleImageFallbacks"] += 1
     for item in active:
