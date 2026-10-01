@@ -306,7 +306,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "visualTextAdjusted")):
                     render_preview(background_path, layout, preview_path)
             critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
             critic_reports: list[dict] = []
@@ -315,7 +315,7 @@ class ReconstructionPipeline:
                 guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
                 reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
                 reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
+                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "visualTextAdjusted")):
                     render_preview(background_path, layout, preview_path)
                     best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             stagnation = 0

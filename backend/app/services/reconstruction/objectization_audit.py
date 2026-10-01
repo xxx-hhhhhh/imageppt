@@ -74,7 +74,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
         report["visualMismatchRegions"] += 1
         report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
-    missing = _bounded_components(np.uint8(lost) * 255, minimum, width, height)
+    missing = _bounded_components(np.uint8(lost) * 255, max(40, round(width * height * 0.00003)), width, height)
     for x, y, w, h, pixels in missing:
         patch = source[y:y + h, x:x + w]
         median = np.median(patch.reshape(-1, 3), axis=0)
@@ -214,7 +214,7 @@ def _bounded_components(mask: np.ndarray, minimum: int, width: int, height: int)
         if pixels < minimum or ((w < 5 or h < 4) and not is_meaningful_stroke(w, h, pixels, width, height)) or w * h > width * height * 0.62:
             continue
         result.append((x, y, w, h, pixels))
-    return result[:50]
+    return result
 
 
 def _box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | None:

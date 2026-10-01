@@ -103,6 +103,24 @@ def test_audit_reports_contiguous_missing_visual_region(tmp_path):
     assert report["largestMissingVisualRegion"] >= 380
 
 
+def test_large_slide_reports_all_missing_small_icons(tmp_path):
+    source = np.full((1000, 1000, 3), 255, np.uint8)
+    for row in range(7):
+        for column in range(10):
+            x, y = 30 + column * 28, 30 + row * 28
+            cv2.rectangle(source, (x, y), (x + 7, y + 7), (30, 90, 170), -1)
+    white = np.full_like(source, 255)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), white)
+    cv2.imwrite(str(tmp_path / "preview.png"), white)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualObjects"] == 70
+    assert len([issue for issue in report["issues"] if issue["problem"] == "missingVisualObject"]) == 70
+
+
 def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (70, 70), 22, (40, 80, 180), -1)
