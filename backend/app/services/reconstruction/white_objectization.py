@@ -214,7 +214,10 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
     height, width = source.shape[:2]
     hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
     saturated = np.uint8((hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 35)) * 255
-    contours, _ = cv2.findContours(saturated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    found, _ = cv2.findContours(saturated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = list(found)
+    if dense_visual_artwork(source):
+        contours.extend(_round_contours_on_texture(source))
     created = 0
     for contour in sorted(contours, key=cv2.contourArea, reverse=True):
         x, y, w, h = cv2.boundingRect(contour)
@@ -247,6 +250,41 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
         elements.append({"id": path.stem, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "round_contour", "layerRole": "residual", "preserveWholeAsset": True, "contourQuality": round(float(circularity), 3)}})
         occupied[y1:y2, x1:x2][alpha > 0] = 255
     return created
+
+
+def _round_contours_on_texture(source: np.ndarray) -> list[np.ndarray]:
+    """Recover bounded badges when textured surroundings merge color masks."""
+    height, width = source.shape[:2]
+    gray = cv2.medianBlur(cv2.cvtColor(source, cv2.COLOR_BGR2GRAY), 5)
+    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2,
+                               minDist=max(24, round(min(width, height) * 0.08)),
+                               param1=100, param2=28,
+                               minRadius=max(10, round(min(width, height) * 0.015)),
+                               maxRadius=max(18, round(min(width, height) * 0.18)))
+    if circles is None:
+        return []
+    contours = []
+    for cx, cy, detected_radius in circles[0][:40]:
+        radius = float(detected_radius) * 1.18
+        if cx - radius < 1 or cy - radius < 1 or cx + radius >= width - 1 or cy + radius >= height - 1:
+            continue
+        left, top = max(0, int(cx - radius * 1.6)), max(0, int(cy - radius * 1.6))
+        right, bottom = min(width, int(cx + radius * 1.6)), min(height, int(cy + radius * 1.6))
+        yy, xx = np.ogrid[top:bottom, left:right]
+        distance = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        patch = source[top:bottom, left:right]
+        center = patch[distance <= radius * 0.38]
+        surround = patch[(distance >= radius * 1.25) & (distance <= radius * 1.55)]
+        if len(center) < 30 or len(surround) < 30:
+            continue
+        center_color = np.median(center, axis=0)
+        outer_color = np.median(surround, axis=0)
+        if (np.max(np.abs(center_color - outer_color)) < 32
+                or np.mean(np.max(np.abs(center.astype(np.float32) - center_color), axis=1) <= 25) < 0.75):
+            continue
+        polygon = cv2.ellipse2Poly((round(cx), round(cy)), (round(radius), round(radius)), 0, 0, 360, 8)
+        contours.append(polygon.reshape(-1, 1, 2))
+    return contours
 
 
 def _occupy_text_glyphs(source: np.ndarray, occupied: np.ndarray, box: tuple[int, int, int, int]) -> None:

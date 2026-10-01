@@ -342,6 +342,7 @@ def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):
     objectize_on_white(source_path, background, layout, tmp_path / "assets", "dense", 1)
     images = [item for item in layout["elements"] if item["type"] == "image"]
     assert len(images) >= 4
+    assert not any((item.get("metadata") or {}).get("reconstructionStrategySource") == "round_contour" for item in images)
     assert not [item for item in layout["elements"] if item["type"] in {"rectangle", "roundedRectangle"}]
     assert all(item["width"] * item["height"] < width * height * 0.4 for item in images)
     for item in images:
@@ -350,6 +351,51 @@ def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):
     error = np.max(np.abs(cv2.imread(str(preview)).astype(np.int16) - source.astype(np.int16)), axis=2)
     assert np.count_nonzero(error >= 10) < width * height * 0.01
     assert np.all(cv2.imread(str(background)) == 255)
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in images:
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(images)
+    assert all(shape.shape_type == 13 for shape in slide.shapes)
+    first = images[0]
+    old_center_x = first["x"] + first["width"] // 2
+    old_center_y = first["y"] + first["height"] // 2
+    first["x"] += width
+    render_preview(background, layout, tmp_path / "moved.png")
+    moved = cv2.imread(str(tmp_path / "moved.png"))
+    assert np.all(moved[old_center_y, old_center_x] == 255)
+
+
+def test_round_badge_stays_whole_when_dense_texture_is_split(tmp_path):
+    height, width = 240, 420
+    source = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        for x in range(width):
+            source[y, x] = (40 + (x // 5) % 70, 70 + (y // 4) % 80,
+                            110 + ((x + y) // 6) % 90)
+    cv2.circle(source, (210, 120), 35, (25, 80, 220), -1, cv2.LINE_AA)
+    cv2.circle(source, (210, 120), 27, (245, 245, 245), 3, cv2.LINE_AA)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    preview = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "badge-texture", 1)
+    badges = [item for item in layout["elements"] if (item.get("metadata") or {}).get("reconstructionStrategySource") == "round_contour"]
+    assert len(badges) == 1
+    badge = badges[0]
+    assert badge["x"] < 175 and badge["x"] + badge["width"] > 245
+    assert badge["y"] < 85 and badge["y"] + badge["height"] > 155
+    cutout = cv2.imread(str(tmp_path / "assets" / Path(badge["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert cutout.shape[2] == 4 and cutout[0, 0, 3] == 0
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background, layout, preview)
+    rendered = cv2.imread(str(preview))
+    assert np.max(np.abs(rendered[120, 210].astype(int) - source[120, 210].astype(int))) < 3
+    assert np.count_nonzero(np.max(np.abs(rendered.astype(int) - source.astype(int)), axis=2) >= 10) < width * height * 0.02
 
 
 def test_page_wide_pale_background_is_not_a_local_backplate(tmp_path):
