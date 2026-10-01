@@ -18,7 +18,7 @@ from app.services.reconstruction.asset_ownership import is_badge_owned_text, res
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
-from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, protected_visuals
+from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
@@ -79,6 +79,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     if not all(path.is_file() for path in (source, background, preview, score_path)):
         raise FileNotFoundError("Page analysis artifacts are not available")
     baseline = store.get_slide(project_id, page)
+    localized = localize_project_assets(root, baseline)
+    if localized:
+        store.save_slide(project_id, page, baseline)
     baseline_assets = inspect_assets(root, baseline)
     if baseline_assets["missingAssetCount"]:
         raise ValueError("Current slide has missing image assets; repair the existing result before revision")
@@ -304,6 +307,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     stagnation_reason = None if accepted else "integrity_check_failed" if integrity["integrityErrors"] else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
     report = {
         "revisionRound": round_number, "accepted": accepted,
+        "localizedAssetCount": localized,
         "targetedIssues": target_issues,
         "issuesBefore": issues_before, "issuesAfter": issues_after if accepted else issues_before,
         "improvedRegions": improved if accepted else [], "visualBefore": float(score_before.get("overall") or 0),

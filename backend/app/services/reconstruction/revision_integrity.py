@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import shutil
 from uuid import uuid4
 
@@ -34,6 +35,43 @@ def asset_path(root: Path, src: str | None) -> Path | None:
     if direct.is_absolute() and direct.resolve().is_relative_to(root.resolve()):
         return direct
     return None
+
+
+def localize_project_assets(root: Path, layout: dict) -> int:
+    """Copy referenced project assets into this slide's project before saving it.
+
+    Older layouts can point to an asset in another project. Those images render
+    until that project is removed, then revisions and exports lose the object.
+    """
+    changed = 0
+    output_root = root.parent.resolve()
+    destination = root / "assets"
+    for item in layout.get("elements", []):
+        if item.get("type") != "image" or asset_path(root, item.get("src")) is not None:
+            continue
+        clean = str(item.get("src") or "").split("?", 1)[0].replace("\\", "/")
+        parts = clean.strip("/").split("/")
+        if (len(parts) != 4 or parts[:2] != ["media", "assets"]
+                or parts[2] in {"", ".", ".."} or Path(parts[3]).name != parts[3]):
+            continue
+        source = (output_root / parts[2] / "assets" / parts[3]).resolve()
+        if not source.is_relative_to(output_root) or not source.is_file():
+            continue
+        try:
+            with Image.open(source) as image:
+                image.verify()
+        except (OSError, ValueError):
+            continue
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+        name = f"imported_{digest}_{source.name}"
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / name
+        if not target.is_file():
+            shutil.copy2(source, target)
+        item["src"] = f"/media/assets/{root.name}/{name}"
+        item.setdefault("metadata", {})["assetLocalizedFrom"] = clean
+        changed += 1
+    return changed
 
 
 def recover_legacy_revision_assets(root: Path, layout: dict) -> int:

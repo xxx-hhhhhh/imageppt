@@ -144,6 +144,30 @@ def test_image_survives_two_revisions_and_media_url_stays_valid(tmp_path: Path, 
     assert (root / "reconstructed_preview.png").read_bytes() != before
 
 
+def test_revision_localizes_image_from_another_project_before_asset_check(tmp_path: Path, monkeypatch) -> None:
+    store, project_id = _image_project(tmp_path, monkeypatch)
+    root = tmp_path / project_id
+    external_id = store.create("previous-project")["id"]
+    external_assets = tmp_path / external_id / "assets"
+    external_assets.mkdir()
+    source_asset = root / "assets" / "visual.png"
+    external_asset = external_assets / "visual.png"
+    external_asset.write_bytes(source_asset.read_bytes())
+    layout = store.get_slide(project_id, 1)
+    next(item for item in layout["elements"] if item["id"] == "visual")["src"] = f"/media/assets/{external_id}/visual.png"
+    store.save_slide(project_id, 1, layout)
+
+    result = revise_problem_regions(store, project_id, 1)
+    current = store.get_slide(project_id, 1)
+    image = next(item for item in current["elements"] if item["id"] == "visual")
+
+    assert result["localizedAssetCount"] == 1
+    assert image["src"].startswith(f"/media/assets/{project_id}/imported_")
+    assert inspect_assets(root, current)["missingAssetCount"] == 0
+    external_asset.unlink()
+    assert inspect_assets(root, current)["missingAssetCount"] == 0
+
+
 def test_complex_white_slide_keeps_visual_assets_across_two_revisions(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     fixture = Path(__file__).parent / "fixtures" / "complex_modules.png"

@@ -29,6 +29,7 @@ from app.services.reconstruction.white_objectization import layer_objectized_ele
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.asset_ownership import restore_image_owned_text
+from app.services.reconstruction.revision_integrity import localize_project_assets
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
 
@@ -474,6 +475,7 @@ class ReconstructionPipeline:
                 if source_dir.is_dir():
                     shutil.copytree(source_dir, page_archive / directory, dirs_exist_ok=True)
             warnings.extend(scene_warnings)
+            reconstruction_stats["localizedImageAssets"] = reconstruction_stats.get("localizedImageAssets", 0) + localize_project_assets(page_output, layout)
             reconstruction_stats["editableTextboxes"] += sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
             reconstruction_stats["textFallbackCutouts"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("sourceTextFallback"))
             self.store.save_slide(project_id, page_index, layout)
