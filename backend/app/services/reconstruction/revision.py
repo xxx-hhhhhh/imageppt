@@ -21,9 +21,10 @@ from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
+from app.services.reconstruction.white_objectization import detect_flat_page_surface
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
-OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground"}
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "pageSurfaceLost"}
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -110,7 +111,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         issue.get("problem") == "missingEditableText"
         and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
     )]
-    priority = {"ghosting": 0, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
+    priority = {"ghosting": 0, "pageSurfaceLost": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
                 "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
                 "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
@@ -136,6 +137,29 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     inpainted_regions = 0
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
     regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
+
+    if any(issue.get("problem") == "pageSurfaceLost" for issue in target_issues):
+        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+        color = detect_flat_page_surface(image) if image is not None else None
+        if color is not None:
+            for item in candidate.get("elements", []):
+                if item.get("type") == "background":
+                    item["zIndex"] = -1000
+            surface_id = f"page_surface_{page}"
+            existing = by_id.get(surface_id)
+            fill = "#" + "".join(f"{int(channel):02X}" for channel in color[::-1])
+            if existing is None:
+                surface = {"id": surface_id, "type": "rectangle", "x": 0, "y": 0,
+                           "width": image.shape[1], "height": image.shape[0], "rotation": 0,
+                           "zIndex": -999, "style": {"fill": fill, "opacity": 1},
+                           "metadata": {"reconstructionStrategy": "native_shape",
+                                        "reconstructionStrategySource": "flat_page_surface",
+                                        "layerRole": "page_surface", "pageSurface": True}}
+                candidate.setdefault("elements", []).append(surface)
+                by_id[surface_id] = surface
+            else:
+                existing.update({"zIndex": -999, "style": {"fill": fill, "opacity": 1}})
+            changed_ids.add(surface_id)
 
     for issue in target_issues:
         item = by_id.get(str(issue.get("elementId")))
@@ -320,7 +344,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
@@ -440,7 +464,7 @@ def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate:
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
             issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)

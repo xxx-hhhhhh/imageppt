@@ -375,6 +375,41 @@ def test_scene_region_is_not_baked_into_verified_white_background() -> None:
                for issue in revision.collect_revision_issues(layout, residual, scene))
 
 
+def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("dark-surface")['id']
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.putText(source, "Dark", (35, 75), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "background_001", "type": "background", "x": 0, "y": 0, "width": 300, "height": 180,
+         "zIndex": 0, "src": f"/media/backgrounds/{project_id}/page_1.png"},
+        {"id": "title", "type": "text", "x": 35, "y": 45, "width": 100, "height": 45,
+         "zIndex": 20, "text": "Dark", "style": {"color": "#f5f5f5", "fontSize": 32},
+         "metadata": {"rawOCRBBox": [35, 45, 135, 90]}}]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(background, layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is True, result.get("integrityErrors")
+    assert result["rollbackTriggered"] is False
+    assert any(issue["problem"] == "pageSurfaceLost" for issue in result["issuesBefore"])
+    assert not any(issue["problem"] == "pageSurfaceLost" for issue in result["issuesAfter"])
+    current = store.get_slide(project_id, 1)
+    assert len([item for item in current["elements"] if (item.get("metadata") or {}).get("pageSurface")]) == 1
+    assert cv2.imread(str(preview))[150, 150].tolist() == [52, 31, 21]
+
+
 def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
