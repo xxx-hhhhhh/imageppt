@@ -213,6 +213,25 @@ def test_missing_visual_repair_masks_only_lost_pixels_not_neighboring_text(tmp_p
     assert np.count_nonzero(cutout[:, :, 3]) == item["metadata"]["sourceMaskPixels"]
 
 
+def test_small_font_baseline_shift_is_not_a_missing_visual(tmp_path):
+    source = np.full((90, 180, 3), 255, np.uint8)
+    preview = source.copy()
+    cv2.putText(source, "LABEL", (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (25, 50, 105), 1)
+    cv2.putText(preview, "LABEL", (20, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (25, 50, 105), 1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "preview.png"), preview)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    layout = {"elements": [{"id": "label", "type": "text", "text": "LABEL", "x": 20, "y": 20,
+                            "width": 70, "height": 28,
+                            "metadata": {"rawOCRBBox": [20, 27, 87, 43]}}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["missingVisualObjects"] == 0
+    assert report["visualMismatchRegions"] == 0
+
+
 def test_audit_reports_contiguous_missing_visual_region(tmp_path):
     source = np.full((120, 180, 3), 255, np.uint8)
     cv2.rectangle(source, (60, 40), (79, 59), (20, 90, 180), -1)

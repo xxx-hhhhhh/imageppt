@@ -73,7 +73,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         metadata = item.get("metadata") or {}
         if item not in active and (metadata.get("ownedBy") or metadata.get("duplicateSuppressed")):
             continue
-        box = _text_source_box(item, width, height)
+        box = _text_source_box(item, width, height, padding=2)
         if box:
             x1, y1, x2, y2 = box
             lost[y1:y2, x1:x2] = False
@@ -451,12 +451,17 @@ def _box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | Non
     return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
 
 
-def _text_source_box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | None:
+def _text_source_box(item: dict, width: int, height: int, *, padding: int = 0) -> tuple[int, int, int, int] | None:
     raw = (item.get("metadata") or {}).get("rawOCRBBox")
     if isinstance(raw, list) and len(raw) == 4:
         try:
             x1, y1, x2, y2 = (float(value) for value in raw)
         except (TypeError, ValueError):
             return _box(item, width, height)
-        return _box({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, width, height)
-    return _box(item, width, height)
+        box = _box({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, width, height)
+    else:
+        box = _box(item, width, height)
+    if box is None or not padding:
+        return box
+    return (max(0, box[0] - padding), max(0, box[1] - padding),
+            min(width, box[2] + padding), min(height, box[3] + padding))
