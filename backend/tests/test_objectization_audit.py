@@ -21,6 +21,22 @@ from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 FIXTURE = Path(__file__).parent / "fixtures" / "complex_modules.png"
 
 
+def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
+    source = np.full((150, 240, 3), 255, np.uint8)
+    cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)
+    cv2.line(source, (75, 75), (115, 75), (255, 255, 255), 6)
+    cv2.line(source, (95, 55), (95, 95), (255, 255, 255), 6)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)), ("preview.png", source)):
+        cv2.imwrite(str(tmp_path / name), image)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualPixels"] == 0
+    assert report["missingVisualObjects"] == 0
+    assert report["retainedVisualCoverage"] == 1.0
+
+
 def test_audit_detects_missing_pale_plate_and_writes_owner_debug(tmp_path):
     source = np.full((180, 300, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (210, 112), (246, 248, 250), -1)

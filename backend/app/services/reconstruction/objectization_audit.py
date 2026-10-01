@@ -42,7 +42,10 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     salient = visual_candidate_mask(source)
     contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
-    lost = salient & np.all(preview >= 253, axis=2) & (owner_mask == 0)
+    # White details inside a badge or card can be intentional. Only count pixels
+    # that actually changed to white, rather than every white source pixel.
+    erased = np.all(preview >= 253, axis=2) & (np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2) >= 2)
+    lost = salient & erased & (owner_mask == 0)
     # Editable glyphs need not land on precisely the same raster pixels.
     for item in layout.get("elements", []):
         if item.get("type") == "text":
@@ -60,7 +63,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             if box:
                 x1, y1, x2, y2 = box
                 salient[y1:y2, x1:x2] = False
-    missing_mask = np.uint8(salient & np.all(preview >= 253, axis=2))
+    missing_mask = np.uint8(salient & erased)
     missing_pixels = int(np.count_nonzero(missing_mask))
     component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(missing_mask, 8)
     report["largestMissingVisualRegion"] = int(np.max(component_stats[1:, cv2.CC_STAT_AREA])) if component_count > 1 else 0
