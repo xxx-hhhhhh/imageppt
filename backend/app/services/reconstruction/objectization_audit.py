@@ -73,6 +73,22 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     # that actually changed to white, rather than every white source pixel.
     erased = np.all(preview >= 253, axis=2) & (np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2) >= 2)
     lost = salient & erased
+    # OCR boxes often include a badge, colored plate, or chart mark beside the
+    # letters. Keep distinct source color that has no nearby rendered owner.
+    source_hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
+    preview_hsv = cv2.cvtColor(preview, cv2.COLOR_BGR2HSV)
+    source_color = (source_hsv[:, :, 1] >= 55) & (source_hsv[:, :, 2] >= 35)
+    preview_color = (preview_hsv[:, :, 1] >= 40) & (preview_hsv[:, :, 2] >= 35)
+    source_channel = np.argmax(source, axis=2)
+    preview_channel = np.argmax(preview, axis=2)
+    nearby_same_color = np.zeros((height, width), np.bool_)
+    for channel in range(3):
+        rendered = np.uint8(preview_color & (preview_channel == channel)) * 255
+        nearby = cv2.dilate(rendered, np.ones((13, 13), np.uint8)) != 0
+        nearby_same_color |= (source_channel == channel) & nearby
+    lost_inside_text = source_color & erased & ~nearby_same_color
+    text_coverage_area = np.zeros((height, width), np.bool_)
+    editable_glyph_color = np.zeros((height, width), np.bool_)
     # Editable glyphs need not land on precisely the same raster pixels.
     # Use the observed OCR bounds, not the often enlarged editor textbox.
     # A suppressed false OCR detection must never conceal a lost visual.
@@ -85,8 +101,29 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         box = _text_source_box(item, width, height, padding=2)
         if box:
             x1, y1, x2, y2 = box
+            text_coverage_area[y1:y2, x1:x2] = True
+            color = str((item.get("style") or {}).get("color") or "").lstrip("#")
+            if len(color) == 6:
+                try:
+                    bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).astype(np.int16)
+                    region = source[y1:y2, x1:x2].astype(np.int16)
+                    editable_glyph_color[y1:y2, x1:x2] |= np.max(np.abs(region - bgr), axis=2) <= 90
+                except ValueError:
+                    pass
             lost[y1:y2, x1:x2] = False
             salient[y1:y2, x1:x2] = False
+    uncovered_colored_visual = lost_inside_text & text_coverage_area & ~editable_glyph_color
+    count, labels, component_stats, _ = cv2.connectedComponentsWithStats(np.uint8(uncovered_colored_visual), 8)
+    accepted_colored_visual = np.zeros_like(uncovered_colored_visual)
+    minimum_colored_area = max(150, round(width * height * 0.00008))
+    for label in range(1, count):
+        _, _, component_width, component_height, pixels = [int(value) for value in component_stats[label]]
+        area = max(1, component_width * component_height)
+        if pixels >= 400 or (pixels >= minimum_colored_area and min(component_width, component_height) >= 12
+                             and pixels / area >= 0.60):
+            accepted_colored_visual[labels == label] = True
+    lost |= accepted_colored_visual
+    salient |= accepted_colored_visual
     missing_mask = np.uint8(salient & erased)
     missing_pixels = int(np.count_nonzero(missing_mask))
     component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(missing_mask, 8)

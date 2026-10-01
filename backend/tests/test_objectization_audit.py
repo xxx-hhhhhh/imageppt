@@ -47,6 +47,46 @@ def test_audit_catches_two_level_wide_support_strip_erasure(tmp_path):
     assert any(issue["problem"] in {"missingBackplate", "missingVisualObject"} for issue in report["issues"])
 
 
+def test_audit_sees_colored_visual_lost_inside_ocr_box(tmp_path):
+    source = np.full((160, 300, 3), 255, np.uint8)
+    cv2.circle(source, (60, 75), 16, (50, 170, 40), -1)
+    cv2.putText(source, "GO", (92, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
+    preview = np.full_like(source, 255)
+    cv2.putText(preview, "GO", (94, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", preview)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "label", "type": "text", "x": 88, "y": 55,
+                            "width": 80, "height": 35, "text": "GO",
+                            "metadata": {"rawOCRBBox": [35, 50, 170, 95]}}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["missingVisualPixels"] > 500
+    assert any(issue["problem"] == "missingVisualObject" and issue["bbox"][0] <= 60 <= issue["bbox"][2]
+               for issue in report["issues"])
+
+
+def test_audit_does_not_confuse_recolored_editable_glyphs_with_lost_visuals(tmp_path):
+    source = np.full((160, 300, 3), 255, np.uint8)
+    preview = source.copy()
+    cv2.putText(source, "TITLE", (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (20, 20, 220), 2)
+    cv2.putText(preview, "TITLE", (48, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (20, 20, 220), 2)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", preview)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "title", "type": "text", "x": 40, "y": 45,
+                            "width": 150, "height": 45, "text": "TITLE",
+                            "style": {"color": "#DC1414"},
+                            "metadata": {"rawOCRBBox": [35, 45, 195, 90]}}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["missingVisualObjects"] == 0
+
+
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)
