@@ -27,7 +27,7 @@ from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, mea
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
-from app.services.reconstruction.objectization_audit import audit_objectization
+from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
 from app.services.reconstruction.asset_ownership import restore_image_owned_text
 from app.services.reconstruction.revision_integrity import localize_project_assets
 from app.services.reconstruction.replacement_qa import check_replacement_regions
@@ -371,6 +371,9 @@ class ReconstructionPipeline:
                 replacement_qa = check_replacement_regions(normalized_path, pre_cleanup_path, preview_path, layout, page_output / ("replacement_qa.json" if page_index == 1 else f"replacement_qa_{page_index}.json"), page_output / ("replacement_compare.png" if page_index == 1 else f"replacement_compare_{page_index}.png"), ghosting_before_cleanup, count_text_ghosting(normalized_path, background_path, layout))
                 reconstruction_stats["replacementQAWorsenedRegions"] = len(replacement_qa["worsenedRegions"])
                 layout.setdefault("metadata", {})["replacementQA"] = replacement_qa
+            if white_objectized:
+                reconstruction_stats["initialRecoveredVisuals"] = recover_initial_missing_regions(
+                    normalized_path, background_path, preview_path, layout, page_output / "assets", project_id, page_index)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             if white_objectized:
                 score["objectizationQA"] = object_qa

@@ -12,7 +12,7 @@ from pptx import Presentation
 from app import main as api_main
 from app.models.project_store import ProjectStore
 from app.services.pptx import renderer
-from app.services.reconstruction.objectization_audit import audit_objectization
+from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
 from app.services.reconstruction.revision import revise_problem_regions
 from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
@@ -35,6 +35,52 @@ def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     assert report["missingVisualPixels"] == 0
     assert report["missingVisualObjects"] == 0
     assert report["retainedVisualCoverage"] == 1.0
+
+
+def test_first_pass_recovers_missing_small_visual_as_movable_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    source = np.full((160, 260, 3), 255, np.uint8)
+    cv2.rectangle(source, (90, 65), (112, 88), (35, 105, 190), -1)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"slide": {"width": 260, "height": 160}, "elements": []}
+    assets = tmp_path / "demo" / "assets"
+
+    recovered = recover_initial_missing_regions(tmp_path / "source.png", tmp_path / "background.png",
+                                                tmp_path / "preview.png", layout, assets, "demo", 1)
+
+    assert recovered == 1
+    assert len(layout["elements"]) == 1
+    assert layout["elements"][0]["type"] == "image"
+    assert layout["elements"][0]["src"].startswith("/media/assets/demo/initial_page_1_")
+    assert (assets / Path(layout["elements"][0]["src"]).name).is_file()
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+    assert report["missingVisualObjects"] == 0
+    assert report["missingVisualPixels"] < 20
+
+
+def test_first_pass_discards_recovery_that_does_not_render_better(tmp_path, monkeypatch):
+    source = np.full((160, 260, 3), 255, np.uint8)
+    cv2.rectangle(source, (90, 65), (112, 88), (35, 105, 190), -1)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+    from app.services.visual_qa import analyzer
+    monkeypatch.setattr(analyzer, "render_preview", lambda _background, _layout, output: cv2.imwrite(
+        str(output), np.full_like(source, 255)))
+    layout = {"slide": {"width": 260, "height": 160}, "elements": []}
+    assets = tmp_path / "assets"
+    original_preview = (tmp_path / "preview.png").read_bytes()
+
+    recovered = recover_initial_missing_regions(tmp_path / "source.png", tmp_path / "background.png",
+                                                tmp_path / "preview.png", layout, assets, "demo", 1)
+
+    assert recovered == 0
+    assert layout["elements"] == []
+    assert (tmp_path / "preview.png").read_bytes() == original_preview
+    assert not list(assets.glob("*.png"))
 
 
 def test_audit_detects_missing_pale_plate_and_writes_owner_debug(tmp_path):

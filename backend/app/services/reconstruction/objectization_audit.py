@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import cv2
@@ -122,7 +123,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
 
 
 def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], asset_dir: Path,
-                           project_id: str, revision_round: int) -> list[dict]:
+                           project_id: str, revision_round: int, asset_prefix: str | None = None) -> list[dict]:
     """Stage only reported unowned regions; leave existing objects untouched."""
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
@@ -148,7 +149,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
         z_index = max((int(item.get("zIndex") or 0) for item in visual_below), default=8) + 1
         if existing:
             z_index = min(z_index, min(int(item.get("zIndex") or 20) for item in existing) - 1)
-        identifier = f"revision_{revision_round}_object_{len(created) + 1:03d}"
+        identifier = f"{asset_prefix or f'revision_{revision_round}'}_object_{len(created) + 1:03d}"
         metadata = {"reconstructionStrategySource": "objectization_audit", "layerRole": "container" if issue["problem"] == "missingBackplate" else "residual", "qaIssue": issue["problem"]}
         median = np.median(crop.reshape(-1, 3), axis=0).astype(np.uint8)
         flat = float(np.mean(np.max(np.abs(crop.astype(np.int16) - median.astype(np.int16)), axis=2) <= 9)) >= 0.75
@@ -177,6 +178,42 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
         layout.setdefault("elements", []).append(common)
         created.append(common)
     return created
+
+
+def recover_initial_missing_regions(source_path: Path, background_path: Path, preview_path: Path,
+                                    layout: dict, asset_dir: Path, project_id: str, page_index: int) -> int:
+    """Add only missing local visuals whose rendered result measurably improves."""
+    from app.services.visual_qa.analyzer import render_preview
+
+    before = audit_objectization(source_path, background_path, preview_path, layout)
+    issues = [issue for issue in before["issues"] if issue.get("problem") in {"missingBackplate", "missingVisualObject"}]
+    if not issues:
+        return 0
+    candidate = copy.deepcopy(layout)
+    created = repair_missing_regions(source_path, candidate, issues, asset_dir, project_id, 0,
+                                     asset_prefix=f"initial_page_{page_index}")
+    if not created:
+        return 0
+    candidate_preview = preview_path.with_name(f"{preview_path.stem}_object_recovery.png")
+    accepted = False
+    try:
+        render_preview(background_path, candidate, candidate_preview)
+        after = audit_objectization(source_path, background_path, candidate_preview, candidate)
+        valid = not any(issue.get("problem") == "objectizationAuditUnavailable" for issue in after["issues"])
+        improved = (valid and after["missingVisualPixels"] < before["missingVisualPixels"]
+                    and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
+        if improved:
+            candidate_preview.replace(preview_path)
+            layout["elements"] = candidate["elements"]
+            accepted = True
+            return len(created)
+        return 0
+    finally:
+        candidate_preview.unlink(missing_ok=True)
+        if not accepted:
+            for item in created:
+                if item.get("type") == "image":
+                    (asset_dir / Path(str(item.get("src") or "")).name).unlink(missing_ok=True)
 
 
 def _overlaps(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
