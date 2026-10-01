@@ -246,6 +246,17 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             if overlap / old_area >= 0.9 and old_area <= issue_area * 1.25:
                 current = by_id.get(str(old.get("id")))
                 if current is not None:
+                    if old.get("type") == "image":
+                        old_box = (ox1, oy1, ox2, oy2)
+                        replacement = next((item for item in recovered
+                                            if item.get("type") == "image"
+                                            and (item.get("metadata") or {}).get("qaIssue") == "visualContentMismatch"
+                                            and not (item.get("metadata") or {}).get("replacesAssetId")
+                                            and _overlap_fraction(old_box, item) >= 0.9), None)
+                        if replacement is None:
+                            continue
+                        current.setdefault("metadata", {})["replacedBy"] = replacement["id"]
+                        replacement.setdefault("metadata", {})["replacesAssetId"] = str(old["id"])
                     current.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True})
                     changed_ids.add(str(current["id"]))
     for issue in target_issues:

@@ -364,6 +364,70 @@ def test_white_background_regression_is_rejected(tmp_path: Path) -> None:
     assert "preview_over_whitened" in result["integrityErrors"]
 
 
+def test_integrity_allows_only_declared_complete_image_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    assets = root / "assets"
+    assets.mkdir(parents=True)
+    for name in ("old.png", "new.png"):
+        cv2.imwrite(str(assets / name), np.full((40, 50, 3), (35, 90, 185), np.uint8))
+    white = np.full((100, 160, 3), 255, np.uint8)
+    for name in ("before_bg.png", "after_bg.png", "before_preview.png", "after_preview.png"):
+        cv2.imwrite(str(root / name), white)
+    old = {"id": "old", "type": "image", "x": 30, "y": 25, "width": 50, "height": 40,
+           "src": "/media/assets/project/old.png"}
+    new = {"id": "new", "type": "image", "x": 29, "y": 24, "width": 52, "height": 42,
+           "src": "/media/assets/project/new.png", "metadata": {"replacesAssetId": "old"}}
+    baseline = {"elements": [old]}
+    candidate = {"elements": [{**old, "metadata": {"suppressed": True, "replacedBy": "new"}}, new]}
+    paths = [root / name for name in ("before_bg.png", "after_bg.png", "before_preview.png", "after_preview.png")]
+
+    valid = assess_revision(root, baseline, candidate, *paths)
+    assert valid["integrityErrors"] == []
+    assert valid["replacedAssetCount"] == 1
+    assert valid["assetsBefore"] == valid["assetsAfter"] == 1
+    assert (assets / "old.png").is_file()
+
+    incomplete = {"elements": [candidate["elements"][0], {**new, "x": 62, "width": 19}]}
+    assert "lost_existing_images" in assess_revision(root, baseline, incomplete, *paths)["integrityErrors"]
+    unlinked = {"elements": [old | {"metadata": {"suppressed": True}}, new]}
+    assert "lost_existing_images" in assess_revision(root, baseline, unlinked, *paths)["integrityErrors"]
+
+
+def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("wrong-color-image")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((110, 170, 3), 255, np.uint8)
+    cv2.rectangle(source, (45, 35), (94, 74), (30, 100, 190), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    old_asset = root / "assets" / "old.png"
+    cv2.imwrite(str(old_asset), np.full((40, 50, 3), (160, 180, 40), np.uint8))
+    layout = {"slide": {"width": 170, "height": 110}, "elements": [
+        {"id": "old", "type": "image", "x": 45, "y": 35, "width": 50, "height": 40,
+         "zIndex": 10, "src": f"/media/assets/{project_id}/old.png",
+         "metadata": {"reconstructionStrategy": "cutout_image"}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    assert result["accepted"] is True
+    assert result["replacedAssetCount"] == 1
+    assert result["missingAssetCount"] == 0
+    assert old_asset.is_file()
+    assert next(item for item in current["elements"] if item["id"] == "old")["metadata"]["suppressed"] is True
+    assert np.array_equal(cv2.imread(str(preview))[50, 60], source[50, 60])
+
+
 def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None:
     assert revision._visual_retention_regressed(
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10},

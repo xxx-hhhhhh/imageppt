@@ -134,9 +134,24 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
     after = inspect_assets(root, candidate)
     before_by_id = {str(item.get("id")): item for item in visible_images(baseline)}
     after_by_id = {str(item.get("id")): item for item in visible_images(candidate)}
-    missing_existing = sorted(set(before_by_id) - set(after_by_id))
+    missing_existing = set(before_by_id) - set(after_by_id)
+    candidate_by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
+    declared_replacements: set[str] = set()
+    used_replacements: set[str] = set()
+    for old_id in sorted(missing_existing):
+        retired = candidate_by_id.get(old_id) or {}
+        new_id = str((retired.get("metadata") or {}).get("replacedBy") or "")
+        replacement = after_by_id.get(new_id)
+        if (new_id in used_replacements or new_id in before_by_id or replacement is None
+                or (replacement.get("metadata") or {}).get("replacesAssetId") != old_id):
+            continue
+        if _old_asset_coverage(before_by_id[old_id], replacement) < 0.9:
+            continue
+        declared_replacements.add(old_id)
+        used_replacements.add(new_id)
+    missing_unreplaced = missing_existing - declared_replacements
     preserved = sum(before_by_id[key].get("src") == after_by_id[key].get("src") for key in before_by_id.keys() & after_by_id.keys())
-    replaced = len(before_by_id.keys() & after_by_id.keys()) - preserved
+    replaced = len(before_by_id.keys() & after_by_id.keys()) - preserved + len(declared_replacements)
     background_before_white = white_area_ratio(background_before)
     background_after_white = white_area_ratio(background_after)
     preview_before_white = white_area_ratio(preview_before)
@@ -145,7 +160,7 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
     errors = []
     if after["missingAssetCount"]:
         errors.append("missing_assets")
-    if missing_existing or after["assets"] < before["assets"]:
+    if missing_unreplaced or after["assets"] < before["assets"]:
         errors.append("lost_existing_images")
     if background_after_white > background_before_white + 0.035:
         errors.append("background_over_whitened")
@@ -165,6 +180,15 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         "outsideTargetChangeRatio": round(outside_change, 4),
         "integrityErrors": errors,
     }
+
+
+def _old_asset_coverage(old: dict, new: dict) -> float:
+    x1, y1 = float(old.get("x") or 0), float(old.get("y") or 0)
+    x2, y2 = x1 + float(old.get("width") or 0), y1 + float(old.get("height") or 0)
+    nx1, ny1 = float(new.get("x") or 0), float(new.get("y") or 0)
+    nx2, ny2 = nx1 + float(new.get("width") or 0), ny1 + float(new.get("height") or 0)
+    overlap = max(0.0, min(x2, nx2) - max(x1, nx1)) * max(0.0, min(y2, ny2) - max(y1, ny1))
+    return overlap / max(1.0, (x2 - x1) * (y2 - y1))
 
 
 def _outside_change_ratio(before_path: Path, after_path: Path, target_boxes: list[list[float]]) -> float:
