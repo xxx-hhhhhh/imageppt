@@ -201,7 +201,7 @@ def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tm
     layout = {"slide": {"width": 240, "height": 180}, "elements": [
         {"id": "badge", "type": "image", "x": 60, "y": 40, "width": 100, "height": 100,
          "zIndex": 10, "src": f"/media/assets/{project_id}/badge.png",
-         "metadata": {"reconstructionStrategy": "cutout_image", "preserveWholeAsset": True,
+         "metadata": {"reconstructionStrategy": "cutout_image", "preserveWholeAsset": True, "wholeBadgeAsset": True,
                       "textCleaned": True, "editableTextIds": ["letters"]}},
         {"id": "letters", "type": "text", "x": 90, "y": 79, "width": 40, "height": 26,
          "zIndex": 11, "text": "AI", "metadata": {"rawOCRBBox": [90, 79, 130, 105],

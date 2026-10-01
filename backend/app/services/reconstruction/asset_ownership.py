@@ -21,10 +21,11 @@ def is_badge_owned_text(item: dict, layout: dict) -> bool:
         if asset.get("type") != "image":
             continue
         metadata = asset.get("metadata") or {}
-        if str(asset.get("id")) == owner_id and metadata.get("wholeBadgeAsset"):
+        whole_badge = metadata.get("wholeBadgeAsset") or metadata.get("componentType") == "wholeBadgeImage"
+        if str(asset.get("id")) == owner_id and whole_badge:
             return True
         image_text_ids = [*metadata.get("editableTextIds", []), *metadata.get("restoredImageOwnedTextIds", [])]
-        if (metadata.get("preserveWholeAsset") and item_id in image_text_ids
+        if (whole_badge and item_id in image_text_ids
                 and _overlap(_text_box(item), _image_box(asset))):
             return True
     return False

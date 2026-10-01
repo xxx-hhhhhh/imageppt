@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.services.reconstruction.asset_ownership import restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, restore_image_owned_text
 from app.services.pptx import renderer
 
 
@@ -63,3 +63,17 @@ def test_visible_editable_letters_prevent_source_text_restoration(tmp_path: Path
 
     assert restore_image_owned_text(root / "source.png", layout, asset_dir, project_id) == []
     assert layout["elements"][0]["src"].endswith("/badge.png")
+
+
+def test_generic_image_does_not_claim_suppressed_normal_text_as_badge() -> None:
+    text = {"id": "label", "type": "text", "x": 10, "y": 10, "width": 40, "height": 20,
+            "text": "Normal label", "metadata": {"suppressed": True, "ownedBy": "photo"}}
+    layout = {"elements": [
+        {"id": "photo", "type": "image", "x": 0, "y": 0, "width": 100, "height": 80,
+         "metadata": {"preserveWholeAsset": True, "editableTextIds": ["label"]}},
+        text,
+    ]}
+
+    assert not is_badge_owned_text(text, layout)
+    layout["elements"][0]["metadata"]["wholeBadgeAsset"] = True
+    assert is_badge_owned_text(text, layout)
