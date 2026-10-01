@@ -52,6 +52,22 @@ def test_audit_detects_neutral_plate_missing_from_gradient_page(tmp_path):
     assert report["missingBackplates"] + report["missingVisualObjects"] >= 1
 
 
+def test_audit_counts_visual_recolored_instead_of_erased(tmp_path):
+    source = np.full((150, 250, 3), 255, np.uint8)
+    cv2.rectangle(source, (35, 35), (175, 105), (70, 95, 185), -1)
+    preview = source.copy()
+    preview[35:106, 35:176] = (190, 210, 235)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    cv2.imwrite(str(tmp_path / "preview.png"), preview)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png", tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualPixels"] == 0
+    assert report["visualMismatchPixels"] > 9000
+    assert report["salientVisualPixels"] >= report["visualMismatchPixels"]
+
+
 def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (70, 70), 22, (40, 80, 180), -1)

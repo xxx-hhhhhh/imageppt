@@ -321,8 +321,12 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
 
 
 def _visual_retention_regressed(before: dict, after: dict) -> bool:
-    return (float(after.get("retainedVisualCoverage", 1)) < float(before.get("retainedVisualCoverage", 1)) - 0.01
-            and int(after.get("missingVisualPixels") or 0) > int(before.get("missingVisualPixels") or 0) + 24)
+    lost_to_white = (float(after.get("retainedVisualCoverage", 1)) < float(before.get("retainedVisualCoverage", 1)) - 0.01
+                     and int(after.get("missingVisualPixels") or 0) > int(before.get("missingVisualPixels") or 0) + 24)
+    salient = max(int(before.get("salientVisualPixels") or 0), int(after.get("salientVisualPixels") or 0))
+    mismatch_growth = int(after.get("visualMismatchPixels") or 0) - int(before.get("visualMismatchPixels") or 0)
+    lost_to_wrong_color = salient > 0 and mismatch_growth > max(24, round(salient * 0.005))
+    return lost_to_white or lost_to_wrong_color
 
 
 def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:

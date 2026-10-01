@@ -19,7 +19,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
-              "visualMismatchRegions": 0,
+              "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "missingVisualPixels": 0, "retainedVisualCoverage": 1.0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
@@ -56,11 +56,13 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
                 x1, y1, x2, y2 = box
                 salient[y1:y2, x1:x2] = False
     missing_pixels = int(np.count_nonzero(salient & np.all(preview >= 253, axis=2)))
+    report["salientVisualPixels"] = int(np.count_nonzero(salient))
     report["missingVisualPixels"] = missing_pixels
     report["retainedVisualCoverage"] = round(1 - missing_pixels / max(1, int(np.count_nonzero(salient))), 4)
     minimum = max(24, round(width * height * 0.0001))
     color_error = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
     mismatched = salient & (color_error >= 48) & ~np.all(preview >= 253, axis=2)
+    report["visualMismatchPixels"] = int(np.count_nonzero(mismatched))
     for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
         report["visualMismatchRegions"] += 1
         report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
