@@ -260,7 +260,7 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             elements.append({"id": identifier, "type": "roundedRectangle" if rounded else "rectangle", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": _hex_bgr(fill_color), "stroke": _hex_bgr(border_color), "strokeWidth": 1, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
         else:
             assets += 1
-            clean = cv2.inpaint(crop, text_mask, 3, cv2.INPAINT_TELEA) if np.any(text_mask) else crop
+            clean = _clean_container_text(crop, text_mask)
             alpha = np.zeros((h, w), np.uint8)
             local_contour = contour - np.array([[[x, y]]])
             cv2.drawContours(alpha, [local_contour], -1, 255, -1)
@@ -274,6 +274,34 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             occupied[y:y + h, x:x + w] = 255
         selected.append(box)
     return shapes, assets
+
+
+def _clean_container_text(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Restore broad OCR boxes from same-row support when the surface is continuous.
+
+    Inpainting a box spanning a colored header and a white card can pull white
+    pixels up into the header. Rows with matching support on both sides retain
+    their own surface; irregular rows still use the usual local inpainting.
+    """
+    if not np.any(mask):
+        return crop
+    cleaned = cv2.inpaint(crop, mask, 3, cv2.INPAINT_TELEA)
+    height, width = mask.shape
+    for y in range(height):
+        runs = np.flatnonzero(np.diff(np.pad(mask[y] > 0, (1, 1)).astype(np.int8)))
+        for left, right in zip(runs[::2], runs[1::2]):
+            if left < 3 or right + 3 > width:
+                continue
+            before = crop[y, left - 3:left].astype(np.float32)
+            after = crop[y, right:right + 3].astype(np.float32)
+            if max(float(np.ptp(before, axis=0).max()), float(np.ptp(after, axis=0).max())) > 25:
+                continue
+            start, end = np.median(before, axis=0), np.median(after, axis=0)
+            if float(np.max(np.abs(start - end))) > 55:
+                continue
+            interpolation = np.linspace(start, end, right - left + 2)[1:-1]
+            cleaned[y, left:right] = np.uint8(np.round(interpolation))
+    return cleaned
 
 
 def _hex_bgr(color: np.ndarray) -> str:

@@ -192,6 +192,23 @@ def test_textured_bordered_panel_uses_independent_text_clean_image(tmp_path):
     assert asset_path.read_bytes() == before
 
 
+def test_text_cleanup_preserves_colored_header_above_white_panel():
+    from app.services.reconstruction.white_objectization import _clean_container_text
+
+    source = np.full((64, 220, 3), 255, np.uint8)
+    for x in range(220):
+        source[:32, x] = (180 + x // 12, 110 + x // 18, 30 + x // 20)
+    cv2.putText(source, "HEADING", (35, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+    mask = np.zeros(source.shape[:2], np.uint8)
+    mask[12:43, 31:180] = 255  # OCR box crosses the header edge.
+
+    cleaned = _clean_container_text(source, mask)
+
+    assert np.max(np.abs(cleaned[21, 95].astype(int) - source[21, 20].astype(int))) < 30
+    assert np.min(cleaned[39, 95]) >= 245
+    assert np.max(np.abs(cleaned[31, 95].astype(int) - source[31, 95].astype(int))) < 10
+
+
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     source = np.full((220, 360, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)
