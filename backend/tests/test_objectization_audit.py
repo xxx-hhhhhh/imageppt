@@ -209,6 +209,26 @@ def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     assert any(item["problem"] == "blankVisualOwner" and item["elementId"] == "badge" for item in report["issues"])
 
 
+def test_sparse_transparent_asset_is_not_falsely_reported_blank(tmp_path):
+    source = np.full((150, 240, 3), 255, np.uint8)
+    source[60:72, 80:91] = (35, 70, 190)
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    asset = np.zeros((50, 60, 4), np.uint8)
+    asset[:, :, :3] = 255
+    asset[20:32, 20:31, :3] = (35, 70, 190)
+    asset[20:32, 20:31, 3] = 255
+    cv2.imwrite(str(asset_dir / "sparse.png"), asset)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)), ("preview.png", source)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "sparse", "type": "image", "x": 60, "y": 40, "width": 60, "height": 50,
+                             "src": "/media/assets/demo/sparse.png"}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png", tmp_path / "preview.png", layout)
+
+    assert report["blankVisualOwners"] == 0
+
+
 def test_transparent_image_bbox_does_not_hide_missing_visual_content(tmp_path):
     source = np.full((150, 300, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 45), (75, 100), (40, 90, 180), -1)
