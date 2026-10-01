@@ -150,6 +150,21 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         declared_replacements.add(old_id)
         used_replacements.add(new_id)
     missing_unreplaced = missing_existing - declared_replacements
+    before_visuals = {str(item.get("id")): item for item in protected_visuals(baseline)}
+    after_visuals = {str(item.get("id")): item for item in protected_visuals(candidate)}
+    missing_shapes = {key: item for key, item in before_visuals.items()
+                      if item.get("type") != "image"
+                      and (key not in after_visuals or after_visuals[key].get("type") != item.get("type"))}
+    new_visuals = [item for key, item in after_visuals.items()
+                   if key not in before_visuals or before_visuals[key].get("type") != item.get("type")]
+    used_shape_replacements: set[str] = set()
+    for old_id, old in list(missing_shapes.items()):
+        replacement = next((item for item in new_visuals
+                            if str(item.get("id")) not in used_shape_replacements
+                            and _old_asset_coverage(old, item) >= 0.9), None)
+        if replacement is not None:
+            used_shape_replacements.add(str(replacement.get("id")))
+            del missing_shapes[old_id]
     preserved = sum(before_by_id[key].get("src") == after_by_id[key].get("src") for key in before_by_id.keys() & after_by_id.keys())
     replaced = len(before_by_id.keys() & after_by_id.keys()) - preserved + len(declared_replacements)
     background_before_white = white_area_ratio(background_before)
@@ -162,6 +177,8 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         errors.append("missing_assets")
     if missing_unreplaced or after["assets"] < before["assets"]:
         errors.append("lost_existing_images")
+    if missing_shapes:
+        errors.append("lost_existing_shapes")
     if background_after_white > background_before_white + 0.035:
         errors.append("background_over_whitened")
     if preview_after_white > preview_before_white + 0.035:

@@ -518,6 +518,26 @@ def test_integrity_allows_only_declared_complete_image_replacement(tmp_path: Pat
     assert "lost_existing_images" in assess_revision(root, baseline, unlinked, *paths)["integrityErrors"]
 
 
+def test_integrity_rejects_silent_shape_loss_even_when_preview_is_unchanged(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    white = np.full((100, 160, 3), 255, np.uint8)
+    for name in ("before_bg.png", "after_bg.png", "before_preview.png", "after_preview.png"):
+        cv2.imwrite(str(root / name), white)
+    old = {"id": "plate", "type": "rectangle", "x": 30, "y": 25, "width": 80, "height": 40,
+           "style": {"fill": "#EAF2F8"}}
+    paths = [root / name for name in ("before_bg.png", "after_bg.png", "before_preview.png", "after_preview.png")]
+    baseline = {"elements": [old]}
+
+    lost = {"elements": [{**old, "metadata": {"suppressed": True}}]}
+    assert "lost_existing_shapes" in assess_revision(root, baseline, lost, *paths)["integrityErrors"]
+
+    replacement = {"id": "plate_cutout", "type": "rectangle", "x": 29, "y": 24,
+                   "width": 82, "height": 42, "style": {"fill": "#EAF2F8"}}
+    candidate = {"elements": [lost["elements"][0], replacement]}
+    assert "lost_existing_shapes" not in assess_revision(root, baseline, candidate, *paths)["integrityErrors"]
+
+
 def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
