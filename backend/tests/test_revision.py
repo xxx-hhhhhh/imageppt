@@ -270,6 +270,18 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"retainedVisualCoverage": 0.981, "missingVisualPixels": 9},
     )
     assert revision._visual_retention_regressed(
+        {"retainedVisualCoverage": 0.9998, "missingVisualPixels": 20, "salientVisualPixels": 500000, "largestMissingVisualRegion": 8},
+        {"retainedVisualCoverage": 0.9996, "missingVisualPixels": 140, "salientVisualPixels": 500000, "largestMissingVisualRegion": 120},
+    )
+    assert not revision._visual_retention_regressed(
+        {"retainedVisualCoverage": 0.9998, "missingVisualPixels": 20, "salientVisualPixels": 500000, "largestMissingVisualRegion": 8},
+        {"retainedVisualCoverage": 0.9998, "missingVisualPixels": 30, "salientVisualPixels": 500000, "largestMissingVisualRegion": 9},
+    )
+    assert not revision._visual_retention_regressed(
+        {"missingVisualPixels": 6, "salientVisualPixels": 600000, "largestMissingVisualRegion": 3},
+        {"missingVisualPixels": 456, "salientVisualPixels": 600000, "largestMissingVisualRegion": 25},
+    )
+    assert revision._visual_retention_regressed(
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10, "salientVisualPixels": 10000, "visualMismatchPixels": 120},
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10, "salientVisualPixels": 10000, "visualMismatchPixels": 190},
     )

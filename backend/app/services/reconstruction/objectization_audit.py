@@ -21,7 +21,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
-              "missingVisualPixels": 0, "retainedVisualCoverage": 1.0,
+              "missingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
@@ -60,7 +60,10 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             if box:
                 x1, y1, x2, y2 = box
                 salient[y1:y2, x1:x2] = False
-    missing_pixels = int(np.count_nonzero(salient & np.all(preview >= 253, axis=2)))
+    missing_mask = np.uint8(salient & np.all(preview >= 253, axis=2))
+    missing_pixels = int(np.count_nonzero(missing_mask))
+    component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(missing_mask, 8)
+    report["largestMissingVisualRegion"] = int(np.max(component_stats[1:, cv2.CC_STAT_AREA])) if component_count > 1 else 0
     report["salientVisualPixels"] = int(np.count_nonzero(salient))
     report["missingVisualPixels"] = missing_pixels
     report["retainedVisualCoverage"] = round(1 - missing_pixels / max(1, int(np.count_nonzero(salient))), 4)

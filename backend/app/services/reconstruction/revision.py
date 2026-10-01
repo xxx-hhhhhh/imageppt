@@ -338,9 +338,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
 
 
 def _visual_retention_regressed(before: dict, after: dict) -> bool:
-    lost_to_white = (float(after.get("retainedVisualCoverage", 1)) < float(before.get("retainedVisualCoverage", 1)) - 0.01
-                     and int(after.get("missingVisualPixels") or 0) > int(before.get("missingVisualPixels") or 0) + 24)
     salient = max(int(before.get("salientVisualPixels") or 0), int(after.get("salientVisualPixels") or 0))
+    # Page-wide coverage can round to 1.0 even when a small but meaningful
+    # icon disappears. Keep an absolute pixel guard alongside the ratio.
+    missing_growth = int(after.get("missingVisualPixels") or 0) - int(before.get("missingVisualPixels") or 0)
+    missing_threshold = max(24, min(96, round(salient * 0.0002)))
+    largest_after = int(after.get("largestMissingVisualRegion", missing_growth))
+    largest_before = int(before.get("largestMissingVisualRegion", 0))
+    lost_to_white = (missing_growth > missing_threshold and largest_after > missing_threshold
+                     and largest_after > largest_before + 24)
     mismatch_growth = int(after.get("visualMismatchPixels") or 0) - int(before.get("visualMismatchPixels") or 0)
     lost_to_wrong_color = salient > 0 and mismatch_growth > max(24, round(salient * 0.005))
     return lost_to_white or lost_to_wrong_color

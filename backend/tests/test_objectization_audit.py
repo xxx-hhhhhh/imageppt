@@ -90,6 +90,19 @@ def test_suppressed_badge_text_does_not_hide_erased_internal_symbol(tmp_path):
     assert any(issue["problem"] in {"missingVisualObject", "visualContentMismatch"} for issue in report["issues"])
 
 
+def test_audit_reports_contiguous_missing_visual_region(tmp_path):
+    source = np.full((120, 180, 3), 255, np.uint8)
+    cv2.rectangle(source, (60, 40), (79, 59), (20, 90, 180), -1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    cv2.imwrite(str(tmp_path / "preview.png"), np.full_like(source, 255))
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["largestMissingVisualRegion"] >= 380
+
+
 def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (70, 70), 22, (40, 80, 180), -1)
