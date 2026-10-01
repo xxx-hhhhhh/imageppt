@@ -266,7 +266,7 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             cv2.drawContours(alpha, [local_contour], -1, 255, -1)
             path = asset_dir / f"white_border_page_{page_index}_{assets:03d}.png"
             cv2.imwrite(str(path), np.dstack((clean, alpha)))
-            elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")], "textCleaned": bool(texts)}})
+            elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")], "textCleaned": bool(texts), "editableTextIds": [item["id"] for item in texts if item.get("id")]}})
         if flat:
             _occupy_shape_color(source, occupied, box, _hex_bgr(fill_color))
             _occupy_shape_color(source, occupied, box, _hex_bgr(border_color))

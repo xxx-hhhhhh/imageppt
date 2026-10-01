@@ -181,7 +181,15 @@ def test_textured_bordered_panel_uses_independent_text_clean_image(tmp_path):
     assert stats["whiteContainerShapes"] >= 1
     assert assets and assets[0]["zIndex"] < 20
     assert assets[0]["metadata"]["textCleaned"] is True
-    assert (tmp_path / "assets" / f"{assets[0]['id']}.png").exists()
+    assert assets[0]["metadata"]["editableTextIds"] == ["info"]
+    asset_path = tmp_path / "assets" / f"{assets[0]['id']}.png"
+    assert asset_path.exists()
+    before = asset_path.read_bytes()
+    assets[0]["src"] = str(asset_path)
+    from app.services.reconstruction.text_erasure import erase_editable_text_sources
+    cleanup = erase_editable_text_sources(tmp_path / "backgrounds" / "page_1.png", layout)
+    assert cleanup["assetTextErased"] == 0
+    assert asset_path.read_bytes() == before
 
 
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
