@@ -146,7 +146,9 @@ def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, h
     box_area = max(1, (x2 - x1) * (y2 - y1))
     margin_x, margin_y = max(5, round(width * 0.03)), max(5, round(height * 0.03))
     near_all_edges = x1 <= margin_x and y1 <= margin_y and x2 >= width - margin_x and y2 >= height - margin_y
-    return not detailed_page and near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.82
+    # A dense irregular silhouette can touch every margin while still being a
+    # meaningful movable object. Reserve this exclusion for nearly solid fills.
+    return not detailed_page and near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.97
 
 
 def is_meaningful_stroke(w: int, h: int, pixels: int, width: int, height: int) -> bool:

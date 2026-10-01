@@ -101,6 +101,30 @@ def test_large_bounded_panel_is_native_and_keeps_inner_visual_movable(tmp_path, 
     assert audit["missingVisualPixels"] < 100
 
 
+def test_near_page_irregular_artwork_is_not_discarded_as_environment(tmp_path, monkeypatch):
+    from app.services.pptx import renderer
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    source = np.full((240, 420, 3), 255, np.uint8)
+    contour = np.array([[4, 25], [110, 4], [290, 5], [415, 30], [410, 175],
+                        [385, 234], [80, 235], [5, 210]], np.int32)
+    cv2.fillPoly(source, [contour], (95, 130, 175))
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    preview_path = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 420, "height": 240}, "elements": []}
+
+    objectize_on_white(source_path, background_path, layout, tmp_path / "demo" / "assets", "demo", 1)
+    render_preview(background_path, layout, preview_path)
+    preview = cv2.imread(str(preview_path))
+
+    assert len([item for item in layout["elements"] if item["type"] == "image"]) == 1
+    assert np.array_equal(preview[120, 200], source[120, 200])
+    assert np.array_equal(preview[0, 0], source[0, 0])
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    assert audit_objectization(source_path, background_path, preview_path, layout)["missingVisualPixels"] == 0
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)

@@ -105,6 +105,25 @@ def test_large_irregular_map_and_silk_remain_separate_movable_assets(tmp_path):
     assert stats["residualObjectizationRate"] > 0.95
 
 
+def test_near_page_sized_irregular_silhouette_is_a_transparent_movable_asset(tmp_path):
+    image = np.full((240, 420, 3), 255, np.uint8)
+    contour = np.array([[4, 25], [110, 4], [290, 5], [415, 30], [410, 175],
+                        [385, 234], [80, 235], [5, 210]], np.int32)
+    cv2.fillPoly(image, [contour], (95, 130, 175))
+
+    assets, stats = extract_residual_objects(
+        image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1,
+    )
+
+    assert len(assets) == 1
+    assert stats["residualObjectizationRate"] > 0.99
+    asset = cv2.imread(str(tmp_path / "demo" / "assets" / assets[0]["src"].split("/")[-1]), cv2.IMREAD_UNCHANGED)
+    assert asset.shape[2] == 4
+    assert asset[0, 0, 3] == 0
+    assert asset[120, 200, 3] == 255
+    assert assets[0]["width"] > 400 and assets[0]["height"] > 220
+
+
 def test_near_white_page_gradient_keeps_cards_and_ribbon_as_local_assets(tmp_path):
     height, width = 240, 420
     image = np.empty((height, width, 3), np.uint8)
