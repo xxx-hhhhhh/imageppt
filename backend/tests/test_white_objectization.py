@@ -347,7 +347,9 @@ def test_connected_flowchart_keeps_nodes_and_connectors_independently_movable(tm
     first = min(nodes, key=lambda item: item["x"])
     first["x"] += 900
     render_preview(background, layout, tmp_path / "moved.png")
-    assert np.all(cv2.imread(str(tmp_path / "moved.png"))[270, 70] >= 245)
+    # The card owns its curved border as well as its fill. Moving it must not
+    # leave tiny corner assets or a bottom-edge ghost at the original position.
+    assert np.all(cv2.imread(str(tmp_path / "moved.png"))[229:312, 69:215] >= 245)
 
 
 def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):

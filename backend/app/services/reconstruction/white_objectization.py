@@ -793,12 +793,11 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         elements.append({"id": identifier, "type": "roundedRectangle" if stroke else kind, "x": ex1, "y": ey1, "width": ex2 - ex1, "height": ey2 - ey1, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": fill, "stroke": stroke or fill, "strokeWidth": 2 if stroke else 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
         _occupy_shape_color(source, occupied, box, fill)
         if stroke:
-            stroke_bgr = np.frombuffer(bytes.fromhex(stroke[1:])[::-1], dtype=np.uint8).astype(np.int16)
-            ring = occupied[ey1:ey2, ex1:ex2]
-            border = np.ones(ring.shape, np.bool_)
-            border[y - ey1:y + h - ey1, x - ex1:x + w - ex1] = False
-            matching = np.max(np.abs(source[ey1:ey2, ex1:ex2].astype(np.int16) - stroke_bgr), axis=2) <= 25
-            ring[border & matching] = 255
+            # Rounded corners can bend into the flat-color bbox. Give every
+            # matching outline pixel inside the full shape to this owner;
+            # otherwise residual extraction leaves four movable corner chips.
+            _occupy_shape_color(source, occupied,
+                                (ex1, ey1, min(width, ex2 + 1), min(height, ey2 + 1)), stroke)
         created_boxes.append(box)
     return created
 
