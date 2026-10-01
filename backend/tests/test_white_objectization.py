@@ -294,6 +294,38 @@ def test_pale_module_backplate_survives_with_foreground_and_group(tmp_path):
     assert len(slide.shapes) == 1
 
 
+def test_edge_aligned_pale_plate_survives_preview_and_ppt(tmp_path, monkeypatch):
+    from app.services.pptx import renderer
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    height, width = 180, 300
+    source = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        source[y, :] = (shade, shade, shade)
+    source[0:45, 55:221] = (246, 246, 246)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+
+    objectize_on_white(source_path, background_path, layout, tmp_path / "demo" / "assets", "demo", 1)
+    plate = next(item for item in layout["elements"] if item["x"] <= 55
+                 and item["x"] + item["width"] >= 220 and item["y"] == 0
+                 and item["height"] < height * 0.4)
+    preview_path = tmp_path / "preview.png"
+    render_preview(background_path, layout, preview_path)
+    assert np.max(np.abs(cv2.imread(str(preview_path))[15, 100].astype(int) - source[15, 100].astype(int))) < 3
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    PPTXRenderer()._add_element(slide, plate, 0.02, 0.02)
+    assert len(slide.shapes) == 1
+    erased_path = tmp_path / "erased.png"
+    cv2.imwrite(str(erased_path), np.full_like(source, 255))
+    audit = audit_objectization(source_path, background_path, erased_path, {"elements": []})
+    assert any(issue["problem"] in {"missingBackplate", "missingVisualObject"}
+               and issue["bbox"][1] == 0 for issue in audit["issues"])
+
+
 def test_page_wide_pale_background_is_not_a_local_backplate(tmp_path):
     source = np.full((240, 400, 3), 245, np.uint8)
     source_path = tmp_path / "page.png"
