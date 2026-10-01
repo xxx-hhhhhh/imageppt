@@ -205,6 +205,45 @@ def test_complex_white_slide_keeps_visual_assets_across_two_revisions(tmp_path: 
             assert preview_path.read_bytes() == prior_preview
 
 
+def test_revision_ignores_stale_missing_visual_issue_when_badge_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("preserved-badge")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((150, 240, 3), 255, np.uint8)
+    cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)
+    cv2.line(source, (75, 75), (115, 75), (255, 255, 255), 6)
+    cv2.line(source, (95, 55), (95, 95), (255, 255, 255), 6)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    badge = source[35:116, 55:136].copy()
+    alpha = np.zeros((81, 81), np.uint8)
+    cv2.circle(alpha, (40, 40), 40, 255, -1)
+    cv2.imwrite(str(root / "assets" / "badge.png"), np.dstack((badge, alpha)))
+    layout = {"slide": {"width": 240, "height": 150}, "elements": [
+        {"id": "badge", "type": "image", "x": 55, "y": 35, "width": 81, "height": 81,
+         "zIndex": 10, "src": f"/media/assets/{project_id}/badge.png",
+         "metadata": {"reconstructionStrategy": "cutout_image", "wholeBadgeAsset": True}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    stale = {"problem": "missingVisualObject", "elementId": "unowned_75_55", "bbox": [75, 55, 116, 96], "pixelArea": 200}
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    score["issues"].append(stale)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    (root / "problem_report.json").write_text(json.dumps({"issuesAfter": [stale]}), encoding="utf-8")
+    prior_preview = preview.read_bytes()
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert not any(issue["problem"] == "missingVisualObject" for issue in result["targetedIssues"])
+    assert inspect_assets(root, store.get_slide(project_id, 1))["assets"] == 1
+    assert preview.read_bytes() == prior_preview
+
+
 def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)

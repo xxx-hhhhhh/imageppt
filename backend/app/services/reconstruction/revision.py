@@ -23,6 +23,8 @@ from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, mea
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground"}
+
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
     """Continue local revisions while a high-quality page measurably improves."""
@@ -96,7 +98,12 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     baseline_audit = audit_objectization(source, background, preview, baseline)
     score_before["objectizationAudit"] = baseline_audit
     saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
-    issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene), *baseline_audit["issues"]]}.values())
+    # Saved reports and scores describe the previous render. Pixel-derived
+    # objectization issues must be revalidated against the current assets and
+    # preview before a revision is allowed to create another visual object.
+    carry_issues = [item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene)]
+                    if item.get("problem") not in OBJECTIZATION_AUDIT_PROBLEMS]
+    issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*carry_issues, *baseline_audit["issues"]]}.values())
     baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
     issues_before = [issue for issue in issues_before if not (
         issue.get("problem") == "missingEditableText"
