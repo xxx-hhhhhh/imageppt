@@ -180,15 +180,17 @@ def layer_objectized_elements(elements: list[dict]) -> None:
     containers = [item for item in elements if not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
                   and ((item.get("metadata") or {}).get("layerRole") == "container"
                        or item.get("type") in {"rectangle", "roundedRectangle", "ellipse"} and (item.get("style") or {}).get("fill"))]
-    residuals = [item for item in elements if (item.get("metadata") or {}).get("layerRole") == "residual"]
+    visuals = [item for item in elements if item.get("type") == "image"
+               and (item.get("metadata") or {}).get("layerRole") != "container"
+               and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     texts = [item for item in elements if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
-    for asset in residuals:
+    for asset in visuals:
         asset_box = _box_unclipped(asset)
         below = [item for item in containers if _intersects(asset_box, _box_unclipped(item))]
         asset["zIndex"] = max([int(item.get("zIndex") or 0) for item in below], default=0) + 1
     for text in texts:
         box = _box_unclipped(text)
-        below = [item for item in containers + residuals if _intersects(box, _box_unclipped(item))]
+        below = [item for item in containers + visuals if _intersects(box, _box_unclipped(item))]
         if below:
             text["zIndex"] = max(int(text.get("zIndex") or 0), max(int(item.get("zIndex") or 0) for item in below) + 1)
 

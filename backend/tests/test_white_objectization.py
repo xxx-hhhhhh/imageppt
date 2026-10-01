@@ -553,6 +553,29 @@ def test_native_white_card_stays_below_chart_detail_asset(tmp_path):
     assert after["coveredMissingVisualPixels"] < before["coveredMissingVisualPixels"]
 
 
+def test_planned_icon_image_stays_above_native_card_fill(tmp_path):
+    source = np.full((100, 160, 3), 255, np.uint8)
+    cv2.circle(source, (80, 50), 20, (10, 175, 35), -1)
+    icon = tmp_path / "icon.png"
+    cv2.imwrite(str(icon), source[30:71, 60:101])
+    layout = {"slide": {"width": 160, "height": 100}, "elements": [
+        {"id": "planned_icon", "type": "image", "x": 60, "y": 30, "width": 41, "height": 41,
+         "zIndex": 2, "src": str(icon), "metadata": {"reconstructionStrategy": "local_image"}},
+        {"id": "card", "type": "roundedRectangle", "x": 25, "y": 15, "width": 110, "height": 70,
+         "zIndex": 10, "style": {"fill": "#FFFFFF", "stroke": "#FFFFFF"},
+         "metadata": {"reconstructionStrategy": "native_shape"}},
+    ]}
+
+    layer_objectized_elements(layout["elements"])
+
+    assert layout["elements"][0]["zIndex"] > layout["elements"][1]["zIndex"]
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    assert np.array_equal(cv2.imread(str(preview))[50, 80], source[50, 80])
+
+
 def test_logical_group_does_not_block_round_asset_classification(tmp_path):
     source = np.full((160, 260, 3), 255, np.uint8)
     cv2.circle(source, (90, 80), 27, (45, 95, 185), -1)
