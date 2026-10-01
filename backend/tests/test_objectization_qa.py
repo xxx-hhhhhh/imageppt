@@ -15,6 +15,26 @@ from app.services.visual_qa.analyzer import render_preview
 FIXTURE = Path(__file__).parent / "fixtures" / "complex_modules.png"
 
 
+def test_module_qa_does_not_copy_a_shared_page_column_for_each_group(tmp_path):
+    source = np.full((300, 400, 3), 255, np.uint8)
+    source[45:255, 40:360] = (236, 243, 247)
+    path = tmp_path / "shared-column.png"
+    cv2.imwrite(str(path), source)
+    layout = {"elements": [
+        {"id": f"label_{index}", "type": "text", "text": f"Section {index}",
+         "x": 45 + index * 100, "y": 70 + index * 60, "width": 85, "height": 25,
+         "groupId": f"group_{index}", "zIndex": 20}
+        for index in range(3)
+    ]}
+
+    report = repair_objectized_modules(path, layout, tmp_path / "assets", "shared")
+
+    assert report["moduleImageFallbacks"] == 0
+    assert report["recoveredBackplates"] == 0
+    assert all(item["type"] == "text" for item in layout["elements"])
+    assert any(issue["problem"] == "modulePlateSpansOtherModules" for issue in report["issues"])
+
+
 def test_objectization_qa_restores_missing_plate_and_repairs_square_badge(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.pptx.renderer.OUTPUTS_DIR", tmp_path)
     project_id = "complex-modules"

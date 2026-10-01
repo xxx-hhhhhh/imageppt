@@ -190,6 +190,17 @@ def layer_objectized_elements(elements: list[dict]) -> None:
                  if (item.get("metadata") or {}).get("reconstructionStrategySource") != "colored_text_support"
                  and _intersects(asset_box, _box_unclipped(item))]
         asset["zIndex"] = max([int(item.get("zIndex") or 0) for item in below], default=0) + 1
+    # Planned image crops own their source visuals; residual crops only fill
+    # surrounding gaps and must stay underneath the planned object.
+    for planned in visuals:
+        if (planned.get("metadata") or {}).get("reconstructionStrategySource") != "planner":
+            continue
+        box = _box_unclipped(planned)
+        residuals = [item for item in visuals if item is not planned
+                     and (item.get("metadata") or {}).get("layerRole") == "residual"
+                     and _intersects(box, _box_unclipped(item))]
+        planned["zIndex"] = max(int(planned.get("zIndex") or 0),
+                                max([int(item.get("zIndex") or 0) for item in residuals], default=0) + 1)
     # A text support replaces pixels in older residual assets. Keep it above
     # those assets so the editor can select its visible surface, while the
     # editable label remains above the support.

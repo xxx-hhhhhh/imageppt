@@ -26,6 +26,7 @@ from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.colored_text_support import extract_colored_text_supports
+from app.services.reconstruction.visual_asset_ownership import transfer_planned_visual_pixels
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
@@ -179,6 +180,8 @@ class ReconstructionPipeline:
             "editableTextCount": 0,
             "nonEditableTextCount": 0,
             "ghostingCount": 0,
+            "plannedVisualPixelsClearedFromOtherAssets": 0,
+            "trimmedOverlappingAssets": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
@@ -286,6 +289,7 @@ class ReconstructionPipeline:
                 reconstruction_stats[key] += value
             if white_objectized:
                 reconstruction_stats.update(extract_colored_text_supports(normalized_path, layout, page_output / "assets", project_id, page_index))
+                reconstruction_stats.update(transfer_planned_visual_pixels(layout, page_output / "assets", project_id))
                 layer_objectized_elements(layout.get("elements", []))
             if local_provider:
                 reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
@@ -381,6 +385,8 @@ class ReconstructionPipeline:
                     normalized_path, background_path, preview_path, layout, page_output / "assets", project_id, page_index)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
             score["initialRecoveredVisuals"] = reconstruction_stats["initialRecoveredVisuals"]
+            score["plannedVisualPixelsClearedFromOtherAssets"] = reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"]
+            score["trimmedOverlappingAssets"] = reconstruction_stats["trimmedOverlappingAssets"]
             if white_objectized:
                 score["objectizationQA"] = object_qa
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
@@ -533,6 +539,8 @@ class ReconstructionPipeline:
                 "residualCandidateArea": reconstruction_stats["residualCandidateArea"],
                 "residualObjectizationRate": reconstruction_stats["residualObjectizationRate"],
                 "initialRecoveredVisuals": reconstruction_stats["initialRecoveredVisuals"],
+                "plannedVisualPixelsClearedFromOtherAssets": reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"],
+                "trimmedOverlappingAssets": reconstruction_stats["trimmedOverlappingAssets"],
                 "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],

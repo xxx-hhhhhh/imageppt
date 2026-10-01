@@ -10,6 +10,7 @@ import numpy as np
 
 from app.services.reconstruction.asset_ownership import is_badge_owned_text
 from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
+from app.services.reconstruction.visual_asset_ownership import count_duplicate_planned_visual_pixels
 
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
@@ -23,12 +24,16 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
-              "paleAssetGapPixels": 0,
+              "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
         return report
     height, width = source.shape[:2]
+    report["duplicatePlannedVisualPixels"] = count_duplicate_planned_visual_pixels(layout, source_path.parent / "assets")
+    if report["duplicatePlannedVisualPixels"] >= max(100, round(width * height * 0.0001)):
+        report["issues"].append({"problem": "duplicatePlannedVisualOwnership",
+                                 "pixelArea": report["duplicatePlannedVisualPixels"]})
     report["whiteBackground"] = bool(np.mean(np.all(background >= 250, axis=2)) >= 0.995)
     active = [item for item in layout.get("elements", []) if item.get("type") != "background" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     owner_mask = np.zeros((height, width), np.uint8)

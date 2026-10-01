@@ -39,6 +39,19 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         report["missingBackplates"] += 1
         x, y, w, h, fill, flat, contour = candidate
         box = (x, y, x + w, y + h)
+        if w * h > source.shape[0] * source.shape[1] * 0.10:
+            foreign_groups = {
+                str(item.get("groupId") or (item.get("metadata") or {}).get("groupId"))
+                for item in active if item.get("type") in {"text", "image"}
+                and (item.get("groupId") or (item.get("metadata") or {}).get("groupId"))
+                and str(item.get("groupId") or (item.get("metadata") or {}).get("groupId")) != group_id
+                and x <= float(item.get("x") or 0) + float(item.get("width") or 0) / 2 <= x + w
+                and y <= float(item.get("y") or 0) + float(item.get("height") or 0) / 2 <= y + h
+            }
+            if len(foreign_groups) >= 2:
+                report["issues"].append({"problem": "modulePlateSpansOtherModules", "groupId": group_id,
+                                         "bbox": list(box)})
+                continue
         plate = next((item for item in active if (item.get("metadata") or {}).get("layerRole") == "residual" and _covered_fraction(item, box) >= 0.8 and _box_area(item) >= w * h * 0.5), None)
         if plate is not None:
             plate["groupId"] = group_id
