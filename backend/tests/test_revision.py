@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from app.services.reconstruction import revision
 from app.services.reconstruction.revision import revise_problem_regions
 from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, recover_legacy_revision_assets
+from app.services.reconstruction.objectization_audit import audit_objectization
+from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.pptx import renderer
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
@@ -140,6 +142,43 @@ def test_image_survives_two_revisions_and_media_url_stays_valid(tmp_path: Path, 
     assert TestClient(api_main.app).get(f"/media/assets/{project_id}/visual.png").status_code == 200
     assert (root / "reconstructed_preview.png").is_file()
     assert (root / "reconstructed_preview.png").read_bytes() != before
+
+
+def test_complex_white_slide_keeps_visual_assets_across_two_revisions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    fixture = Path(__file__).parent / "fixtures" / "complex_modules.png"
+    source = cv2.imread(str(fixture))
+    assert source is not None
+    store = ProjectStore(tmp_path)
+    project_id = store.create("complex-revision")['id']
+    root = tmp_path / project_id
+    source_path = root / "source.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    preview_path = root / "reconstructed_preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": source.shape[1], "height": source.shape[0]}, "elements": []}
+    objectize_on_white(source_path, background_path, layout, root / "assets", project_id, 1)
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(source_path)})
+    store.save_slide(project_id, 1, layout)
+    render_preview(background_path, layout, preview_path)
+    score = run_visual_qa(source_path, preview_path, root, layout)
+    score.update({"detectedTextCount": 0, "editableTextCoverage": 1.0})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    for _ in range(2):
+        prior = store.get_slide(project_id, 1)
+        prior_preview = preview_path.read_bytes()
+        prior_assets = inspect_assets(root, prior)["assets"]
+        prior_audit = audit_objectization(source_path, background_path, preview_path, prior)
+        result = revise_problem_regions(store, project_id, 1)
+        current = store.get_slide(project_id, 1)
+        current_audit = audit_objectization(source_path, background_path, preview_path, current)
+        assert inspect_assets(root, current)["missingAssetCount"] == 0
+        assert inspect_assets(root, current)["assets"] >= prior_assets
+        assert current_audit["retainedVisualCoverage"] >= prior_audit["retainedVisualCoverage"] - 0.01
+        assert current_audit["visualMismatchPixels"] <= prior_audit["visualMismatchPixels"] + max(24, round(prior_audit["salientVisualPixels"] * 0.005))
+        if result["rollbackTriggered"]:
+            assert current == prior
+            assert preview_path.read_bytes() == prior_preview
 
 
 def test_missing_candidate_asset_rolls_back_without_changing_preview(tmp_path: Path, monkeypatch) -> None:
