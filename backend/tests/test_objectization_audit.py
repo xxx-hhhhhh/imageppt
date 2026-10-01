@@ -287,6 +287,48 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     assert next(item for item in layout["elements"] if item["id"] == "label")["type"] == "text"
 
 
+def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path, monkeypatch):
+    from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
+
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    project_id = "b" * 32
+    root = tmp_path / project_id
+    assets = root / "assets"
+    assets.mkdir(parents=True)
+    source = np.full((130, 260, 3), 255, np.uint8)
+    source[35:105, 25:235] = (246, 245, 244)
+    source[60:90, 25:235] = (30, 50, 190)
+    source_path = root / "source.png"
+    cv2.imwrite(str(source_path), source)
+    alpha = np.zeros((70, 210), np.uint8)
+    alpha[25:55] = 255
+    original_path = assets / "ribbon.png"
+    cv2.imwrite(str(original_path), np.dstack((source[35:105, 25:235], alpha)))
+    original_bytes = original_path.read_bytes()
+    layout = {"slide": {"width": 260, "height": 130}, "elements": [
+        {"id": "ribbon", "type": "image", "x": 25, "y": 35, "width": 210, "height": 70,
+         "zIndex": 1, "src": f"/media/assets/{project_id}/ribbon.png",
+         "metadata": {"reconstructionStrategySource": "residual_detection", "layerRole": "residual"}},
+    ]}
+    background = root / "background.png"
+    preview = root / "preview.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    render_preview(background, layout, preview)
+    created = _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1)
+
+    assert len(created) == 1
+    assert len(layout["elements"]) == 1
+    assert created[0]["id"] == "ribbon"
+    assert layout["elements"][0]["src"] != f"/media/assets/{project_id}/ribbon.png"
+    assert original_path.read_bytes() == original_bytes
+    merged = cv2.imread(str(assets / Path(layout["elements"][0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert merged[5, 5, 3] == 255
+    assert merged[35, 5, 3] == 255
+    render_preview(background, layout, preview)
+    assert np.max(np.abs(cv2.imread(str(preview)).astype(np.int16) - source.astype(np.int16))) < 3
+    assert _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1) == []
+
+
 def test_text_support_asset_erases_original_glyphs(tmp_path):
     from app.services.reconstruction.objectization_audit import _recover_text_support_gaps
 

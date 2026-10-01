@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -295,9 +296,30 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
             continue
         owner_alpha = _visual_mask(owner, box, source_path)
         gap = np.uint8(missing[y1:y2, x1:x2] & (owner_alpha == 0)) * 255
-        gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-        if np.count_nonzero(gap) < max(120, round(area * 0.004)):
+        stable_gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        if np.count_nonzero(stable_gap) < max(120, round(area * 0.004)):
             continue
+        # A residual crop and its missing pale support are one visual module.
+        # Fold the support into a staged copy of that same transparent asset so
+        # moving the ribbon/card does not leave a detached pale shadow behind.
+        if (owner.get("metadata") or {}).get("reconstructionStrategySource") == "residual_detection":
+            prior_path = asset_dir / Path(str(owner.get("src") or "")).name
+            prior = cv2.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None
+            if prior is not None and prior.ndim == 3 and prior.shape[2] == 4 and prior.shape[:2] == gap.shape:
+                merged = prior.copy()
+                selected = (gap != 0) & (merged[:, :, 3] <= 32)
+                merged[selected, :3] = source[y1:y2, x1:x2][selected]
+                merged[selected, 3] = 255
+                if np.count_nonzero(selected) >= max(120, round(area * 0.004)):
+                    identifier = f"initial_page_{page_index}_pale_merged_{uuid4().hex[:10]}"
+                    path = asset_dir / f"{identifier}.png"
+                    if cv2.imwrite(str(path), merged):
+                        owner["src"] = f"/media/assets/{project_id}/{path.name}"
+                        owner.setdefault("metadata", {}).update({"paleGapMergedPixels": int(np.count_nonzero(selected)),
+                                                                 "qaIssue": "paleAssetGap"})
+                        created.append(owner)
+                        missing[y1:y2, x1:x2][selected] = False
+                        continue
         identifier = f"initial_page_{page_index}_pale_gap_{len(created) + 1:03d}"
         path = asset_dir / f"{identifier}.png"
         if not cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], gap))):
