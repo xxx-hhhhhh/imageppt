@@ -227,7 +227,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     repair_issues = [issue for issue in target_issues if not (
         issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
         and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]
-    recovered = repair_missing_regions(source, candidate, repair_issues, root / "assets", project_id, round_number)
+    recovered = repair_missing_regions(source, candidate, repair_issues, root / "assets", project_id, round_number,
+                                       asset_prefix=f"revision_page_{page}_round_{round_number}")
     changed_ids.update(str(item["id"]) for item in recovered)
     for issue in target_issues:
         if issue["problem"] != "visualContentMismatch" or not isinstance(issue.get("bbox"), list):

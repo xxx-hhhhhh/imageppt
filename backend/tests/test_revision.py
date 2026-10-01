@@ -90,6 +90,43 @@ def test_revision_targets_missing_visual_before_color_mismatches(tmp_path: Path,
     assert any(issue["problem"] == "missingVisualObject" for issue in result["targetedIssues"])
 
 
+def test_same_revision_round_on_two_pages_keeps_both_visual_assets(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("two-page-assets")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    for page, color in ((1, (35, 90, 185)), (2, (80, 160, 45))):
+        source = np.full((130, 240, 3), 255, np.uint8)
+        cv2.rectangle(source, (70, 40), (110, 80), color, -1)
+        source_path = root / ("source.png" if page == 1 else f"source_{page}.png")
+        preview = root / ("reconstructed_preview.png" if page == 1 else f"reconstructed_preview_{page}.png")
+        score_path = root / ("visual_score.json" if page == 1 else f"visual_score_{page}.json")
+        background = root / "backgrounds" / f"page_{page}.png"
+        cv2.imwrite(str(source_path), source)
+        cv2.imwrite(str(background), np.full_like(source, 255))
+        layout = {"slide": {"width": 240, "height": 130}, "elements": []}
+        store.save_slide(project_id, page, layout)
+        render_preview(background, layout, preview)
+        score_path.write_text(json.dumps(run_visual_qa(source_path, preview, root, layout)), encoding="utf-8")
+
+    first = revise_problem_regions(store, project_id, 1)
+    first_image = next(item for item in store.get_slide(project_id, 1)["elements"] if item["type"] == "image")
+    first_path = root / "assets" / Path(first_image["src"]).name
+    first_bytes = first_path.read_bytes()
+    second = revise_problem_regions(store, project_id, 2)
+    second_image = next(item for item in store.get_slide(project_id, 2)["elements"] if item["type"] == "image")
+    second_path = root / "assets" / Path(second_image["src"]).name
+
+    assert first["accepted"] and second["accepted"]
+    assert first["revisionRound"] == second["revisionRound"] == 1
+    assert first_path != second_path
+    assert first_path.read_bytes() == first_bytes
+    assert second_path.is_file()
+    assert inspect_assets(root, store.get_slide(project_id, 1))["missingAssetCount"] == 0
+    assert inspect_assets(root, store.get_slide(project_id, 2))["missingAssetCount"] == 0
+
+
 def test_revision_endpoint_uses_saved_page_and_reports_result(tmp_path: Path, monkeypatch) -> None:
     store, project_id, _ = _project(tmp_path, suppressed=True)
     monkeypatch.setattr(api_main, "store", store)
