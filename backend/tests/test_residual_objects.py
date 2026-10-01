@@ -204,6 +204,7 @@ def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
     assets, stats = extract_residual_objects(image, np.zeros((height, width), np.uint8),
                                              tmp_path / "assets", "skyline", 1)
     assert stats["residualObjectizationRate"] > 0.99
+    assert len(assets) == 1
     assert any(item["x"] <= 205 < item["x"] + item["width"] and
                item["y"] <= 260 < item["y"] + item["height"] for item in assets)
     assert all(item["width"] * item["height"] < width * height * 0.55 for item in assets)
@@ -213,7 +214,7 @@ def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
     layout = {"slide": {"width": width, "height": height}, "elements": []}
     objectize_on_white(source_path, background_path, layout, tmp_path / "pipeline_assets", "skyline", 1)
     assert np.all(cv2.imread(str(background_path)) == 255)
-    assert sum(item["type"] == "image" for item in layout["elements"]) >= 2
+    assert sum(item["type"] == "image" for item in layout["elements"]) == 1
     for item in layout["elements"]:
         if item["type"] == "image":
             item["src"] = str(tmp_path / "pipeline_assets" / Path(item["src"]).name)

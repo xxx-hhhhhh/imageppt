@@ -250,9 +250,14 @@ def _split_component(mask: np.ndarray, x: int, y: int, page_width: int, page_hei
     mask = mask[top:bottom, left:right]
     x, y = x + left, y + top
     h, w = mask.shape
-    if depth >= 3 or w * h < page_width * page_height * 0.08:
-        return [(x, y, mask)]
     pixels = int(np.count_nonzero(mask))
+    page_area = page_width * page_height
+    # A bounded, substantially filled silhouette is already one useful
+    # movable object. Sparse seams inside a skyline or ribbon should not
+    # arbitrarily cut its shared base into separate image pieces.
+    if (depth >= 3 or w * h < page_area * 0.08
+            or (w * h < page_area * 0.45 and pixels / (w * h) >= 0.35)):
+        return [(x, y, mask)]
     best: tuple[float, int, int] | None = None
     for axis, span in ((0, h), (1, w)):
         if span < max(80, round((page_height if axis == 0 else page_width) * 0.22)):
@@ -277,7 +282,6 @@ def _split_component(mask: np.ndarray, x: int, y: int, page_width: int, page_hei
             if best is None or score > best[0]:
                 best = (score, axis, cut)
     if best is None:
-        page_area = page_width * page_height
         minimum_fraction = 0.75 if depth == 0 else 0.30
         if (not fallback_tiling or depth >= 2 or w * h < page_area * minimum_fraction
                 or pixels < page_area * (0.35 if depth == 0 else 0.15)):
