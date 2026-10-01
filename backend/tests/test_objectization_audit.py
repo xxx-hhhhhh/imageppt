@@ -39,6 +39,21 @@ def test_audit_reports_large_colored_visual_mismatch(tmp_path):
                for issue in report["issues"])
 
 
+def test_audit_reports_large_visual_still_baked_into_background(tmp_path):
+    source = np.full((200, 400, 3), 255, np.uint8)
+    source[20:180, 20:380] = (40, 110, 190)
+    for name, image in (("source.png", source), ("background.png", source),
+                        ("preview.png", source)):
+        cv2.imwrite(str(tmp_path / name), image)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualPixels"] == 0
+    assert any(issue["problem"] == "assetBakedIntoBackground" and issue["pixelArea"] > 50000
+               for issue in report["issues"])
+
+
 def test_audit_catches_flat_dark_surface_lost_to_white(tmp_path):
     source = np.full((120, 200, 3), (52, 31, 21), np.uint8)
     cv2.putText(source, "A", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)

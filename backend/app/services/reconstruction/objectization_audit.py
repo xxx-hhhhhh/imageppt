@@ -197,6 +197,11 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             report["issues"].append({"problem": "blankVisualOwner", "elementId": item.get("id"), "bbox": list(box), "blankFraction": round(blank_fraction, 3)})
     background_foreground = np.uint8(np.max(np.abs(background.astype(np.int16) - 255), axis=2) >= 6) * 255
     residual = _bounded_components(background_foreground, minimum, width, height)
+    background_count, _, background_stats, _ = cv2.connectedComponentsWithStats(background_foreground, 8)
+    for index in range(1, background_count):
+        x, y, w, h, pixels = [int(value) for value in background_stats[index]]
+        if pixels >= width * height * 0.62 and w * h < width * height * 0.95:
+            residual.append((x, y, w, h, pixels))
     report["backgroundResidualRegions"] = len(residual)
     for x, y, w, h, pixels in residual:
         report["issues"].append({"problem": "assetBakedIntoBackground", "elementId": f"background_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})

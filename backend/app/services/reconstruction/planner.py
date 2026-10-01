@@ -471,6 +471,11 @@ def _has_nontext_visual(source: np.ndarray, box: tuple[int, int, int, int], elem
     crop = source[y1:y2, x1:x2]
     if crop.size == 0:
         return False
+    border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+    page_color = np.median(border, axis=0)
+    crop_color = np.median(crop.reshape(-1, 3), axis=0)
+    if np.max(np.abs(crop_color - page_color)) >= 8:
+        return True
     edges = cv2.Canny(crop, 70, 160)
     for item in elements:
         if item.get("type") != "text":

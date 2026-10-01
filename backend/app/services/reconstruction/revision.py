@@ -465,7 +465,7 @@ def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate:
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "squareCutoutUnresolved"}:
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "squareCutoutUnresolved"}:
             issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)

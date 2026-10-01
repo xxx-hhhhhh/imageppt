@@ -179,7 +179,9 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         errors.append("lost_existing_images")
     if missing_shapes:
         errors.append("lost_existing_shapes")
-    if background_after_white > background_before_white + 0.035:
+    if (background_after_white > background_before_white + 0.035
+            and not _separated_background_is_covered(background_before, background_after,
+                                                     preview_before, preview_after, new_visuals)):
         errors.append("background_over_whitened")
     if preview_after_white > preview_before_white + 0.035:
         errors.append("preview_over_whitened")
@@ -197,6 +199,37 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         "outsideTargetChangeRatio": round(outside_change, 4),
         "integrityErrors": errors,
     }
+
+
+def _separated_background_is_covered(background_before: Path, background_after: Path,
+                                     preview_before: Path, preview_after: Path,
+                                     new_visuals: list[dict]) -> bool:
+    """Allow a white base only when a new object preserves the removed pixels."""
+    if not new_visuals:
+        return False
+    before = cv2.imread(str(background_before), cv2.IMREAD_COLOR)
+    after = cv2.imread(str(background_after), cv2.IMREAD_COLOR)
+    old_preview = cv2.imread(str(preview_before), cv2.IMREAD_COLOR)
+    new_preview = cv2.imread(str(preview_after), cv2.IMREAD_COLOR)
+    if any(image is None for image in (before, after, old_preview, new_preview)) or not all(
+            image.shape == before.shape for image in (after, old_preview, new_preview)):
+        return False
+    height, width = before.shape[:2]
+    removed = np.any(before < 245, axis=2) & np.all(after >= 245, axis=2)
+    if not np.any(removed):
+        return False
+    covered = np.zeros((height, width), np.bool_)
+    for item in new_visuals:
+        x1 = max(0, round(float(item.get("x") or 0)))
+        y1 = max(0, round(float(item.get("y") or 0)))
+        x2 = min(width, round(float(item.get("x") or 0) + float(item.get("width") or 0)))
+        y2 = min(height, round(float(item.get("y") or 0) + float(item.get("height") or 0)))
+        if x2 > x1 and y2 > y1:
+            covered[y1:y2, x1:x2] = True
+    if float(np.mean(covered[removed])) < 0.98:
+        return False
+    error = np.max(np.abs(old_preview.astype(np.int16) - new_preview.astype(np.int16)), axis=2)
+    return float(np.mean(error[removed] <= 16)) >= 0.98
 
 
 def _old_asset_coverage(old: dict, new: dict) -> float:

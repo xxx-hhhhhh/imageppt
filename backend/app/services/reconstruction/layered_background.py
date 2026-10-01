@@ -38,7 +38,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
         box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
         if box[2] <= box[0] or box[3] <= box[1]:
             continue
-        if (box[2] - box[0]) * (box[3] - box[1]) > width * height * 0.65:
+        if (box[2] - box[0]) * (box[3] - box[1]) > width * height * 0.85:
             continue
         owned = np.full((box[3] - box[1], box[2] - box[0]), 255, dtype=np.uint8)
         if independent_image:

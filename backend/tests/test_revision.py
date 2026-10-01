@@ -375,6 +375,48 @@ def test_scene_region_is_not_baked_into_verified_white_background() -> None:
                for issue in revision.collect_revision_issues(layout, residual, scene))
 
 
+def test_audited_baked_visual_reaches_revision_without_scene_regions() -> None:
+    layout = {"slide": {"width": 400, "height": 200}, "elements": []}
+    score = {"issues": [{"problem": "assetBakedIntoBackground", "elementId": "background_20_20",
+                         "bbox": [20, 20, 380, 180], "pixelArea": 57600}],
+             "objectizationAudit": {"whiteBackground": False, "backgroundResidualRegions": 1}}
+
+    issues = revision.collect_revision_issues(layout, score)
+
+    assert any(issue["problem"] == "assetBakedIntoBackground"
+               and issue["bbox"] == [20, 20, 380, 180] for issue in issues)
+
+
+def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("baked-large-visual")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((200, 400, 3), 255, np.uint8)
+    source[20:180, 20:380] = (40, 110, 190)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), source)
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(preview), source)
+    layout = {"slide": {"width": 400, "height": 200}, "elements": []}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    assert result["accepted"] is True, result
+    assert result["missingAssetCount"] == 0
+    assert any(item["type"] == "image" for item in current["elements"])
+    assert np.all(cv2.imread(str(background))[40:160, 40:360] >= 250)
+    assert np.max(np.abs(cv2.imread(str(preview))[100, 100].astype(int) - source[100, 100].astype(int))) < 5
+
+
 def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
