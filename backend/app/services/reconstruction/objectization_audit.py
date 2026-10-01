@@ -39,7 +39,15 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
                                      "bbox": [0, 0, width, height]})
         source_difference = np.max(np.abs(source.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
         preview_difference = np.max(np.abs(preview.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
-        report["pageSurfaceMismatchPixels"] = int(np.count_nonzero((source_difference <= 10) & (preview_difference >= 20)))
+        surface_mismatch = (source_difference <= 10) & (preview_difference >= 20)
+        for item in layout.get("elements", []):
+            if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+                continue
+            text_box = _text_source_box(item, width, height, padding=2)
+            if text_box is not None:
+                tx1, ty1, tx2, ty2 = text_box
+                surface_mismatch[ty1:ty2, tx1:tx2] = False
+        report["pageSurfaceMismatchPixels"] = int(np.count_nonzero(surface_mismatch))
         if report["pageSurfaceMismatchPixels"] > max(100, round(width * height * 0.02)):
             report["issues"].append({"problem": "pageSurfaceLost", "bbox": [0, 0, width, height],
                                      "pixelArea": report["pageSurfaceMismatchPixels"]})

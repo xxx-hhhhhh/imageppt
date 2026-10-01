@@ -492,6 +492,40 @@ def test_surface_residual_occupancy_keeps_support_inside_large_textbox() -> None
     assert occupied[90, 150] == 0
 
 
+def test_revision_preserves_icon_within_editable_textbox_on_legacy_surface(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("surface-text-and-icon")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.putText(source, "T", (25, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
+    cv2.circle(source, (150, 90), 22, (245, 245, 245), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), source)
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(preview), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "label", "type": "text", "text": "T", "x": 20, "y": 25, "width": 240, "height": 100,
+         "zIndex": 20, "style": {"color": "#F5F5F5", "fontSize": 30},
+         "metadata": {"rawOCRBBox": [20, 25, 55, 65]}}]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    assert result["accepted"] is True, result
+    assert any(item["id"] == "label" and item["type"] == "text" for item in current["elements"])
+    assert any(item["type"] == "image" and item["x"] <= 150 < item["x"] + item["width"]
+               for item in current["elements"])
+    assert np.all(cv2.imread(str(background)) == 255)
+    assert np.array_equal(cv2.imread(str(preview))[90, 150], source[90, 150])
+
+
 def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
