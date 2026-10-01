@@ -888,6 +888,25 @@ def test_revision_rejects_new_icon_loss_hidden_by_larger_visual_repair(tmp_path:
     assert "new_source_visual_loss" in integrity["integrityErrors"]
 
 
+def test_revision_guard_keeps_colored_badge_inside_editable_text_bounds(tmp_path: Path) -> None:
+    source = np.full((120, 220, 3), 255, np.uint8)
+    cv2.putText(source, "INFO", (25, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (15, 15, 15), 2)
+    cv2.circle(source, (130, 55), 11, (40, 120, 210), -1)
+    after = source.copy()
+    cv2.circle(after, (130, 55), 11, (255, 255, 255), -1)
+    for name, image in (("source.png", source), ("before.png", source), ("after.png", after),
+                        ("background.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "info", "type": "text", "x": 20, "y": 28, "width": 130, "height": 48,
+                            "style": {"color": "#0F0F0F"},
+                            "metadata": {"rawOCRBBox": [20, 28, 150, 76]}}]}
+    result = assess_revision(tmp_path, layout, layout, tmp_path / "background.png",
+                             tmp_path / "background.png", tmp_path / "before.png", tmp_path / "after.png",
+                             [[20, 28, 150, 76]], source_path=tmp_path / "source.png")
+    assert result["largestNewVisualLoss"] >= 300
+    assert "new_source_visual_loss" in result["integrityErrors"]
+
+
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()

@@ -236,7 +236,19 @@ def _new_source_visual_loss(source_path: Path | None, preview_before: Path, prev
             y2 = y1 + int(round(float(item.get("height") or 0)))
         x1, y1, x2, y2 = max(0, x1 - 2), max(0, y1 - 2), min(width, x2 + 2), min(height, y2 + 2)
         if x2 > x1 and y2 > y1:
-            newly_lost[y1:y2, x1:x2] = 0
+            # OCR boxes often enclose a badge or its colored support. Ignore
+            # source pixels that plausibly belong to the editable glyphs,
+            # rather than hiding every visual pixel in the whole textbox.
+            color = str((item.get("style") or {}).get("color") or "#111827").lstrip("#")
+            try:
+                glyph_bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).astype(np.int16)
+            except ValueError:
+                continue
+            if len(glyph_bgr) != 3:
+                continue
+            patch = source_int[y1:y2, x1:x2]
+            near_glyph = np.max(np.abs(patch - glyph_bgr), axis=2) <= 55
+            newly_lost[y1:y2, x1:x2][near_glyph] = 0
     count, _, stats, _ = cv2.connectedComponentsWithStats(newly_lost, 8)
     largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
     return int(np.count_nonzero(newly_lost)), largest
