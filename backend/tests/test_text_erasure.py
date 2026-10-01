@@ -120,12 +120,12 @@ def test_residual_text_repair_does_not_extend_transparent_backplate(tmp_path: Pa
     cv2.imwrite(str(background_path), np.full((100, 160, 3), 255, np.uint8))
     rgb = np.full((100, 160, 3), (235, 240, 248), np.uint8)
     alpha = np.zeros((100, 160), np.uint8)
-    alpha[30:70, 20:140] = 255
-    rgb[63:68, 64:69] = (30, 40, 60)
-    alpha[63:68, 64:69] = 0
+    alpha[25:75, 20:140] = 255
+    rgb[55:68, 60:73] = (30, 40, 60)
+    alpha[55:68, 60:73] = 0
     cv2.imwrite(str(asset_path), np.dstack((rgb, alpha)))
     layout = {"elements": [
-        {"id": "label", "type": "text", "text": "A", "x": 58, "y": 58, "width": 25, "height": 20},
+        {"id": "label", "type": "text", "text": "A", "x": 55, "y": 50, "width": 30, "height": 23},
         {"id": "strip", "type": "image", "x": 0, "y": 0, "width": 160, "height": 100,
          "src": str(asset_path), "metadata": {"layerRole": "residual"}},
     ]}
@@ -133,5 +133,5 @@ def test_residual_text_repair_does_not_extend_transparent_backplate(tmp_path: Pa
     erase_editable_text_sources(background_path, layout)
 
     cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
-    assert cleaned[65, 66, 3] > 220  # The glyph hole is repaired.
-    assert cleaned[73, 66, 3] == 0  # The strip outline stays at y=70.
+    assert cleaned[61, 66, 3] > 220  # A glyph hole wider than the closing kernel is repaired.
+    assert cleaned[78, 66, 3] == 0  # The strip outline stays at y=75.

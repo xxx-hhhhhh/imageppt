@@ -118,8 +118,16 @@ def erase_editable_text_sources(
             # whose source color differs from the repaired surface are glyphs.
             enclosed_support = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
             contrast = np.max(np.abs(source_rgb.astype(np.int16) - cleaned_rgb.astype(np.int16)), axis=2)
-            refill = (mask > 0) & (enclosed_support > 32) & (contrast >= 18)
+            # A broad pale plate often has transparent glyph-shaped holes.
+            # Fill cavities enclosed by that plate, while leaving exterior
+            # transparency untouched even when the OCR box crosses its edge.
+            support = np.pad(np.uint8(alpha > 32), (1, 1))
+            exterior = support.copy()
+            cv2.floodFill(exterior, None, (0, 0), 2)
+            holes = exterior[1:-1, 1:-1] == 0
+            refill = (mask > 0) & (holes | ((enclosed_support > 32) & (contrast >= 18)))
             alpha[refill] = np.maximum(alpha[refill], enclosed_support[refill])
+            alpha[refill & holes] = 255
         elif original.shape[2] == 4:
             rgb = _clean(original[:, :, :3], mask, complex_cleaner)
             original[:, :, :3] = rgb
