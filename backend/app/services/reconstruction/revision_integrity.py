@@ -186,7 +186,8 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
             and not _separated_background_is_covered(background_before, background_after,
                                                      preview_before, preview_after, new_visuals)):
         errors.append("background_over_whitened")
-    if preview_after_white > preview_before_white + 0.035:
+    if (preview_after_white > preview_before_white + 0.035
+            and not _whitening_matches_source(source_path, preview_before, preview_after)):
         errors.append("preview_over_whitened")
     if largest_new_loss >= 24 or newly_lost >= 64:
         errors.append("new_source_visual_loss")
@@ -252,6 +253,22 @@ def _new_source_visual_loss(source_path: Path | None, preview_before: Path, prev
     count, _, stats, _ = cv2.connectedComponentsWithStats(newly_lost, 8)
     largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
     return int(np.count_nonzero(newly_lost)), largest
+
+
+def _whitening_matches_source(source_path: Path | None, before_path: Path, after_path: Path) -> bool:
+    """Allow removing a false colored plate when the source itself is white."""
+    if source_path is None:
+        return False
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    before = cv2.imread(str(before_path), cv2.IMREAD_COLOR)
+    after = cv2.imread(str(after_path), cv2.IMREAD_COLOR)
+    if source is None or before is None or after is None or source.shape != before.shape or source.shape != after.shape:
+        return False
+    newly_white = np.all(after >= 245, axis=2) & ~np.all(before >= 245, axis=2)
+    if not np.any(newly_white):
+        return False
+    source_error = np.max(np.abs(source.astype(np.int16) - after.astype(np.int16)), axis=2)
+    return float(np.mean(source_error[newly_white] <= 16)) >= 0.98
 
 
 def _separated_background_is_covered(background_before: Path, background_after: Path,

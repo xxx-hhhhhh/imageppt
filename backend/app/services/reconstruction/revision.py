@@ -25,7 +25,7 @@ from app.services.reconstruction.text_erasure import count_text_ghosting, erase_
 from app.services.reconstruction.white_objectization import _occupy_text_glyphs, detect_flat_page_surface
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
-OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -112,7 +112,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         issue.get("problem") == "missingEditableText"
         and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
     )]
-    priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
+    priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1, "unsupportedNativeShape": 1,
                 "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
                 "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
@@ -207,6 +207,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 changed_ids.add(item["id"])
         elif problem == "backgroundResidual" and item.get("type") == "image":
             changed_ids.add(item["id"])
+        elif problem == "unsupportedNativeShape" and item.get("type") in {"rectangle", "roundedRectangle"}:
+            metadata.update({"suppressed": True, "suppressRender": True})
+            changed_ids.add(item["id"])
 
     for text_id in touched_text:
         item = by_id[text_id]
@@ -260,7 +263,32 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     repair_issues = [issue for issue in target_issues if not (
         issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
         and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]
-    recovered = repair_missing_regions(source, candidate, repair_issues, root / "assets", project_id, round_number,
+    unsupported_issues = [issue for issue in repair_issues if issue.get("problem") == "unsupportedNativeShape"]
+    if unsupported_issues:
+        without_shapes = candidate_dir / "preview_without_unsupported_shapes.png"
+        render_preview(candidate_bg, candidate, without_shapes)
+        recovered_unsupported = repair_missing_regions(
+            source, candidate, unsupported_issues, root / "assets", project_id, round_number,
+            asset_prefix=f"revision_page_{page}_round_{round_number}_shape", preview_path=without_shapes)
+        changed_ids.update(str(item["id"]) for item in recovered_unsupported)
+    def covered_by_unsupported(issue: dict) -> bool:
+        box = issue.get("bbox")
+        if issue.get("problem") != "visualContentMismatch" or not isinstance(box, list) or len(box) != 4:
+            return False
+        area = max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
+        for unsupported in unsupported_issues:
+            parent = unsupported.get("bbox")
+            if not isinstance(parent, list) or len(parent) != 4:
+                continue
+            overlap = max(0, min(box[2], parent[2]) - max(box[0], parent[0])) * max(0, min(box[3], parent[3]) - max(box[1], parent[1]))
+            if overlap / area >= 0.80:
+                return True
+        return False
+
+    recovered = repair_missing_regions(source, candidate,
+                                       [issue for issue in repair_issues if issue.get("problem") != "unsupportedNativeShape"
+                                        and not covered_by_unsupported(issue)],
+                                       root / "assets", project_id, round_number,
                                        asset_prefix=f"revision_page_{page}_round_{round_number}", preview_path=preview)
     changed_ids.update(str(item["id"]) for item in recovered)
     for issue in target_issues:
@@ -353,7 +381,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01

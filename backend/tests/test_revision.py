@@ -907,6 +907,43 @@ def test_revision_guard_keeps_colored_badge_inside_editable_text_bounds(tmp_path
     assert "new_source_visual_loss" in result["integrityErrors"]
 
 
+def test_revision_replaces_false_plate_with_source_visual_asset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("false-plate")['id']
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((240, 400, 3), 255, np.uint8)
+    skyline = np.array([[95, 165], [95, 145], [120, 145], [120, 110], [145, 110],
+                        [145, 135], [180, 135], [180, 95], [210, 95], [210, 145],
+                        [245, 145], [245, 165]], np.int32)
+    cv2.fillPoly(source, [skyline], (238, 232, 251))
+    cv2.rectangle(source, (122, 118), (139, 132), (252, 252, 252), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"version": "1.1", "slide": {"width": 400, "height": 240}, "elements": [
+        {"id": "false_plate", "type": "roundedRectangle", "x": 90, "y": 75,
+         "width": 170, "height": 100, "zIndex": 10,
+         "style": {"fill": "#FBD9D8", "stroke": "#FBD9D8", "strokeWidth": 1}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert any(issue["problem"] == "unsupportedNativeShape" for issue in result["issuesBefore"])
+    assert result["accepted"] is True
+    current = store.get_slide(project_id, 1)
+    assert current["elements"][0]["metadata"]["suppressed"] is True
+    assert len([item for item in current["elements"] if item["type"] == "image"]) == 1
+    assert np.array_equal(cv2.imread(str(preview))[125, 130], source[125, 130])
+    assert np.all(cv2.imread(str(preview))[80, 100] == 255)
+
+
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()

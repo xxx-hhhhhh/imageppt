@@ -11,7 +11,7 @@ import numpy as np
 
 from app.services.reconstruction.residual_objects import _small_solid_decoration, is_meaningful_stroke, visual_candidate_mask
 from app.services.reconstruction.visual_asset_ownership import count_duplicate_planned_visual_pixels
-from app.services.reconstruction.white_objectization import detect_flat_page_surface
+from app.services.reconstruction.white_objectization import _shape_source_supported, detect_flat_page_surface
 
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
@@ -62,6 +62,12 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         box = _box(item, width, height)
         if box is None:
             continue
+        if (item.get("type") in {"rectangle", "roundedRectangle"}
+                and (item.get("style") or {}).get("fill")
+                and not (item.get("metadata") or {}).get("pageSurface")
+                and not _shape_source_supported(source, box, item.get("style") or {})):
+            report["issues"].append({"problem": "unsupportedNativeShape", "elementId": item.get("id"),
+                                     "bbox": list(box)})
         role = "editable_text" if item.get("type") == "text" else "movable_image" if item.get("type") == "image" else "native_shape"
         report["ownerRegions"].append({"elementId": item.get("id"), "owner": role, "bbox": list(box)})
         if item.get("type") in VISUAL_TYPES:
@@ -247,7 +253,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
     asset_dir.mkdir(parents=True, exist_ok=True)
     created = []
     for issue in issues:
-        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch"}:
+        if issue.get("problem") not in {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape"}:
             continue
         box = issue.get("bbox")
         if not isinstance(box, list) or len(box) != 4:
@@ -279,6 +285,8 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                 difference = np.max(np.abs(crop.astype(np.int16) - shown.astype(np.int16)), axis=2)
                 if issue["problem"] == "visualContentMismatch":
                     missing_pixels = difference >= 48
+                elif issue["problem"] == "unsupportedNativeShape":
+                    missing_pixels = difference >= 2
                 else:
                     missing_pixels = np.all(shown >= 253, axis=2) & (difference >= 2)
                 mask = np.uint8(source_detail & missing_pixels) * 255
@@ -291,7 +299,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                 tx1, ty1, tx2, ty2 = text_box
                 left, top, right, bottom = max(0, tx1 - x1 - 1), max(0, ty1 - y1 - 1), min(x2 - x1, tx2 - x1 + 1), min(y2 - y1, ty2 - y1 + 1)
                 if right > left and bottom > top:
-                    if issue["problem"] != "missingVisualObject":
+                    if issue["problem"] not in {"missingVisualObject", "unsupportedNativeShape"}:
                         mask[top:bottom, left:right] = 0
                         continue
                     patch = crop[top:bottom, left:right]
@@ -307,10 +315,11 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                     mask[top:bottom, left:right][~distinct_visual] = 0
             if np.count_nonzero(mask) < 24:
                 continue
-            mx, my, mw, mh = cv2.boundingRect(mask)
-            crop = crop[my:my + mh, mx:mx + mw]
-            mask = mask[my:my + mh, mx:mx + mw]
-            common.update({"x": x1 + mx, "y": y1 + my, "width": mw, "height": mh})
+            if issue["problem"] != "unsupportedNativeShape":
+                mx, my, mw, mh = cv2.boundingRect(mask)
+                crop = crop[my:my + mh, mx:mx + mw]
+                mask = mask[my:my + mh, mx:mx + mw]
+                common.update({"x": x1 + mx, "y": y1 + my, "width": mw, "height": mh})
             path = asset_dir / f"{identifier}.png"
             if not cv2.imwrite(str(path), np.dstack((crop, mask))):
                 continue
