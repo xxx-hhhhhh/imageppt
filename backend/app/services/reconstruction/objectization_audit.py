@@ -143,6 +143,13 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     color_error = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
     mismatched = salient & (color_error >= 48) & ~np.all(preview >= 253, axis=2)
     report["visualMismatchPixels"] = int(np.count_nonzero(mismatched))
+    mismatch_count, _, mismatch_stats, _ = cv2.connectedComponentsWithStats(np.uint8(mismatched), 8)
+    for index in range(1, mismatch_count):
+        x, y, w, h, pixels = [int(value) for value in mismatch_stats[index]]
+        if pixels >= width * height * 0.62:
+            report["visualMismatchRegions"] += 1
+            report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}",
+                                     "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
     for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
         report["visualMismatchRegions"] += 1
         report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})

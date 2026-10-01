@@ -439,6 +439,41 @@ def test_revision_restores_large_textured_visual_without_whitening(tmp_path: Pat
     assert cv2.imread(str(preview))[100, 100].tolist() == source[100, 100].tolist()
 
 
+def test_revision_replaces_large_wrong_color_asset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("large-mismatch")['id']
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((200, 400, 3), 255, np.uint8)
+    source[20:180, 20:380] = (40, 110, 190)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    wrong = np.full((160, 360, 3), (190, 110, 40), np.uint8)
+    cv2.imwrite(str(root / "assets" / "old.png"), wrong)
+    layout = {"slide": {"width": 400, "height": 200}, "elements": [
+        {"id": "old", "type": "image", "x": 20, "y": 20, "width": 360, "height": 160,
+         "zIndex": 10, "src": f"/media/assets/{project_id}/old.png"}]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    before = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, layout)
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, current)
+    assert result["accepted"] is True, result
+    assert result["replacedAssetCount"] == 1
+    assert result["missingAssetCount"] == 0
+    assert (root / "assets" / "old.png").exists()
+    assert after["visualMismatchPixels"] < before["visualMismatchPixels"] * 0.2
+
+
 def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
