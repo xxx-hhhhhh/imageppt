@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.services.reconstruction.residual_objects import extract_residual_objects
+from app.services.reconstruction.residual_objects import dense_visual_artwork, extract_residual_objects
 
 
 def objectize_on_white(source_path: Path, background_path: Path, layout: dict, asset_dir: Path, project_id: str, page_index: int) -> dict[str, int]:
@@ -24,9 +24,14 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not item.get("src") and (item.get("style") or {}).get("fill") and metadata.get("reconstructionStrategy") in {None, "local_image", "background_image"}:
             metadata.update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"})
     round_assets = _extract_round_assets(source, active, elements, occupied, asset_dir, project_id, page_index)
-    bordered_shapes, bordered_assets = _extract_bordered_containers(source, active, elements, occupied, asset_dir, project_id, page_index)
-    container_count = _extract_flat_containers(source, active, elements, occupied, page_index)
-    detail_shapes, detail_assets = _extract_internal_details(source, active, elements, occupied, asset_dir, project_id, page_index)
+    if dense_visual_artwork(source):
+        # Repeated map/photo texture can resemble dozens of flat containers.
+        # Let residual extraction keep it as visual assets instead.
+        bordered_shapes = bordered_assets = container_count = detail_shapes = detail_assets = 0
+    else:
+        bordered_shapes, bordered_assets = _extract_bordered_containers(source, active, elements, occupied, asset_dir, project_id, page_index)
+        container_count = _extract_flat_containers(source, active, elements, occupied, page_index)
+        detail_shapes, detail_assets = _extract_internal_details(source, active, elements, occupied, asset_dir, project_id, page_index)
     for item in active:
         box = _box(item, width, height)
         if box is None:

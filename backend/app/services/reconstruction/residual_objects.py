@@ -11,6 +11,7 @@ import numpy as np
 def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[list[dict], dict]:
     height, width = source.shape[:2]
     baseline = _border_color(source)
+    detailed_page = dense_visual_artwork(source)
     # A pale label/card may differ from the page by only a few levels. Keep
     # bounded low-contrast regions; page-sized washes are rejected below.
     raw = np.uint8(visual_candidate_mask(source) & (occupied == 0)) * 255
@@ -24,7 +25,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         x, y, w, h, pixels = [int(value) for value in stats[label]]
         if pixels < minimum or ((w < 2 or h < 2) and not is_meaningful_stroke(w, h, pixels, width, height)):
             continue
-        if _page_environment((x, y, x + w, y + h), pixels, width, height):
+        if _page_environment((x, y, x + w, y + h), pixels, width, height, detailed_page):
             continue
         local = np.uint8(labels[y:y + h, x:x + w] == label)
         if w * h <= width * height * 0.25 and x > 0 and y > 0 and x + w < width and y + h < height and _card_like_outline(local):
@@ -52,7 +53,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         pixels = sum(components[index]["pixels"] for index in group)
         # A diffuse page-sized component is environmental background, not a
         # selectable visual object. Do not repackage the slide as one image.
-        if _page_environment((x1, y1, x2, y2), pixels, width, height):
+        if _page_environment((x1, y1, x2, y2), pixels, width, height, detailed_page):
             continue
         pad = 2
         x1, y1, x2, y2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
@@ -125,7 +126,17 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
     return accepted
 
 
-def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, height: int) -> bool:
+def dense_visual_artwork(source: np.ndarray) -> bool:
+    """Distinguish a detailed full-slide visual from a smooth page wash."""
+    candidate_fraction = float(np.mean(visual_candidate_mask(source)))
+    if candidate_fraction < 0.85:
+        return False
+    edges = cv2.Canny(source, 50, 130)
+    return float(np.mean(edges != 0)) >= 0.025
+
+
+def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, height: int,
+                      detailed_page: bool = False) -> bool:
     """Only broad, dense, edge-reaching washes qualify as page environment.
 
     Large maps and artwork can occupy most of a slide while remaining a
@@ -135,7 +146,7 @@ def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, h
     box_area = max(1, (x2 - x1) * (y2 - y1))
     margin_x, margin_y = max(5, round(width * 0.03)), max(5, round(height * 0.03))
     near_all_edges = x1 <= margin_x and y1 <= margin_y and x2 >= width - margin_x and y2 >= height - margin_y
-    return near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.82
+    return not detailed_page and near_all_edges and box_area >= width * height * 0.80 and pixels / box_area >= 0.82
 
 
 def is_meaningful_stroke(w: int, h: int, pixels: int, width: int, height: int) -> bool:

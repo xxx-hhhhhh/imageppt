@@ -388,6 +388,34 @@ def test_large_map_silk_and_pale_card_survive_white_objectization(tmp_path):
     assert sum(shape.shape_type == 13 for shape in slide.shapes) >= 2
 
 
+def test_full_slide_detailed_map_is_movable_instead_of_discarded_or_fragmented(tmp_path):
+    height, width = 180, 320
+    source = np.full((height, width, 3), (85, 145, 170), np.uint8)
+    for y in range(0, height, 18):
+        for x in range(0, width, 20):
+            color = (60 + (x * 3 + y) % 75, 95 + (x + y * 2) % 80, 120 + (x * 2 + y) % 90)
+            cv2.rectangle(source, (x, y), (min(width - 1, x + 19), min(height - 1, y + 17)), color, -1)
+    cv2.line(source, (0, 25), (width - 1, 150), (15, 35, 45), 3)
+    path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    cv2.imwrite(str(path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+
+    objectize_on_white(path, background, layout, tmp_path / "assets", "detailed-map", 1)
+
+    images = [item for item in layout["elements"] if item["type"] == "image"]
+    assert images
+    assert len(layout["elements"]) < 10
+    assert all(item["src"].startswith("/media/assets/") for item in images)
+    for item in images:
+        item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    preview = tmp_path / "preview.png"
+    render_preview(background, layout, preview)
+    reconstructed = cv2.imread(str(preview))
+    assert np.mean(np.abs(reconstructed.astype(np.int16) - source.astype(np.int16))) < 5
+    assert np.all(cv2.imread(str(background)) == 255)
+
+
 def test_transparent_existing_image_does_not_claim_separate_visual_in_its_bbox(tmp_path):
     source = np.full((180, 320, 3), 255, np.uint8)
     first = np.array([[35, 45], [95, 35], [110, 105], [55, 125]], np.int32)
