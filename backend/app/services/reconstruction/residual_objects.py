@@ -33,7 +33,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         local = np.uint8(labels[y:y + h, x:x + w] == label)
         if w * h <= width * height * 0.25 and x > 0 and y > 0 and x + w < width and y + h < height and _card_like_outline(local):
             local = _fill_enclosed_surface(local)
-        for px, py, piece in _split_component(local, x, y, width, height):
+        for px, py, piece in _split_component(local, x, y, width, height, fallback_tiling=detailed_page):
             piece_h, piece_w = piece.shape
             piece_pixels = int(np.count_nonzero(piece))
             if piece_pixels < minimum and not _small_solid_decoration(source, piece != 0,
@@ -145,11 +145,13 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
 
 def dense_visual_artwork(source: np.ndarray) -> bool:
     """Distinguish a detailed full-slide visual from a smooth page wash."""
-    candidate_fraction = float(np.mean(visual_candidate_mask(source)))
+    candidate = visual_candidate_mask(source)
+    candidate_fraction = float(np.mean(candidate))
     if candidate_fraction < 0.85:
         return False
     edges = cv2.Canny(source, 50, 130)
-    return float(np.mean(edges != 0)) >= 0.025
+    color_variation = float(np.max(np.std(source[candidate].astype(np.float32), axis=0)))
+    return float(np.mean(edges != 0)) >= 0.025 or color_variation >= 18
 
 
 def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, height: int,
@@ -235,7 +237,7 @@ def _group_components(components: list[dict], width: int, height: int) -> list[l
 
 
 def _split_component(mask: np.ndarray, x: int, y: int, page_width: int, page_height: int,
-                     depth: int = 0) -> list[tuple[int, int, np.ndarray]]:
+                     depth: int = 0, *, fallback_tiling: bool = False) -> list[tuple[int, int, np.ndarray]]:
     """Split connected modules at long sparse seams without losing pixels."""
     ys, xs = np.where(mask != 0)
     if len(xs) == 0:
@@ -271,11 +273,17 @@ def _split_component(mask: np.ndarray, x: int, y: int, page_width: int, page_hei
             if best is None or score > best[0]:
                 best = (score, axis, cut)
     if best is None:
-        return [(x, y, mask)]
+        page_area = page_width * page_height
+        minimum_fraction = 0.75 if depth == 0 else 0.30
+        if (not fallback_tiling or depth >= 2 or w * h < page_area * minimum_fraction
+                or pixels < page_area * (0.35 if depth == 0 else 0.15)):
+            return [(x, y, mask)]
+        axis = 1 if (depth == 0 and w >= h) or (depth == 1 and w < h) else 0
+        best = (0.0, axis, (w if axis == 1 else h) // 2)
     _, axis, cut = best
     if axis == 0:
-        return _split_component(mask[:cut], x, y, page_width, page_height, depth + 1) + _split_component(mask[cut:], x, y + cut, page_width, page_height, depth + 1)
-    return _split_component(mask[:, :cut], x, y, page_width, page_height, depth + 1) + _split_component(mask[:, cut:], x + cut, y, page_width, page_height, depth + 1)
+        return _split_component(mask[:cut], x, y, page_width, page_height, depth + 1, fallback_tiling=fallback_tiling) + _split_component(mask[cut:], x, y + cut, page_width, page_height, depth + 1, fallback_tiling=fallback_tiling)
+    return _split_component(mask[:, :cut], x, y, page_width, page_height, depth + 1, fallback_tiling=fallback_tiling) + _split_component(mask[:, cut:], x + cut, y, page_width, page_height, depth + 1, fallback_tiling=fallback_tiling)
 
 
 def _fill_enclosed_surface(mask: np.ndarray) -> np.ndarray:

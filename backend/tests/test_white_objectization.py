@@ -326,6 +326,32 @@ def test_edge_aligned_pale_plate_survives_preview_and_ppt(tmp_path, monkeypatch)
                and issue["bbox"][1] == 0 for issue in audit["issues"])
 
 
+def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):
+    height, width = 240, 420
+    source = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        for x in range(width):
+            source[y, x] = (40 + (x // 5) % 70, 70 + (y // 4) % 80,
+                            110 + ((x + y) // 6) % 90)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    preview = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "dense", 1)
+    images = [item for item in layout["elements"] if item["type"] == "image"]
+    assert len(images) >= 4
+    assert not [item for item in layout["elements"] if item["type"] in {"rectangle", "roundedRectangle"}]
+    assert all(item["width"] * item["height"] < width * height * 0.4 for item in images)
+    for item in images:
+        item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background, layout, preview)
+    error = np.max(np.abs(cv2.imread(str(preview)).astype(np.int16) - source.astype(np.int16)), axis=2)
+    assert np.count_nonzero(error >= 10) < width * height * 0.01
+    assert np.all(cv2.imread(str(background)) == 255)
+
+
 def test_page_wide_pale_background_is_not_a_local_backplate(tmp_path):
     source = np.full((240, 400, 3), 245, np.uint8)
     source_path = tmp_path / "page.png"
