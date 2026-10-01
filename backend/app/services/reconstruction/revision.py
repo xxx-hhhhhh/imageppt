@@ -442,7 +442,9 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
         for asset in active_visuals:
             if asset.get("type") == "image" and not (asset.get("metadata") or {}).get("backgroundSeparated"):
                 issues.append({"elementId": asset["id"], "problem": "backgroundResidual"})
-    if scene:
+    audit = score.get("objectizationAudit") or {}
+    background_is_clear = bool(audit.get("whiteBackground")) and int(audit.get("backgroundResidualRegions") or 0) == 0
+    if scene and not background_is_clear:
         active_images = [item for item in layout.get("elements", []) if item.get("type") == "image" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
         for region in scene.get("regions", []):
             if region.get("type") not in {"image", "figure", "chart", "table"} or float(region.get("confidence") or 0) < 0.6:

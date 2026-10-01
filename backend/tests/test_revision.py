@@ -244,6 +244,22 @@ def test_revision_ignores_stale_missing_visual_issue_when_badge_is_preserved(tmp
     assert preview.read_bytes() == prior_preview
 
 
+def test_scene_region_is_not_baked_into_verified_white_background() -> None:
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "plate", "type": "rectangle", "x": 30, "y": 30, "width": 180, "height": 100,
+         "style": {"fill": "#EAF2F8"}, "metadata": {"reconstructionStrategy": "native_shape"}},
+    ]}
+    scene = {"regions": [{"id": "region", "type": "figure", "confidence": 0.9,
+                           "bbox": {"left": 30, "top": 30, "width": 180, "height": 100}}]}
+    clear = {"objectizationAudit": {"whiteBackground": True, "backgroundResidualRegions": 0}}
+    residual = {"objectizationAudit": {"whiteBackground": False, "backgroundResidualRegions": 1}}
+
+    assert not any(issue["problem"] == "assetBakedIntoBackground"
+                   for issue in revision.collect_revision_issues(layout, clear, scene))
+    assert any(issue["problem"] == "assetBakedIntoBackground"
+               for issue in revision.collect_revision_issues(layout, residual, scene))
+
+
 def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
