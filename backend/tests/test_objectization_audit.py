@@ -66,6 +66,14 @@ def test_audit_sees_colored_visual_lost_inside_ocr_box(tmp_path):
     assert report["missingVisualPixels"] > 500
     assert any(issue["problem"] == "missingVisualObject" and issue["bbox"][0] <= 60 <= issue["bbox"][2]
                for issue in report["issues"])
+    created = repair_missing_regions(tmp_path / "source.png", layout, report["issues"],
+                                     tmp_path / "assets", "demo", 1,
+                                     preview_path=tmp_path / "preview.png")
+    assert len(created) == 1
+    asset = cv2.imread(str(tmp_path / "assets" / Path(created[0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert asset.shape[2] == 4
+    assert asset[75 - int(created[0]["y"]), 60 - int(created[0]["x"]), 3] == 255
+    assert not (created[0]["x"] <= 110 < created[0]["x"] + created[0]["width"])
 
 
 def test_audit_does_not_confuse_recolored_editable_glyphs_with_lost_visuals(tmp_path):
@@ -85,6 +93,36 @@ def test_audit_does_not_confuse_recolored_editable_glyphs_with_lost_visuals(tmp_
                                  tmp_path / "preview.png", layout)
 
     assert report["missingVisualObjects"] == 0
+
+
+def test_initial_recovery_restores_icon_inside_text_box(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    root = tmp_path / "demo"
+    (root / "backgrounds").mkdir(parents=True)
+    source = np.full((160, 300, 3), 255, np.uint8)
+    cv2.circle(source, (60, 75), 16, (50, 170, 40), -1)
+    cv2.putText(source, "GO", (92, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
+    source_path = root / "source.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    preview_path = root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 160}, "elements": [
+        {"id": "label", "type": "text", "x": 88, "y": 55, "width": 80, "height": 35,
+         "zIndex": 20, "text": "GO", "style": {"color": "#141414", "fontSize": 25},
+         "metadata": {"rawOCRBBox": [35, 50, 170, 95]}}]}
+    render_preview(background_path, layout, preview_path)
+    before = audit_objectization(source_path, background_path, preview_path, layout)
+    assert before["missingVisualObjects"] >= 1
+
+    recovered = recover_initial_missing_regions(source_path, background_path, preview_path,
+                                                layout, root / "assets", "demo", 1)
+
+    after = audit_objectization(source_path, background_path, preview_path, layout)
+    assert recovered == 1
+    assert after["missingVisualObjects"] == 0
+    assert cv2.imread(str(preview_path))[75, 60].tolist() == [50, 170, 40]
+    assert len([item for item in layout["elements"] if item["type"] == "text"]) == 1
 
 
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):

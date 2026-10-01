@@ -251,7 +251,20 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                 tx1, ty1, tx2, ty2 = text_box
                 left, top, right, bottom = max(0, tx1 - x1 - 1), max(0, ty1 - y1 - 1), min(x2 - x1, tx2 - x1 + 1), min(y2 - y1, ty2 - y1 + 1)
                 if right > left and bottom > top:
-                    mask[top:bottom, left:right] = 0
+                    if issue["problem"] != "missingVisualObject":
+                        mask[top:bottom, left:right] = 0
+                        continue
+                    patch = crop[top:bottom, left:right]
+                    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+                    distinct_visual = (hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 35)
+                    text_color = str((item.get("style") or {}).get("color") or "").lstrip("#")
+                    if len(text_color) == 6:
+                        try:
+                            bgr = np.frombuffer(bytes.fromhex(text_color)[::-1], dtype=np.uint8).astype(np.int16)
+                            distinct_visual &= np.max(np.abs(patch.astype(np.int16) - bgr), axis=2) > 90
+                        except ValueError:
+                            pass
+                    mask[top:bottom, left:right][~distinct_visual] = 0
             if np.count_nonzero(mask) < 24:
                 continue
             mx, my, mw, mh = cv2.boundingRect(mask)
