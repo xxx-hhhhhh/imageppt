@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import cv2
 import numpy as np
 
-from app.services.reconstruction.residual_objects import dense_visual_artwork, extract_residual_objects
+from app.services.reconstruction.residual_objects import _border_color, dense_visual_artwork, extract_residual_objects, visual_candidate_mask
 
 
 def detect_flat_page_surface(source: np.ndarray) -> np.ndarray | None:
@@ -35,6 +36,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     for item in elements:
         if item.get("type") == "background":
             item["zIndex"] = -1000
+    split_monoliths = _split_monolithic_source_image(source, elements, asset_dir, project_id, page_index)
     active = [item for item in elements if item.get("type") not in {"background", "group"} and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for item in active:
         metadata = item.setdefault("metadata", {})
@@ -100,7 +102,52 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + broad_panels + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets + broad_panels, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + broad_panels + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets + broad_panels, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, "splitMonolithicImages": split_monoliths, **residual_stats}
+
+
+def _split_monolithic_source_image(source: np.ndarray, elements: list[dict], asset_dir: Path,
+                                   project_id: str, page_index: int) -> int:
+    """Retire an opaque screenshot only when independent source regions are verifiable."""
+    height, width = source.shape[:2]
+    candidates = []
+    for item in elements:
+        if item.get("type") != "image" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        box = _box(item, width, height)
+        if box is None or (box[2] - box[0]) * (box[3] - box[1]) < width * height * 0.80:
+            continue
+        path = asset_dir / Path(str(item.get("src") or "")).name
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        if image is None:
+            continue
+        if image.ndim == 3 and image.shape[2] == 4 and float(np.mean(image[:, :, 3] > 32)) < 0.95:
+            continue
+        candidates.append(item)
+    if len(candidates) != 1:
+        return 0
+    occupied = np.zeros((height, width), np.uint8)
+    for item in elements:
+        if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw = (item.get("metadata") or {}).get("rawOCRBBox")
+        box = _clip(raw, width, height) if isinstance(raw, list) and len(raw) == 4 else _box(item, width, height)
+        if box is not None:
+            _occupy_text_glyphs(source, occupied, box)
+    baseline = _border_color(source)
+    difference = np.max(np.abs(source.astype(np.int16) - baseline), axis=2)
+    candidate = visual_candidate_mask(source)
+    unexplained = (difference >= 3) & ~candidate & (occupied == 0)
+    if float(np.mean(unexplained)) > 0.01:
+        return 0
+    with TemporaryDirectory(prefix="imageppt-split-") as staging:
+        pieces, stats = extract_residual_objects(source, occupied, Path(staging), project_id, page_index)
+    if (len(pieces) < 2 or float(stats["residualObjectizationRate"]) < 0.95
+            or any(float(item["width"] * item["height"]) >= width * height * 0.55 for item in pieces)):
+        return 0
+    target = candidates[0]
+    target.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True,
+                                               "splitFromMonolithicImage": True})
+    return 1
 
 
 def _extract_large_flat_inset_panels(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, page_index: int) -> int:

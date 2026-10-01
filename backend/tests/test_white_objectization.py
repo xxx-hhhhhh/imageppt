@@ -125,6 +125,61 @@ def test_near_page_irregular_artwork_is_not_discarded_as_environment(tmp_path, m
     assert audit_objectization(source_path, background_path, preview_path, layout)["missingVisualPixels"] == 0
 
 
+def test_opaque_screenshot_splits_into_movable_objects_when_source_is_separable(tmp_path, monkeypatch):
+    from app.services.pptx import renderer
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    root = tmp_path / "demo"
+    (root / "assets").mkdir(parents=True)
+    source = np.full((180, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (22, 28), (95, 105), (35, 95, 180), -1)
+    cv2.circle(source, (220, 80), 30, (40, 160, 70), -1)
+    source_path = root / "source.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    preview_path = root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(root / "assets" / "screenshot.png"), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "screenshot", "type": "image", "x": 0, "y": 0, "width": 300, "height": 180,
+         "zIndex": 1, "src": "/media/assets/demo/screenshot.png"}]}
+
+    stats = objectize_on_white(source_path, background_path, layout, root / "assets", "demo", 1)
+    render_preview(background_path, layout, preview_path)
+    visuals = [item for item in layout["elements"] if item["type"] != "background"
+               and not (item.get("metadata") or {}).get("suppressed")]
+
+    assert stats["splitMonolithicImages"] == 1
+    assert (layout["elements"][0]["metadata"])["suppressed"] is True
+    assert (root / "assets" / "screenshot.png").is_file()
+    assert len(visuals) >= 2
+    assert all(item["width"] * item["height"] < 300 * 180 * 0.55 for item in visuals)
+    preview = cv2.imread(str(preview_path))
+    assert np.array_equal(preview[55, 55], source[55, 55])
+    assert np.array_equal(preview[80, 220], source[80, 220])
+    assert audit_objectization(source_path, background_path, preview_path, layout)["monolithicPageImageCount"] == 0
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in layout["elements"]:
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(visuals)
+
+
+def test_opaque_screenshot_is_preserved_when_no_safe_split_exists(tmp_path):
+    root = tmp_path / "demo"
+    (root / "assets").mkdir(parents=True)
+    source = np.full((180, 300, 3), (60, 80, 120), np.uint8)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "assets" / "screenshot.png"), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "screenshot", "type": "image", "x": 0, "y": 0, "width": 300, "height": 180,
+         "src": "/media/assets/demo/screenshot.png"}]}
+
+    stats = objectize_on_white(root / "source.png", root / "backgrounds" / "page_1.png",
+                               layout, root / "assets", "demo", 1)
+
+    assert stats["splitMonolithicImages"] == 0
+    assert not layout["elements"][0].get("metadata", {}).get("suppressed")
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)

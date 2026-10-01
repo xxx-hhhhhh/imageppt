@@ -430,7 +430,7 @@ class ReconstructionPipeline:
             asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
             reconstruction_stats.update(asset_metrics)
             score.update(asset_metrics)
-            score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate")})
+            score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate", "splitMonolithicImages") if key in reconstruction_stats})
             text_coverage = measure_text_coverage(layout, len(regions))
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
