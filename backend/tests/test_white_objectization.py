@@ -39,6 +39,32 @@ def test_dark_flat_page_is_a_movable_shape_over_white_base(tmp_path):
     assert audit_objectization(source_path, background_path, preview_path, layout)["pageSurfaceMismatchPixels"] < 1000
 
 
+def test_wide_pale_support_survives_white_objectization(tmp_path, monkeypatch):
+    from app.services.pptx import renderer
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    source = np.full((240, 420, 3), 250, np.uint8)
+    cv2.rectangle(source, (25, 75), (395, 110), (248, 248, 248), -1)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    preview_path = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 420, "height": 240}, "elements": []}
+
+    objectize_on_white(source_path, background_path, layout, tmp_path / "demo" / "assets", "demo", 1)
+    render_preview(background_path, layout, preview_path)
+    preview = cv2.imread(str(preview_path))
+
+    assert np.array_equal(preview[90, 200], source[90, 200])
+    assert any(item["type"] in {"rectangle", "roundedRectangle", "image"}
+               and item["x"] <= 25 and item["x"] + item["width"] >= 395 for item in layout["elements"])
+    assert not audit_objectization(source_path, background_path, preview_path, layout)["issues"]
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    for item in layout["elements"]:
+        PPTXRenderer()._add_element(slide, item, 0.02, 0.02)
+    assert len(slide.shapes) == len(layout["elements"])
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)

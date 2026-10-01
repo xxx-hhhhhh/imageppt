@@ -171,6 +171,23 @@ def test_neutral_pale_plate_survives_near_white_gradient_filter(tmp_path):
     assert all(item["width"] * item["height"] < width * height * 0.4 for item in assets)
 
 
+def test_low_contrast_wide_support_strip_is_movable(tmp_path):
+    image = np.full((240, 420, 3), 250, np.uint8)
+    cv2.rectangle(image, (25, 75), (395, 110), (248, 248, 248), -1)
+
+    mask = visual_candidate_mask(image)
+    assert mask[90, 200]
+    assert not mask[30, 200]
+    assets, stats = extract_residual_objects(
+        image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1,
+    )
+
+    assert len(assets) == 1
+    assert assets[0]["x"] <= 25 and assets[0]["x"] + assets[0]["width"] >= 395
+    assert assets[0]["height"] < image.shape[0] * 0.25
+    assert stats["residualObjectizationRate"] > 0.99
+
+
 def test_irregular_ring_keeps_transparent_center_when_extracted(tmp_path):
     image = np.full((190, 240, 3), 255, np.uint8)
     cv2.circle(image, (95, 90), 48, (40, 85, 190), 13)
