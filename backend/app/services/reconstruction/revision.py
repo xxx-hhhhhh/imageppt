@@ -398,12 +398,17 @@ def _visual_retention_regressed(before: dict, after: dict) -> bool:
     largest_before = int(before.get("largestMissingVisualRegion", 0))
     lost_to_white = (missing_growth > missing_threshold and largest_after > missing_threshold
                      and largest_after > largest_before + 24)
+    # Small icons, chart strokes and decorative fragments may disappear in
+    # separate components. Their aggregate loss matters even when no single
+    # connected region exceeds the contiguous-loss threshold.
+    fragmented_loss = (salient > 0 and missing_growth > max(96, round(salient * 0.0003))
+                       and largest_after > largest_before + 8)
     mismatch_growth = int(after.get("visualMismatchPixels") or 0) - int(before.get("visualMismatchPixels") or 0)
-    lost_to_wrong_color = salient > 0 and mismatch_growth > max(24, round(salient * 0.005))
+    lost_to_wrong_color = salient > 0 and mismatch_growth > max(48, round(salient * 0.0002))
     pale_before = int(before.get("paleAssetGapPixels") or 0)
     pale_growth = int(after.get("paleAssetGapPixels") or 0) - pale_before
     lost_pale_support = pale_growth > max(48, min(300, round(pale_before * 0.015)))
-    return lost_to_white or lost_to_wrong_color or lost_pale_support
+    return lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support
 
 
 def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:

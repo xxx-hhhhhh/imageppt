@@ -535,9 +535,13 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"retainedVisualCoverage": 0.9998, "missingVisualPixels": 20, "salientVisualPixels": 500000, "largestMissingVisualRegion": 8},
         {"retainedVisualCoverage": 0.9998, "missingVisualPixels": 30, "salientVisualPixels": 500000, "largestMissingVisualRegion": 9},
     )
-    assert not revision._visual_retention_regressed(
+    assert revision._visual_retention_regressed(
         {"missingVisualPixels": 6, "salientVisualPixels": 600000, "largestMissingVisualRegion": 3},
         {"missingVisualPixels": 456, "salientVisualPixels": 600000, "largestMissingVisualRegion": 25},
+    )
+    assert not revision._visual_retention_regressed(
+        {"missingVisualPixels": 6, "salientVisualPixels": 600000, "largestMissingVisualRegion": 3},
+        {"missingVisualPixels": 80, "salientVisualPixels": 600000, "largestMissingVisualRegion": 10},
     )
     assert revision._visual_retention_regressed(
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10, "salientVisualPixels": 10000, "visualMismatchPixels": 120},
@@ -548,6 +552,10 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"salientVisualPixels": 10000, "visualMismatchPixels": 135},
     )
     assert revision._visual_retention_regressed(
+        {"salientVisualPixels": 600000, "visualMismatchPixels": 200},
+        {"salientVisualPixels": 600000, "visualMismatchPixels": 410},
+    )
+    assert revision._visual_retention_regressed(
         {"missingVisualPixels": 10, "paleAssetGapPixels": 200},
         {"missingVisualPixels": 10, "paleAssetGapPixels": 320},
     )
@@ -555,6 +563,26 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"missingVisualPixels": 10, "paleAssetGapPixels": 200},
         {"missingVisualPixels": 10, "paleAssetGapPixels": 220},
     )
+
+
+def test_revision_guard_rejects_many_small_deleted_decorations(tmp_path: Path) -> None:
+    source = np.full((300, 500, 3), 255, np.uint8)
+    for row in range(5):
+        for column in range(8):
+            x, y = 30 + column * 35, 35 + row * 35
+            source[y:y + 4, x:x + 4] = (30, 60, 190)
+    background = np.full_like(source, 255)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), background)
+    cv2.imwrite(str(tmp_path / "before.png"), source)
+    cv2.imwrite(str(tmp_path / "after.png"), background)
+    before = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "before.png", {"elements": []})
+    after = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                tmp_path / "after.png", {"elements": []})
+    assert after["largestMissingVisualRegion"] < 24
+    assert after["missingVisualPixels"] >= 500
+    assert revision._visual_retention_regressed(before, after)
 
 
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:
