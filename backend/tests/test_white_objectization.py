@@ -352,6 +352,33 @@ def test_connected_flowchart_keeps_nodes_and_connectors_independently_movable(tm
     assert np.all(cv2.imread(str(tmp_path / "moved.png"))[229:312, 69:215] >= 245)
 
 
+def test_unsupported_native_plate_does_not_cover_pale_architecture(tmp_path):
+    source = np.full((240, 400, 3), 255, np.uint8)
+    skyline = np.array([[95, 165], [95, 145], [120, 145], [120, 110], [145, 110],
+                        [145, 135], [180, 135], [180, 95], [210, 95], [210, 145],
+                        [245, 145], [245, 165]], np.int32)
+    cv2.fillPoly(source, [skyline], (238, 232, 251))
+    cv2.line(source, (180, 106), (210, 106), (205, 192, 237), 2)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 400, "height": 240}, "elements": [
+        {"id": "false_plate", "type": "roundedRectangle", "x": 90, "y": 75,
+         "width": 170, "height": 100, "zIndex": 10,
+         "style": {"fill": "#FBD9D8", "stroke": "#FBD9D8", "strokeWidth": 1}},
+    ]}
+    objectize_on_white(source_path, background_path, layout, tmp_path / "assets", "skyline", 1)
+    assert layout["elements"][0]["metadata"]["suppressed"] is True
+    assets = [item for item in layout["elements"] if item["type"] == "image"]
+    assert assets
+    for item in assets:
+        item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background_path, layout, tmp_path / "preview.png")
+    preview = cv2.imread(str(tmp_path / "preview.png"))
+    assert np.array_equal(preview[125, 130], source[125, 130])
+    assert np.all(preview[80, 100] == 255)
+
+
 def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):
     height, width = 240, 420
     source = np.empty((height, width, 3), np.uint8)

@@ -39,6 +39,13 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     split_monoliths = _split_monolithic_source_image(source, elements, asset_dir, project_id, page_index)
     active = [item for item in elements if item.get("type") not in {"background", "group"} and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     for item in active:
+        if item.get("type") in {"rectangle", "roundedRectangle"} and (item.get("style") or {}).get("fill"):
+            box = _box(item, width, height)
+            if box is not None and not _shape_source_supported(source, box, item.get("style") or {}):
+                item.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True,
+                                                        "qaIssue": "unsupportedNativeShape"})
+    active = [item for item in active if not (item.get("metadata") or {}).get("suppressed")]
+    for item in active:
         metadata = item.setdefault("metadata", {})
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not item.get("src") and (item.get("style") or {}).get("fill") and metadata.get("reconstructionStrategy") in {None, "local_image", "background_image"}:
             metadata.update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"})
@@ -410,6 +417,35 @@ def _occupy_shape_color(source: np.ndarray, occupied: np.ndarray, box: tuple[int
     region = source[y1:y2, x1:x2]
     matching = np.max(np.abs(region.astype(np.int16) - color), axis=2) <= 18
     occupied[y1:y2, x1:x2][matching] = 255
+
+
+def _shape_source_supported(source: np.ndarray, box: tuple[int, int, int, int], style: dict) -> bool:
+    """Reject a proposed plate when source artwork does not contain its surface."""
+    x1, y1, x2, y2 = box
+    region = source[y1:y2, x1:x2]
+    if region.size == 0:
+        return False
+    colors = []
+    for key in ("fill", "stroke"):
+        try:
+            value = np.frombuffer(bytes.fromhex(str(style.get(key) or "").lstrip("#"))[::-1],
+                                  dtype=np.uint8).astype(np.int16)
+        except ValueError:
+            continue
+        if len(value) == 3:
+            colors.append(value)
+    if not colors:
+        return True
+    matching = np.zeros(region.shape[:2], np.bool_)
+    for color in colors:
+        matching |= np.max(np.abs(region.astype(np.int16) - color), axis=2) <= 18
+    band = max(2, min(5, min(region.shape[:2]) // 10))
+    perimeter = np.zeros(matching.shape, np.bool_)
+    perimeter[:band] = True
+    perimeter[-band:] = True
+    perimeter[:, :band] = True
+    perimeter[:, -band:] = True
+    return float(np.mean(matching)) >= 0.35 or float(np.mean(matching[perimeter])) >= 0.30
 
 
 def _occupy_existing_image(item: dict, occupied: np.ndarray, box: tuple[int, int, int, int], asset_dir: Path) -> None:
