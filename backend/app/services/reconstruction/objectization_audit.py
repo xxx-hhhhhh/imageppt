@@ -213,7 +213,7 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
         valid = not any(issue.get("problem") == "objectizationAuditUnavailable" for issue in after["issues"])
         improved = (valid and after["missingVisualPixels"] < before["missingVisualPixels"]
                     and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
-        if not improved and any((item.get("metadata") or {}).get("qaIssue") == "paleAssetGap" for item in created):
+        if not improved and any((item.get("metadata") or {}).get("qaIssue") in {"paleAssetGap", "paleTextSupportGap"} for item in created):
             source = cv2.imread(str(source_path))
             previous = cv2.imread(str(preview_path))
             current = cv2.imread(str(candidate_preview))
@@ -257,6 +257,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
     missing = _pale_gap_pixels(source, preview)
     if not np.any(missing):
         return []
+    text_support_gaps = missing.copy()
     for item in layout.get("elements", []):
         if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
@@ -292,6 +293,60 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         layout.setdefault("elements", []).append(item)
         created.append(item)
         missing[y1:y2, x1:x2][gap != 0] = False
+    created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index))
+    return created
+
+
+def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: dict,
+                               asset_dir: Path, project_id: str, page_index: int) -> list[dict]:
+    """Restore pale support beneath editable text without duplicating source glyphs."""
+    height, width = source.shape[:2]
+    images = [item for item in layout.get("elements", []) if item.get("type") == "image" and
+              not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    created: list[dict] = []
+    for text in layout.get("elements", []):
+        if text.get("type") != "text" or any((text.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw = (text.get("metadata") or {}).get("rawOCRBBox")
+        box = _box(text, width, height) if not isinstance(raw, list) or len(raw) != 4 else _box(
+            {"x": raw[0], "y": raw[1], "width": float(raw[2]) - float(raw[0]), "height": float(raw[3]) - float(raw[1])}, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        area = (x2 - x1) * (y2 - y1)
+        if area < 100 or area > width * height * 0.15:
+            continue
+        parents = [item for item in images if _box(item, width, height) and _overlaps(box, _box(item, width, height))]
+        if not parents:
+            continue
+        crop = source[y1:y2, x1:x2].copy()
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        pale = (hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 32)
+        gap = missing[y1:y2, x1:x2]
+        if np.count_nonzero(gap) < max(80, round(area * 0.12)) or np.mean(pale) < 0.40:
+            continue
+        support = np.median(crop[pale], axis=0).astype(np.int16)
+        ink = np.uint8(np.max(np.abs(crop.astype(np.int16) - support), axis=2) >= 28) * 255
+        if np.mean(ink != 0) > 0.38:
+            continue
+        ink = cv2.dilate(ink, np.ones((3, 3), np.uint8), iterations=1)
+        cleaned = cv2.inpaint(crop, ink, 3, cv2.INPAINT_TELEA) if np.any(ink) else crop
+        alpha = np.uint8(pale | (ink != 0)) * 255
+        alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        identifier = f"initial_page_{page_index}_text_support_{len(created) + 1:03d}"
+        path = asset_dir / f"{identifier}.png"
+        if not cv2.imwrite(str(path), np.dstack((cleaned, alpha))):
+            continue
+        parent = max(parents, key=lambda item: (_box(item, width, height)[2] - _box(item, width, height)[0]) *
+                     (_box(item, width, height)[3] - _box(item, width, height)[1]))
+        item = {"id": identifier, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1,
+                "rotation": 0, "zIndex": int(text.get("zIndex") or 20) - 1, "groupId": text.get("groupId") or parent.get("groupId"),
+                "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1},
+                "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "objectization_audit",
+                             "layerRole": "container_detail", "qaIssue": "paleTextSupportGap", "parentId": parent.get("id"),
+                             "editableTextIds": [text.get("id")], "textCleaned": True}}
+        created.append(item)
+    layout.setdefault("elements", []).extend(created)
     return created
 
 

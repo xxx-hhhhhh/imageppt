@@ -281,7 +281,32 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     after = cv2.imread(str(preview))
     assert np.max(np.abs(after[112, 170].astype(int) - source[112, 170].astype(int))) < 3
     assert any((item.get("metadata") or {}).get("qaIssue") == "paleAssetGap" for item in layout["elements"])
+    assert any((item.get("metadata") or {}).get("qaIssue") == "paleTextSupportGap" for item in layout["elements"])
     assert next(item for item in layout["elements"] if item["id"] == "label")["type"] == "text"
+
+
+def test_text_support_asset_erases_original_glyphs(tmp_path):
+    from app.services.reconstruction.objectization_audit import _recover_text_support_gaps
+
+    source = np.full((130, 240, 3), 255, np.uint8)
+    source[25:105, 25:215] = (246, 247, 251)
+    cv2.putText(source, "CARD", (75, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 30), 2)
+    missing = np.zeros(source.shape[:2], bool)
+    missing[48:85, 65:165] = True
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    layout = {"elements": [
+        {"id": "card", "type": "image", "x": 25, "y": 25, "width": 190, "height": 80},
+        {"id": "label", "type": "text", "text": "CARD", "x": 65, "y": 48, "width": 100, "height": 37},
+    ]}
+
+    created = _recover_text_support_gaps(source, missing, layout, asset_dir, "fixture", 1)
+
+    assert len(created) == 1
+    repaired = cv2.imread(str(asset_dir / "initial_page_1_text_support_001.png"), cv2.IMREAD_UNCHANGED)
+    assert repaired is not None and repaired.shape[2] == 4
+    assert np.min(repaired[:, :, :3]) > 200
+    assert created[0]["metadata"]["editableTextIds"] == ["label"]
 
 
 def test_revision_repairs_only_missing_local_plate(tmp_path):
