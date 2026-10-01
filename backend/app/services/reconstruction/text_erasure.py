@@ -110,10 +110,16 @@ def erase_editable_text_sources(
             # text. Clearing its whole textbox alpha punches a white rectangle
             # through that support. Reconstruct the local surface instead.
             alpha = original[:, :, 3]
-            original[:, :, :3] = _clean_residual_surface(original[:, :, :3], alpha, mask, complex_cleaner)
-            nearby_support = cv2.dilate(alpha, np.ones((9, 9), np.uint8))
-            refill = (mask > 0) & (nearby_support > 32)
-            alpha[refill] = np.maximum(alpha[refill], nearby_support[refill])
+            source_rgb = original[:, :, :3].copy()
+            cleaned_rgb = _clean_residual_surface(source_rgb, alpha, mask, complex_cleaner)
+            original[:, :, :3] = cleaned_rgb
+            # Close glyph-sized holes inside the existing support without
+            # expanding its outline into neighboring white space. Only pixels
+            # whose source color differs from the repaired surface are glyphs.
+            enclosed_support = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+            contrast = np.max(np.abs(source_rgb.astype(np.int16) - cleaned_rgb.astype(np.int16)), axis=2)
+            refill = (mask > 0) & (enclosed_support > 32) & (contrast >= 18)
+            alpha[refill] = np.maximum(alpha[refill], enclosed_support[refill])
         elif original.shape[2] == 4:
             rgb = _clean(original[:, :, :3], mask, complex_cleaner)
             original[:, :, :3] = rgb

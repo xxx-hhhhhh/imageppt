@@ -109,3 +109,29 @@ def test_flat_card_text_repair_avoids_nearby_icon_color_bleed(tmp_path: Path) ->
     cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
     assert cleaned[76, 103, 3] > 220
     assert np.max(np.abs(cleaned[76, 103, :3].astype(int) - np.array([244, 246, 251]))) < 15
+
+
+def test_residual_text_repair_does_not_extend_transparent_backplate(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "strip.png"
+    cv2.imwrite(str(background_path), np.full((100, 160, 3), 255, np.uint8))
+    rgb = np.full((100, 160, 3), (235, 240, 248), np.uint8)
+    alpha = np.zeros((100, 160), np.uint8)
+    alpha[30:70, 20:140] = 255
+    rgb[63:68, 64:69] = (30, 40, 60)
+    alpha[63:68, 64:69] = 0
+    cv2.imwrite(str(asset_path), np.dstack((rgb, alpha)))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "A", "x": 58, "y": 58, "width": 25, "height": 20},
+        {"id": "strip", "type": "image", "x": 0, "y": 0, "width": 160, "height": 100,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    assert cleaned[65, 66, 3] > 220  # The glyph hole is repaired.
+    assert cleaned[73, 66, 3] == 0  # The strip outline stays at y=70.
