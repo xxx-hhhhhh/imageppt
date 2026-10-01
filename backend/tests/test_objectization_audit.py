@@ -35,6 +35,23 @@ def test_audit_detects_missing_pale_plate_and_writes_owner_debug(tmp_path):
     assert (tmp_path / "debug.png").is_file()
 
 
+def test_audit_detects_neutral_plate_missing_from_gradient_page(tmp_path):
+    source = np.empty((180, 300, 3), np.uint8)
+    for y in range(180):
+        shade = round(247 + 7 * y / 179)
+        source[y, :] = (shade, shade, shade)
+    cv2.rectangle(source, (55, 45), (220, 125), (242, 242, 242), -1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    cv2.imwrite(str(tmp_path / "preview.png"), np.full_like(source, 255))
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png", tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualPixels"] > 10000
+    assert report["retainedVisualCoverage"] < 0.1
+    assert report["missingBackplates"] + report["missingVisualObjects"] >= 1
+
+
 def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (70, 70), 22, (40, 80, 180), -1)
@@ -89,6 +106,32 @@ def test_revision_repairs_only_missing_local_plate(tmp_path):
     assert len(store.get_slide(project_id, 1)["elements"]) == 1
     assert np.all(cv2.imread(str(root / "backgrounds" / "page_1.png")) == 255)
     assert cv2.imread(str(root / "reconstructed_preview.png"))[60, 60, 0] < 255
+
+
+def test_revision_recovers_neutral_plate_on_gradient_page(tmp_path):
+    store = ProjectStore(tmp_path)
+    project_id = store.create("gradient-plate-revision")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.empty((180, 300, 3), np.uint8)
+    for y in range(180):
+        shade = round(247 + 7 * y / 179)
+        source[y, :] = (shade, shade, shade)
+    cv2.rectangle(source, (55, 45), (220, 125), (242, 242, 242), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": []}
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds" / "page_1.png", layout, root / "reconstructed_preview.png")
+    score = run_visual_qa(root / "source.png", root / "reconstructed_preview.png", root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is True
+    assert any(issue["problem"] in {"missingBackplate", "missingVisualObject"} for issue in result["issuesBefore"])
+    assert np.max(np.abs(cv2.imread(str(root / "reconstructed_preview.png"))[80, 100].astype(int) - source[80, 100].astype(int))) < 15
+    assert any(item["type"] in {"rectangle", "image"} and item["width"] < 200 for item in store.get_slide(project_id, 1)["elements"])
 
 
 def test_revision_repairs_wrong_colored_local_plate_without_removing_other_visuals(tmp_path, monkeypatch):

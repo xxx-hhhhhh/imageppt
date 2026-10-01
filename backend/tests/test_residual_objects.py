@@ -103,6 +103,22 @@ def test_dense_dark_page_does_not_use_near_white_gradient_filter():
     assert mask[50, 100]
 
 
+def test_neutral_pale_plate_survives_near_white_gradient_filter(tmp_path):
+    height, width = 180, 300
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        image[y, :] = (shade, shade, shade)
+    cv2.rectangle(image, (55, 45), (220, 125), (242, 242, 242), -1)
+
+    mask = visual_candidate_mask(image)
+    assert mask[80, 100]
+    assert not mask[80, 15]
+    assets, _ = extract_residual_objects(image, np.zeros((height, width), np.uint8), tmp_path / "demo" / "assets", "demo", 1)
+    assert any(item["x"] <= 55 and item["x"] + item["width"] >= 220 for item in assets)
+    assert all(item["width"] * item["height"] < width * height * 0.4 for item in assets)
+
+
 def test_irregular_ring_keeps_transparent_center_when_extracted(tmp_path):
     image = np.full((190, 240, 3), 255, np.uint8)
     cv2.circle(image, (95, 90), 48, (40, 85, 190), 13)

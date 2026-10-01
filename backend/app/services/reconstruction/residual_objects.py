@@ -93,7 +93,34 @@ def visual_candidate_mask(source: np.ndarray) -> np.ndarray:
         return candidate
     saturation_floor = max(6, int(background_hsv[1]) + 2)
     dark_ceiling = min(235, int(background_hsv[2]) - 16)
-    return candidate & ((hsv[:, :, 1] >= saturation_floor) | (hsv[:, :, 2] <= dark_ceiling))
+    chromatic_or_dark = (hsv[:, :, 1] >= saturation_floor) | (hsv[:, :, 2] <= dark_ceiling)
+    neutral_plates = _neutral_local_surfaces(hsv, saturation_floor)
+    return candidate & (chromatic_or_dark | neutral_plates)
+
+
+def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int) -> np.ndarray:
+    """Recover bounded pale gray plates without claiming a page-wide wash."""
+    height, width = hsv.shape[:2]
+    band = max(4, round(width * 0.04))
+    edge_values = np.concatenate((hsv[:, :band, 2], hsv[:, -band:, 2]), axis=1)
+    row_value = np.median(edge_values, axis=1).astype(np.int16)
+    darker = row_value[:, None] - hsv[:, :, 2].astype(np.int16) >= 5
+    mask = np.uint8((hsv[:, :, 1] < saturation_floor) & darker) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    accepted = np.zeros((height, width), np.bool_)
+    minimum = max(60, round(width * height * 0.00008))
+    for label in range(1, count):
+        x, y, w, h, pixels = [int(value) for value in stats[label]]
+        area = w * h
+        if pixels < minimum or w < 10 or h < 8 or area > width * height * 0.4:
+            continue
+        if x == 0 or y == 0 or x + w == width or y + h == height:
+            continue
+        if pixels / max(1, area) < 0.72:
+            continue
+        accepted[labels == label] = True
+    return accepted
 
 
 def _page_environment(box: tuple[int, int, int, int], pixels: int, width: int, height: int) -> bool:
