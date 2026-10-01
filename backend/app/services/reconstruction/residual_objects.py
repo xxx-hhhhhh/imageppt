@@ -137,7 +137,11 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
         margin_x, margin_y = max(2, round(width * 0.02)), max(2, round(height * 0.02))
         if x < margin_x and y < margin_y and x + w > width - margin_x and y + h > height - margin_y:
             continue
-        if pixels / max(1, area) < 0.72:
+        # A skyline, mountain ridge, or pale map silhouette is locally
+        # bounded but intentionally irregular. Rectangular fill density is
+        # too strict for these visual assets; the row-relative contrast and
+        # page-area checks above already reject diffuse page washes.
+        if pixels / max(1, area) < 0.35:
             continue
         accepted[labels == label] = True
     return accepted

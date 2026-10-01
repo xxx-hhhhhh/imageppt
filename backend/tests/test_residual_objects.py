@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 from pptx import Presentation
 
 from app.services.pptx import renderer as renderer_module
 from app.services.reconstruction.residual_objects import _group_components, extract_residual_objects, visual_candidate_mask
+from app.services.reconstruction.white_objectization import objectize_on_white
+from app.services.visual_qa.analyzer import render_preview
 
 
 def test_disconnected_visual_parts_group_into_movable_ppt_images(tmp_path, monkeypatch):
@@ -178,6 +182,49 @@ def test_neutral_plate_one_level_darker_than_gradient_is_movable(tmp_path):
     assert assets[0]["x"] <= 70 and assets[0]["y"] <= 60
     assert assets[0]["x"] + assets[0]["width"] >= 190
     assert stats["residualObjectizationRate"] > 0.99
+
+
+def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
+    height, width = 450, 800
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        image[y, :] = round(247 + 7 * y / (height - 1))
+    skyline = np.array([
+        [60, 350], [60, 310], [100, 310], [100, 220], [160, 220],
+        [160, 290], [195, 290], [195, 170], [225, 170], [225, 310],
+        [270, 310], [270, 150], [305, 150], [305, 290], [360, 290],
+        [360, 200], [420, 200], [420, 320], [500, 320], [500, 180],
+        [535, 180], [535, 300], [600, 300], [600, 230], [670, 230],
+        [670, 340], [740, 340], [740, 350],
+    ], np.int32)
+    cv2.fillPoly(image, [skyline], (246, 246, 246))
+    mask = visual_candidate_mask(image)
+    assert mask[260, 205]
+    assert not mask[100, 205]
+    assets, stats = extract_residual_objects(image, np.zeros((height, width), np.uint8),
+                                             tmp_path / "assets", "skyline", 1)
+    assert stats["residualObjectizationRate"] > 0.99
+    assert any(item["x"] <= 205 < item["x"] + item["width"] and
+               item["y"] <= 260 < item["y"] + item["height"] for item in assets)
+    assert all(item["width"] * item["height"] < width * height * 0.55 for item in assets)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    cv2.imwrite(str(source_path), image)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+    objectize_on_white(source_path, background_path, layout, tmp_path / "pipeline_assets", "skyline", 1)
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    assert sum(item["type"] == "image" for item in layout["elements"]) >= 2
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "pipeline_assets" / Path(item["src"]).name)
+    render_preview(background_path, layout, tmp_path / "preview.png")
+    assert np.array_equal(cv2.imread(str(tmp_path / "preview.png"))[260, 205], image[260, 205])
+    owner = next(item for item in layout["elements"] if item["type"] == "image"
+                 and item["x"] <= 205 < item["x"] + item["width"]
+                 and item["y"] <= 260 < item["y"] + item["height"])
+    owner["x"] += width
+    render_preview(background_path, layout, tmp_path / "moved.png")
+    assert np.all(cv2.imread(str(tmp_path / "moved.png"))[260, 205] == 255)
 
 
 def test_dense_dark_page_does_not_use_near_white_gradient_filter():
