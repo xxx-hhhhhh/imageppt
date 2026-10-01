@@ -228,6 +228,33 @@ def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
     assert np.all(cv2.imread(str(tmp_path / "moved.png"))[260, 205] == 255)
 
 
+def test_small_neutral_corner_marks_survive_near_white_gradient(tmp_path):
+    height, width = 240, 420
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        image[y, :] = round(247 + 7 * y / (height - 1))
+    marks = [(70, 62), (150, 62), (230, 62)]
+    for x, y in marks:
+        cv2.rectangle(image, (x, y), (x + 7, y + 7), (245, 245, 245), -1)
+    mask = visual_candidate_mask(image)
+    assert not mask[65, 30]
+    assert all(mask[y + 3, x + 3] for x, y in marks)
+    assets, stats = extract_residual_objects(image, np.zeros((height, width), np.uint8),
+                                             tmp_path / "assets", "marks", 1)
+    assert len(assets) == len(marks)
+    assert stats["residualObjectizationRate"] > 0.99
+    assert all(any(item["x"] <= x + 3 < item["x"] + item["width"] and
+                   item["y"] <= y + 3 < item["y"] + item["height"] for item in assets)
+               for x, y in marks)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), image)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+    objectize_on_white(source_path, tmp_path / "background.png", layout,
+                       tmp_path / "pipeline_assets", "marks", 1)
+    assert np.all(cv2.imread(str(tmp_path / "background.png")) == 255)
+    assert sum(item["type"] == "image" for item in layout["elements"]) == len(marks)
+
+
 def test_dense_dark_page_does_not_use_near_white_gradient_filter():
     image = np.full((120, 220, 3), (30, 32, 35), np.uint8)
     cv2.rectangle(image, (30, 25), (185, 95), (240, 240, 240), -1)

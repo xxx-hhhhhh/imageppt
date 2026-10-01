@@ -126,11 +126,11 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     accepted = np.zeros((height, width), np.bool_)
-    minimum = max(60, round(width * height * 0.00008))
+    minimum = max(24, round(width * height * 0.00002))
     for label in range(1, count):
         x, y, w, h, pixels = [int(value) for value in stats[label]]
         area = w * h
-        if pixels < minimum or w < 10 or h < 8 or area > width * height * 0.4:
+        if pixels < minimum or w < 4 or h < 4 or area > width * height * 0.4:
             continue
         # A bounded title plate may touch a page edge. Reject only components
         # spanning the whole page; the area cap above excludes broad washes.
