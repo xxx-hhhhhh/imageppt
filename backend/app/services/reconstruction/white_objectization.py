@@ -141,9 +141,23 @@ def _split_monolithic_source_image(source: np.ndarray, elements: list[dict], ass
         return 0
     with TemporaryDirectory(prefix="imageppt-split-") as staging:
         pieces, stats = extract_residual_objects(source, occupied, Path(staging), project_id, page_index)
-    if (len(pieces) < 2 or float(stats["residualObjectizationRate"]) < 0.95
-            or any(float(item["width"] * item["height"]) >= width * height * 0.55 for item in pieces)):
-        return 0
+        if (len(pieces) < 2 or float(stats["residualObjectizationRate"]) < 0.95
+                or any(float(item["width"] * item["height"]) >= width * height * 0.55 for item in pieces)):
+            return 0
+        covered = occupied != 0
+        for piece in pieces:
+            path = Path(staging) / Path(piece["src"]).name
+            asset = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if asset is None or asset.ndim != 3 or asset.shape[2] != 4:
+                return 0
+            x, y = int(piece["x"]), int(piece["y"])
+            h, w = asset.shape[:2]
+            covered[y:y + h, x:x + w] |= asset[:, :, 3] > 32
+        surface = detect_flat_page_surface(source)
+        base = surface.astype(np.int16) if surface is not None else np.full(3, 255, np.int16)
+        uncovered_difference = np.max(np.abs(source.astype(np.int16) - base), axis=2)
+        if float(np.mean((uncovered_difference > 8) & ~covered)) > 0.005:
+            return 0
     target = candidates[0]
     target.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True,
                                                "splitFromMonolithicImage": True})

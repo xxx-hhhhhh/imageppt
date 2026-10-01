@@ -180,6 +180,34 @@ def test_opaque_screenshot_is_preserved_when_no_safe_split_exists(tmp_path):
     assert not layout["elements"][0].get("metadata", {}).get("suppressed")
 
 
+def test_monolithic_split_rejects_extractor_that_omits_meaningful_pixels(tmp_path, monkeypatch):
+    from app.services.reconstruction import white_objectization
+    root = tmp_path / "demo"
+    (root / "assets").mkdir(parents=True)
+    source = np.full((180, 300, 3), 255, np.uint8)
+    for left in (20, 115, 210):
+        cv2.rectangle(source, (left, 45), (left + 55, 105), (35, 95, 180), -1)
+    cv2.imwrite(str(root / "assets" / "screenshot.png"), source)
+    elements = [{"id": "screenshot", "type": "image", "x": 0, "y": 0,
+                 "width": 300, "height": 180, "src": "/media/assets/demo/screenshot.png"}]
+
+    def incomplete_extract(_source, _occupied, directory, _project_id, _page_index):
+        pieces = []
+        for index, left in enumerate((20, 115), 1):
+            crop = source[45:106, left:left + 56]
+            path = directory / f"partial_{index}.png"
+            cv2.imwrite(str(path), np.dstack((crop, np.full(crop.shape[:2], 255, np.uint8))))
+            pieces.append({"src": f"/media/assets/demo/{path.name}", "x": left, "y": 45,
+                           "width": 56, "height": 61})
+        return pieces, {"residualObjectizationRate": 1.0}
+
+    monkeypatch.setattr(white_objectization, "extract_residual_objects", incomplete_extract)
+    result = white_objectization._split_monolithic_source_image(source, elements, root / "assets", "demo", 1)
+
+    assert result == 0
+    assert not elements[0].get("metadata", {}).get("suppressed")
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)
