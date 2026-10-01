@@ -9,7 +9,7 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
+from app.services.reconstruction.residual_objects import _small_solid_decoration, is_meaningful_stroke, visual_candidate_mask
 from app.services.reconstruction.visual_asset_ownership import count_duplicate_planned_visual_pixels
 from app.services.reconstruction.white_objectization import detect_flat_page_surface
 
@@ -140,8 +140,11 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
         report["visualMismatchRegions"] += 1
         report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
-    missing = _bounded_components(np.uint8(lost) * 255, max(40, round(width * height * 0.00003)), width, height)
+    missing = _bounded_components(np.uint8(lost) * 255, 9, width, height)
     for x, y, w, h, pixels in missing:
+        if pixels < max(40, round(width * height * 0.00003)) and not _small_solid_decoration(
+                source, lost[y:y + h, x:x + w], (x, y, w, h), page_color):
+            continue
         patch = source[y:y + h, x:x + w]
         # Judge the missing pixels, not their often-white bounding rectangle.
         # A thin chart line inside a large white box is still a visual object.
@@ -505,7 +508,7 @@ def _bounded_components(mask: np.ndarray, minimum: int, width: int, height: int)
     result = []
     for index in range(1, count):
         x, y, w, h, pixels = [int(value) for value in stats[index]]
-        if pixels < minimum or ((w < 5 or h < 4) and not is_meaningful_stroke(w, h, pixels, width, height)) or w * h > width * height * 0.62:
+        if pixels < minimum or ((w < 3 or h < 3) and not is_meaningful_stroke(w, h, pixels, width, height)) or w * h > width * height * 0.62:
             continue
         result.append((x, y, w, h, pixels))
     return result

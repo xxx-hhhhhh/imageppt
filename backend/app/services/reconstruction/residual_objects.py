@@ -23,7 +23,9 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
     components = []
     for label in range(1, count):
         x, y, w, h, pixels = [int(value) for value in stats[label]]
-        if pixels < minimum or ((w < 2 or h < 2) and not is_meaningful_stroke(w, h, pixels, width, height)):
+        small_visual = _small_solid_decoration(source, labels[y:y + h, x:x + w] == label,
+                                               (x, y, w, h), baseline)
+        if (pixels < minimum and not small_visual) or ((w < 2 or h < 2) and not is_meaningful_stroke(w, h, pixels, width, height)):
             continue
         if _page_environment((x, y, x + w, y + h), pixels, width, height, detailed_page):
             continue
@@ -33,7 +35,8 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         for px, py, piece in _split_component(local, x, y, width, height):
             piece_h, piece_w = piece.shape
             piece_pixels = int(np.count_nonzero(piece))
-            if piece_pixels < minimum:
+            if piece_pixels < minimum and not _small_solid_decoration(source, piece != 0,
+                                                                       (px, py, piece_w, piece_h), baseline):
                 continue
             potential_area += piece_pixels
             values = source[py:py + piece_h, px:px + piece_w][piece != 0]
@@ -64,7 +67,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
             selected[cy1 - y1:cy2 - y1, cx1 - x1:cx2 - x1][component["mask"] != 0] = 255
         alpha = cv2.dilate(selected, np.ones((3, 3), np.uint8), iterations=1)
         alpha[occupied[y1:y2, x1:x2] != 0] = 0
-        if np.count_nonzero(alpha) < minimum:
+        if np.count_nonzero(alpha) < minimum and pixels < 9:
             continue
         path = asset_dir / f"residual_page_{page_index}_{len(assets) + 1:03d}.png"
         cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], alpha)))
@@ -72,6 +75,19 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         assets.append({"id": asset_id, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "residual_detection", "layerRole": "residual", "preserveWholeAsset": True, "doNotVectorize": True, "sourcePixelArea": pixels}})
         covered += pixels
     return assets, {"residualObjectsCount": len(assets), "residualCoverageArea": covered, "residualCandidateArea": potential_area, "residualObjectizationRate": round(covered / potential_area, 4) if potential_area else 1.0}
+
+
+def _small_solid_decoration(source: np.ndarray, mask: np.ndarray, box: tuple[int, int, int, int],
+                            baseline: np.ndarray) -> bool:
+    x, y, w, h = box
+    pixels = int(np.count_nonzero(mask))
+    if w < 3 or h < 3 or pixels < 9 or pixels / max(1, w * h) < 0.75:
+        return False
+    colors = source[y:y + h, x:x + w][mask]
+    median = np.median(colors, axis=0)
+    hsv = cv2.cvtColor(np.uint8([[median]]), cv2.COLOR_BGR2HSV)[0, 0]
+    return (int(hsv[1]) >= 45 and float(np.max(np.abs(median - baseline))) >= 40
+            and float(np.mean(np.max(np.abs(colors.astype(np.float32) - median), axis=1) <= 12)) >= 0.8)
 
 
 def visual_candidate_mask(source: np.ndarray) -> np.ndarray:

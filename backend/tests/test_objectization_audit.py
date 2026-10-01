@@ -154,6 +154,21 @@ def test_audit_flags_opaque_slide_screenshot_but_not_irregular_cutout(tmp_path):
     assert report["monolithicPageImageCount"] == 0
 
 
+def test_audit_flags_tiny_solid_corner_mark_lost_on_large_slide(tmp_path):
+    source = np.full((900, 1600, 3), 255, np.uint8)
+    source[120:124, 130:134] = (35, 85, 205)
+    source[360, 420] = (90, 90, 90)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualObjects"] == 1
+    assert report["issues"][-1]["bbox"][0] <= 130
+
+
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)

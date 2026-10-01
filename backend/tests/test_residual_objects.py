@@ -52,6 +52,19 @@ def test_many_small_decorations_are_not_silently_dropped_by_asset_limit(tmp_path
                for x, y in centers)
 
 
+def test_tiny_saturated_corner_mark_survives_large_slide_threshold(tmp_path):
+    image = np.full((900, 1600, 3), 255, np.uint8)
+    image[120:124, 130:134] = (35, 85, 205)
+    image[360, 420] = (90, 90, 90)
+
+    assets, _ = extract_residual_objects(image, np.zeros(image.shape[:2], np.uint8),
+                                         tmp_path / "demo" / "assets", "demo", 1)
+
+    assert len(assets) == 1
+    assert assets[0]["x"] <= 131 < assets[0]["x"] + assets[0]["width"]
+    assert assets[0]["y"] <= 121 < assets[0]["y"] + assets[0]["height"]
+
+
 def test_spatial_grouping_keeps_same_nearby_color_and_area_rules():
     components = [
         {"box": (20, 20, 30, 30), "color": np.array([30, 90, 190])},
