@@ -12,7 +12,7 @@ from pptx import Presentation
 from app import main as api_main
 from app.models.project_store import ProjectStore
 from app.services.pptx import renderer
-from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
+from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions, repair_missing_regions
 from app.services.reconstruction.revision import revise_problem_regions
 from app.services.reconstruction.white_objectization import objectize_on_white
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
@@ -164,6 +164,53 @@ def test_suppressed_badge_text_does_not_hide_erased_internal_symbol(tmp_path):
 
     assert report["missingVisualPixels"] > 100
     assert any(issue["problem"] in {"missingVisualObject", "visualContentMismatch"} for issue in report["issues"])
+
+
+@pytest.mark.parametrize("text_metadata,text_box", [
+    ({"rawOCRBBox": [25, 25, 90, 75], "suppressed": True, "ownedBy": "visual"}, (25, 25, 65, 50)),
+    ({"rawOCRBBox": [25, 25, 65, 40]}, (25, 25, 120, 80)),
+])
+def test_text_box_cannot_hide_missing_visual_outside_active_ocr_ink(tmp_path, text_metadata, text_box):
+    source = np.full((120, 180, 3), 255, np.uint8)
+    cv2.rectangle(source, (75, 50), (105, 85), (25, 80, 180), -1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    white = np.full_like(source, 255)
+    cv2.imwrite(str(tmp_path / "background.png"), white)
+    cv2.imwrite(str(tmp_path / "preview.png"), white)
+    layout = {"elements": [{"id": "ocr", "type": "text", "text": "Label", "x": text_box[0], "y": text_box[1],
+                            "width": text_box[2], "height": text_box[3], "metadata": text_metadata}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["missingVisualPixels"] > 600
+    assert report["missingVisualObjects"] >= 1
+
+
+def test_missing_visual_repair_masks_only_lost_pixels_not_neighboring_text(tmp_path):
+    source = np.full((120, 220, 3), 255, np.uint8)
+    source[30:100, 20:200] = (247, 246, 245)
+    cv2.rectangle(source, (42, 50), (75, 82), (25, 85, 185), -1)
+    cv2.putText(source, "LABEL", (117, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 45, 90), 1)
+    preview = source.copy()
+    preview[50:83, 42:76] = 255
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "preview.png"), preview)
+    layout = {"elements": [{"id": "label", "type": "text", "text": "LABEL", "x": 112, "y": 50,
+                            "width": 85, "height": 28, "zIndex": 10,
+                            "metadata": {"rawOCRBBox": [115, 54, 177, 73]}}]}
+    created = repair_missing_regions(tmp_path / "source.png", layout,
+                                     [{"problem": "missingVisualObject", "bbox": [20, 30, 200, 100]}],
+                                     tmp_path / "assets", "test", 0, preview_path=tmp_path / "preview.png")
+
+    assert len(created) == 1
+    item = created[0]
+    assert item["type"] == "image"
+    assert 40 <= item["x"] <= 44 and item["x"] + item["width"] <= 78
+    assert item["metadata"]["sourceMaskPixels"] > 900
+    cutout = cv2.imread(str(tmp_path / "assets" / Path(item["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert cutout.shape[2] == 4
+    assert np.count_nonzero(cutout[:, :, 3]) == item["metadata"]["sourceMaskPixels"]
 
 
 def test_audit_reports_contiguous_missing_visual_region(tmp_path):

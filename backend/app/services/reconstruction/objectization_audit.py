@@ -9,7 +9,6 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from app.services.reconstruction.asset_ownership import is_badge_owned_text
 from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
 from app.services.reconstruction.visual_asset_ownership import count_duplicate_planned_visual_pixels
 
@@ -66,22 +65,19 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     erased = np.all(preview >= 253, axis=2) & (np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2) >= 2)
     lost = salient & erased
     # Editable glyphs need not land on precisely the same raster pixels.
+    # Use the observed OCR bounds, not the often enlarged editor textbox.
+    # A suppressed false OCR detection must never conceal a lost visual.
     for item in layout.get("elements", []):
-        if item.get("type") == "text":
-            if item not in active and is_badge_owned_text(item, layout):
-                continue
-            box = _box(item, width, height)
-            if box:
-                x1, y1, x2, y2 = box
-                lost[y1:y2, x1:x2] = False
-    for item in layout.get("elements", []):
-        if item.get("type") == "text":
-            if item not in active and is_badge_owned_text(item, layout):
-                continue
-            box = _box(item, width, height)
-            if box:
-                x1, y1, x2, y2 = box
-                salient[y1:y2, x1:x2] = False
+        if item.get("type") != "text":
+            continue
+        metadata = item.get("metadata") or {}
+        if item not in active and (metadata.get("ownedBy") or metadata.get("duplicateSuppressed")):
+            continue
+        box = _text_source_box(item, width, height)
+        if box:
+            x1, y1, x2, y2 = box
+            lost[y1:y2, x1:x2] = False
+            salient[y1:y2, x1:x2] = False
     missing_mask = np.uint8(salient & erased)
     missing_pixels = int(np.count_nonzero(missing_mask))
     component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(missing_mask, 8)
@@ -151,11 +147,15 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
 
 
 def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], asset_dir: Path,
-                           project_id: str, revision_round: int, asset_prefix: str | None = None) -> list[dict]:
+                           project_id: str, revision_round: int, asset_prefix: str | None = None,
+                           preview_path: Path | None = None) -> list[dict]:
     """Stage only reported unowned regions; leave existing objects untouched."""
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
+    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR) if preview_path else None
+    if preview is not None and preview.shape != source.shape:
+        preview = None
     height, width = source.shape[:2]
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -187,22 +187,36 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
             common.update({"type": "rectangle", "style": {"fill": color, "stroke": color, "strokeWidth": 0, "opacity": 1}})
             metadata["reconstructionStrategy"] = "native_shape"
         else:
-            mask = np.uint8(np.max(np.abs(crop.astype(np.int16) - page_color), axis=2) >= 2) * 255
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            source_detail = np.max(np.abs(crop.astype(np.int16) - page_color), axis=2) >= 2
+            if preview is not None:
+                shown = preview[y1:y2, x1:x2]
+                difference = np.max(np.abs(crop.astype(np.int16) - shown.astype(np.int16)), axis=2)
+                if issue["problem"] == "visualContentMismatch":
+                    missing_pixels = difference >= 48
+                else:
+                    missing_pixels = np.all(shown >= 253, axis=2) & (difference >= 2)
+                mask = np.uint8(source_detail & missing_pixels) * 255
+            else:
+                mask = np.uint8(source_detail) * 255
             for item in existing:
-                tx1, ty1, tx2, ty2 = _box(item, width, height)
-                left, top, right, bottom = max(0, tx1 - x1), max(0, ty1 - y1), min(x2 - x1, tx2 - x1), min(y2 - y1, ty2 - y1)
+                text_box = _text_source_box(item, width, height)
+                if text_box is None:
+                    continue
+                tx1, ty1, tx2, ty2 = text_box
+                left, top, right, bottom = max(0, tx1 - x1 - 1), max(0, ty1 - y1 - 1), min(x2 - x1, tx2 - x1 + 1), min(y2 - y1, ty2 - y1 + 1)
                 if right > left and bottom > top:
-                    text_mask = np.zeros(mask.shape, np.uint8)
-                    text_mask[top:bottom, left:right] = 255
-                    crop = cv2.inpaint(crop, text_mask, 3, cv2.INPAINT_TELEA)
+                    mask[top:bottom, left:right] = 0
             if np.count_nonzero(mask) < 24:
                 continue
+            mx, my, mw, mh = cv2.boundingRect(mask)
+            crop = crop[my:my + mh, mx:mx + mw]
+            mask = mask[my:my + mh, mx:mx + mw]
+            common.update({"x": x1 + mx, "y": y1 + my, "width": mw, "height": mh})
             path = asset_dir / f"{identifier}.png"
             if not cv2.imwrite(str(path), np.dstack((crop, mask))):
                 continue
             common.update({"type": "image", "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}})
-            metadata["reconstructionStrategy"] = "cutout_image"
+            metadata.update({"reconstructionStrategy": "cutout_image", "sourceMaskPixels": int(np.count_nonzero(mask))})
         layout.setdefault("elements", []).append(common)
         created.append(common)
     return created
@@ -217,7 +231,7 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
     issues = [issue for issue in before["issues"] if issue.get("problem") in {"missingBackplate", "missingVisualObject"}]
     candidate = copy.deepcopy(layout)
     created = repair_missing_regions(source_path, candidate, issues, asset_dir, project_id, 0,
-                                     asset_prefix=f"initial_page_{page_index}")
+                                     asset_prefix=f"initial_page_{page_index}", preview_path=preview_path)
     created.extend(_recover_pale_asset_gaps(source_path, preview_path, candidate, asset_dir, project_id, page_index))
     if not created:
         return 0
@@ -435,3 +449,14 @@ def _box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | Non
     x1, y1 = max(0, min(width, round(x))), max(0, min(height, round(y)))
     x2, y2 = max(0, min(width, round(x + float(item.get("width") or 0)))), max(0, min(height, round(y + float(item.get("height") or 0))))
     return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
+def _text_source_box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | None:
+    raw = (item.get("metadata") or {}).get("rawOCRBBox")
+    if isinstance(raw, list) and len(raw) == 4:
+        try:
+            x1, y1, x2, y2 = (float(value) for value in raw)
+        except (TypeError, ValueError):
+            return _box(item, width, height)
+        return _box({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, width, height)
+    return _box(item, width, height)
