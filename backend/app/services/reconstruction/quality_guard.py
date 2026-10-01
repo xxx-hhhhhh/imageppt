@@ -6,6 +6,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.services.reconstruction.residual_objects import visual_candidate_mask
+
 
 def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_path: Path, layout: dict, asset_dir: Path, page: int, minimum_f1: float | None = None) -> dict[str, int]:
     """Keep ordinary OCR text editable, reporting visual mismatches for review.
@@ -70,8 +72,12 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
                     continue
                 metadata.update({"suppressed": True, "suppressRender": True, "fallbackReason": "low_confidence_ocr_mismatch"})
                 if not _other_editable_text_overlaps((x1, y1, x2, y2), elements, item["id"]):
-                    background[y1:y2, x1:x2] = source[y1:y2, x1:x2]
-                    metadata["sourceVisualRestored"] = True
+                    cutout = _source_cutout(source, (x1, y1, x2, y2), item, asset_dir, page)
+                    if cutout is not None:
+                        elements.append(cutout)
+                        metadata["fallbackAssetId"] = cutout["id"]
+                        metadata["sourceTextPreserved"] = True
+                        preserved += 1
                 continue
             metadata["visualTextMismatch"] = True
             _ensure_readable_text(item, preview[y1:y2, x1:x2])
@@ -79,19 +85,11 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
         if asset_id:
             bad_assets.add(str(asset_id))
             continue
-        asset_dir.mkdir(parents=True, exist_ok=True)
-        cutout_id = f"fallback_{page}_{item['id']}"
-        cutout_path = asset_dir / f"{cutout_id}.png"
-        cv2.imwrite(str(cutout_path), source[y1:y2, x1:x2])
-        elements.append({
-            "id": cutout_id, "type": "image", "x": x1, "y": y1,
-            "width": x2 - x1, "height": y2 - y1,
-            "zIndex": int(item.get("zIndex") or 0) + 1,
-            "src": f"/media/assets/{asset_dir.parent.name}/{cutout_path.name}",
-            "style": {"opacity": 1},
-            "metadata": {"reconstructionStrategy": "cutout_image", "layerRole": "cutout_image", "sourceTextFallback": True, "preserveWholeAsset": True, "backgroundSeparated": True, "ownedTextId": item["id"]},
-        })
-        metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch", "fallbackAssetId": cutout_id})
+        cutout = _source_cutout(source, (x1, y1, x2, y2), item, asset_dir, page)
+        if cutout is None:
+            continue
+        elements.append(cutout)
+        metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch", "fallbackAssetId": cutout["id"]})
         preserved += 1
     restored_modules = 0
     for asset_id in bad_assets:
@@ -110,9 +108,33 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             if metadata.get("textCleanedFromAsset") == asset_id:
                 metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch"})
                 preserved += 1
-    if preserved or any((item.get("metadata") or {}).get(key) for item in elements for key in ("sourceTextRecleaned", "sourceVisualRestored")):
+    if preserved or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in elements):
         cv2.imwrite(str(background_path), background)
     return {"preservedTextRegions": preserved, "restoredModules": restored_modules}
+
+
+def _source_cutout(source: np.ndarray, box: tuple[int, int, int, int], item: dict,
+                   asset_dir: Path, page: int) -> dict | None:
+    x1, y1, x2, y2 = box
+    alpha = np.uint8(visual_candidate_mask(source)[y1:y2, x1:x2]) * 255
+    if np.count_nonzero(alpha) < 12:
+        return None
+    alpha = cv2.dilate(alpha, np.ones((3, 3), np.uint8))
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    cutout_id = f"fallback_{page}_{item['id']}"
+    cutout_path = asset_dir / f"{cutout_id}.png"
+    if not cv2.imwrite(str(cutout_path), np.dstack((source[y1:y2, x1:x2], alpha))):
+        return None
+    return {
+        "id": cutout_id, "type": "image", "x": x1, "y": y1,
+        "width": x2 - x1, "height": y2 - y1,
+        "zIndex": int(item.get("zIndex") or 0) + 1,
+        "src": f"/media/assets/{asset_dir.parent.name}/{cutout_path.name}",
+        "style": {"opacity": 1},
+        "metadata": {"reconstructionStrategy": "cutout_image", "layerRole": "cutout_image",
+                     "sourceTextFallback": True, "preserveWholeAsset": True,
+                     "backgroundSeparated": True, "ownedTextId": item["id"]},
+    }
 
 
 def _ordinary_text(item: dict) -> bool:
