@@ -65,6 +65,31 @@ def test_revision_keeps_previous_page_when_metrics_do_not_improve(tmp_path: Path
     assert history[0]["accepted"] is False
 
 
+def test_revision_targets_missing_visual_before_color_mismatches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("missing-visual-priority")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((160, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (190, 55), (240, 105), (35, 90, 185), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 160}, "elements": []}
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    score["issues"].extend({"problem": "visualContentMismatch", "elementId": f"old_mismatch_{index}",
+                            "bbox": [10 + index * 20, 15, 28 + index * 20, 35]} for index in range(4))
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["targetedIssues"][0]["problem"] == "missingVisualObject"
+    assert any(issue["problem"] == "missingVisualObject" for issue in result["targetedIssues"])
+
+
 def test_revision_endpoint_uses_saved_page_and_reports_result(tmp_path: Path, monkeypatch) -> None:
     store, project_id, _ = _project(tmp_path, suppressed=True)
     monkeypatch.setattr(api_main, "store", store)

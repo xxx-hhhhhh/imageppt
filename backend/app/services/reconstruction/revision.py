@@ -109,7 +109,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         issue.get("problem") == "missingEditableText"
         and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
     )]
-    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "missingBackplate": 2, "missingVisualObject": 2, "blankVisualOwner": 2, "visualContentMismatch": 2, "squareCutoutUnresolved": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
+    priority = {"ghosting": 0, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1,
+                "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
+                "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
+                "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
+                "assetBakedIntoBackground": 8, "professionalInpaintingPending": 9, "backgroundResidual": 10}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
