@@ -32,6 +32,26 @@ def test_disconnected_visual_parts_group_into_movable_ppt_images(tmp_path, monke
     assert all(shape.shape_type == 13 for shape in slide.shapes)  # separate pictures
 
 
+def test_many_small_decorations_are_not_silently_dropped_by_asset_limit(tmp_path):
+    image = np.full((180, 480, 3), 255, np.uint8)
+    centers = []
+    for row in range(9):
+        for column in range(20):
+            x, y = 10 + column * 23, 10 + row * 19
+            cv2.rectangle(image, (x, y), (x + 5, y + 5), (40, 90, 190), -1)
+            centers.append((x + 2, y + 2))
+
+    assets, stats = extract_residual_objects(
+        image, np.zeros(image.shape[:2], np.uint8), tmp_path / "demo" / "assets", "demo", 1,
+    )
+
+    assert len(assets) == len(centers)
+    assert stats["residualObjectizationRate"] > 0.99
+    assert all(any(item["x"] <= x < item["x"] + item["width"]
+                   and item["y"] <= y < item["y"] + item["height"] for item in assets)
+               for x, y in centers)
+
+
 def test_residual_detection_respects_owners_and_colored_background(tmp_path):
     image = np.full((180, 320, 3), (225, 235, 245), np.uint8)
     cv2.rectangle(image, (40, 45), (85, 90), (35, 60, 165), -1)

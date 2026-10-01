@@ -39,12 +39,10 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
             color = np.median(values, axis=0) if len(values) else baseline
             components.append({"mask": piece, "box": (px, py, px + piece_w, py + piece_h), "pixels": piece_pixels, "color": color})
     components.sort(key=lambda item: item["pixels"], reverse=True)
-    components = components[:300]
     groups = _group_components(components, width, height)
     groups.sort(key=lambda group: sum(components[index]["pixels"] for index in group), reverse=True)
     assets: list[dict] = []
     covered = 0
-    max_objects = 150
     asset_dir.mkdir(parents=True, exist_ok=True)
     for group in groups:
         x1 = min(components[index]["box"][0] for index in group)
@@ -56,8 +54,6 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         # selectable visual object. Do not repackage the slide as one image.
         if _page_environment((x1, y1, x2, y2), pixels, width, height):
             continue
-        if len(assets) >= max_objects:
-            break
         pad = 2
         x1, y1, x2, y2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
         selected = np.zeros((y2 - y1, x2 - x1), np.uint8)
