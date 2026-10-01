@@ -25,6 +25,7 @@ from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
+from app.services.reconstruction.colored_text_support import extract_colored_text_supports
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
@@ -283,6 +284,8 @@ class ReconstructionPipeline:
             erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None, clean_background=not white_objectized)
             for key, value in erasure_stats.items():
                 reconstruction_stats[key] += value
+            if white_objectized:
+                reconstruction_stats.update(extract_colored_text_supports(normalized_path, layout, page_output / "assets", project_id, page_index))
             if local_provider:
                 reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
