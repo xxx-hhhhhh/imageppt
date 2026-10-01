@@ -79,6 +79,8 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
         pad = max(2, round(min(w, h) * 0.08))
         x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(width, x + w + pad), min(height, y + h + pad)
         box = (x1, y1, x2, y2)
+        if _is_text_glyph_candidate(box, active, width, height):
+            continue
         if any(_overlap_of_first(box, _box(item, width, height)) > 0.75 for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
             continue
         if np.mean(occupied[y1:y2, x1:x2] > 0) > 0.1:
@@ -225,6 +227,8 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
     selected: list[tuple[int, int, int, int]] = []
     for x, y, w, h, contour, rounded in candidates[:80]:
         box = (x, y, x + w, y + h)
+        if _is_text_glyph_candidate(box, active, width, height):
+            continue
         if any(_overlap_min(box, prior) > 0.75 for prior in selected):
             continue
         if any(_overlap_of_first(box, _box(item, width, height)) > 0.80 for item in active if item.get("type") != "text" and _box(item, width, height)):
@@ -274,6 +278,23 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             occupied[y:y + h, x:x + w] = 255
         selected.append(box)
     return shapes, assets
+
+
+def _is_text_glyph_candidate(box: tuple[int, int, int, int], active: list[dict], width: int, height: int) -> bool:
+    """Keep small contour fragments of a long OCR line owned by its textbox."""
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    for item in active:
+        if item.get("type") != "text":
+            continue
+        text_box = _box(item, width, height)
+        if text_box is None:
+            continue
+        text_area = (text_box[2] - text_box[0]) * (text_box[3] - text_box[1])
+        if text_area <= 0 or (text_box[2] - text_box[0]) < 3 * (text_box[3] - text_box[1]):
+            continue
+        if area <= text_area * 0.18 and _overlap_of_first(box, text_box) >= 0.82:
+            return True
+    return False
 
 
 def _clean_container_text(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:

@@ -209,6 +209,16 @@ def test_text_cleanup_preserves_colored_header_above_white_panel():
     assert np.max(np.abs(cleaned[31, 95].astype(int) - source[31, 95].astype(int))) < 10
 
 
+def test_small_contour_within_long_ocr_line_stays_owned_by_editable_text():
+    from app.services.reconstruction.white_objectization import _is_text_glyph_candidate
+
+    line = {"id": "heading", "type": "text", "x": 40, "y": 20, "width": 420, "height": 70,
+            "text": "Heading", "metadata": {"rawOCRBBox": [40, 20, 460, 90]}}
+    assert _is_text_glyph_candidate((100, 29, 146, 78), [line], 500, 160)
+    assert not _is_text_glyph_candidate((480, 29, 526, 78), [line], 600, 160)
+    assert not _is_text_glyph_candidate((55, 10, 455, 110), [line], 500, 160)
+
+
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     source = np.full((220, 360, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)
