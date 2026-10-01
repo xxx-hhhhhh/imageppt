@@ -419,6 +419,65 @@ def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, 
     assert np.max(np.abs(cv2.imread(str(preview))[100, 100].astype(int) - source[100, 100].astype(int))) < 5
 
 
+def test_revision_moves_flat_page_surface_out_of_legacy_background(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("baked-page-surface")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), source)
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(preview), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": []}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    assert result["accepted"] is True, result
+    assert any((item.get("metadata") or {}).get("pageSurface") for item in current["elements"])
+    assert np.all(cv2.imread(str(background)) == 255)
+    assert np.array_equal(cv2.imread(str(preview))[90, 150], source[90, 150])
+    assert not audit_objectization(root / "source.png", background, preview, current)["issues"]
+
+
+def test_revision_objectizes_unowned_visual_on_legacy_page_surface(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("surface-with-unowned-mark")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
+    cv2.circle(source, (150, 90), 22, (245, 245, 245), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), source)
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(preview), source)
+    layout = {"slide": {"width": 300, "height": 180}, "elements": []}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    assert result["accepted"] is True, result
+    assert result["rollbackTriggered"] is False
+    assert result["missingAssetCount"] == 0
+    assert any(item["type"] == "image" and item["x"] <= 150 < item["x"] + item["width"]
+               for item in current["elements"])
+    assert np.all(cv2.imread(str(background)) == 255)
+    assert np.array_equal(cv2.imread(str(preview))[90, 150], source[90, 150])
+
+
 def test_revision_restores_flat_dark_page_without_flattening_it(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)

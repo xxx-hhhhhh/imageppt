@@ -34,6 +34,9 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     height, width = source.shape[:2]
     page_surface = detect_flat_page_surface(source)
     if page_surface is not None:
+        if float(np.mean(np.all(background >= 250, axis=2))) < 0.995:
+            report["issues"].append({"problem": "pageSurfaceBakedIntoBackground", "elementId": "page_surface",
+                                     "bbox": [0, 0, width, height]})
         source_difference = np.max(np.abs(source.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
         preview_difference = np.max(np.abs(preview.astype(np.int16) - page_surface.astype(np.int16)), axis=2)
         report["pageSurfaceMismatchPixels"] = int(np.count_nonzero((source_difference <= 10) & (preview_difference >= 20)))

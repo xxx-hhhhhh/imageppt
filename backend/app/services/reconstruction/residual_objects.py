@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 
-def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> tuple[list[dict], dict]:
+def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir: Path, project_id: str,
+                             page_index: int, *, asset_prefix: str | None = None) -> tuple[list[dict], dict]:
     height, width = source.shape[:2]
     baseline = _border_color(source)
     detailed_page = dense_visual_artwork(source)
@@ -69,7 +70,7 @@ def extract_residual_objects(source: np.ndarray, occupied: np.ndarray, asset_dir
         alpha[occupied[y1:y2, x1:x2] != 0] = 0
         if np.count_nonzero(alpha) < minimum and pixels < 9:
             continue
-        path = asset_dir / f"residual_page_{page_index}_{len(assets) + 1:03d}.png"
+        path = asset_dir / f"{asset_prefix or f'residual_page_{page_index}'}_{len(assets) + 1:03d}.png"
         cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], alpha)))
         asset_id = path.stem
         assets.append({"id": asset_id, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "residual_detection", "layerRole": "residual", "preserveWholeAsset": True, "doNotVectorize": True, "sourcePixelArea": pixels}})
