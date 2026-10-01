@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -79,10 +80,14 @@ def extract_colored_text_supports(source_path: Path, layout: dict, asset_dir: Pa
         ink = cv2.dilate(ink, np.ones((3, 3), np.uint8), iterations=1)
         cleaned = cv2.inpaint(crop, ink, 3, cv2.INPAINT_TELEA) if np.any(ink) else crop
         identifier = f"colored_support_page_{page_index}_{len(created) + 1:03d}"
-        path = asset_dir / f"{identifier}.png"
+        path = asset_dir / f"{identifier}_{uuid4().hex[:8]}.png"
         if not cv2.imwrite(str(path), np.dstack((cleaned, alpha))):
             continue
         overlapping = [item for item in assets if _overlap(_box(item, width, height), support_box) > 0]
+        if not _remove_replaced_pixels(overlapping, support_box, alpha, asset_dir, width, height,
+                                       project_id, identifier):
+            path.unlink(missing_ok=True)
+            continue
         z_index = max([int(item.get("zIndex") or 0) for item in overlapping], default=0) + 1
         text["zIndex"] = max(int(text.get("zIndex") or 0), z_index + 1)
         created.append({"id": identifier, "type": "image", "x": bx1, "y": by1, "width": bx2 - bx1, "height": by2 - by1,
@@ -90,7 +95,6 @@ def extract_colored_text_supports(source_path: Path, layout: dict, asset_dir: Pa
                         "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1},
                         "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "colored_text_support",
                                      "layerRole": "container", "editableTextIds": [text.get("id")], "textCleaned": True}})
-        _remove_replaced_pixels(overlapping, support_box, alpha, asset_dir, width, height)
         for shape in active:
             if shape.get("type") not in {"rectangle", "roundedRectangle", "ellipse"}:
                 continue
@@ -104,8 +108,9 @@ def extract_colored_text_supports(source_path: Path, layout: dict, asset_dir: Pa
 
 
 def _remove_replaced_pixels(assets: list[dict], support_box: tuple[int, int, int, int], alpha: np.ndarray,
-                            asset_dir: Path, width: int, height: int) -> None:
+                            asset_dir: Path, width: int, height: int, project_id: str, support_id: str) -> bool:
     sx1, sy1, sx2, sy2 = support_box
+    staged: list[tuple[dict, Path]] = []
     for item in assets:
         box = _box(item, width, height)
         if box is None:
@@ -123,8 +128,20 @@ def _remove_replaced_pixels(assets: list[dict], support_box: tuple[int, int, int
         mask = np.zeros((ay2 - ay1, ax2 - ax1), np.uint8)
         mask[y1 - ay1:y2 - ay1, x1 - ax1:x2 - ax1] = alpha[y1 - sy1:y2 - sy1, x1 - sx1:x2 - sx1]
         mask = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
-        image[:, :, 3][mask > 32] = 0
-        cv2.imwrite(str(path), image)
+        replaced = (mask > 32) & (image[:, :, 3] > 0)
+        if not np.any(replaced):
+            continue
+        image[:, :, 3][replaced] = 0
+        new_path = asset_dir / f"{Path(str(item.get('id') or path.stem)).stem}_without_{support_id}_{uuid4().hex[:8]}.png"
+        if not cv2.imwrite(str(new_path), image):
+            for _, staged_path in staged:
+                staged_path.unlink(missing_ok=True)
+            return False
+        staged.append((item, new_path))
+    for item, new_path in staged:
+        item["src"] = f"/media/assets/{project_id}/{new_path.name}"
+        item.setdefault("metadata", {})["supportPixelsReplacedBy"] = support_id
+    return True
 
 
 def _box(item: dict, width: int, height: int) -> tuple[int, int, int, int] | None:

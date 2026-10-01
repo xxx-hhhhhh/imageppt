@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import cv2
@@ -25,6 +26,7 @@ def test_colored_title_strip_becomes_single_movable_owner_with_editable_text(tmp
         {"id": "title", "type": "text", "text": "TITLE", "x": 70, "y": 45, "width": 110, "height": 32,
          "zIndex": 20, "style": {"color": "#FFFFFF"}, "metadata": {"rawOCRBBox": [70, 45, 180, 77]}},
     ]}
+    second_run_layout = copy.deepcopy(layout)
 
     stats = extract_colored_text_supports(source_path, layout, asset_dir, "test", 1)
 
@@ -33,8 +35,12 @@ def test_colored_title_strip_becomes_single_movable_owner_with_editable_text(tmp
     assert new["type"] == "image" and new["width"] < 320
     assert next(item for item in layout["elements"] if item["id"] == "title")["zIndex"] > new["zIndex"]
     original = cv2.imread(str(asset_dir / "old.png"), cv2.IMREAD_UNCHANGED)
-    assert original[60, 100, 3] == 0
-    assert original[110, 100, 3] == 255
+    assert original[60, 100, 3] == 255  # The previous valid asset stays intact.
+    previous_owner = next(item for item in layout["elements"] if item["id"] == "old")
+    assert previous_owner["src"] != "/media/assets/test/old.png"
+    current = cv2.imread(str(asset_dir / Path(previous_owner["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert current[60, 100, 3] == 0
+    assert current[110, 100, 3] == 255
     replacement = cv2.imread(str(asset_dir / Path(new["src"]).name), cv2.IMREAD_UNCHANGED)
     assert replacement is not None and replacement.shape[2] == 4
     assert np.max(replacement[:, :, 3]) == 255
@@ -43,6 +49,12 @@ def test_colored_title_strip_becomes_single_movable_owner_with_editable_text(tmp
     cleaned_letters = replacement[ry:ry + 32, rx:rx + 110, :3][source_letters]
     assert np.mean(np.all(cleaned_letters >= 245, axis=1)) < 0.05
     assert next(item for item in layout["elements"] if item["id"] == "bar_shape")["metadata"]["suppressed"] is True
+    first_asset_path = asset_dir / Path(new["src"]).name
+    first_asset_bytes = first_asset_path.read_bytes()
+    assert extract_colored_text_supports(source_path, second_run_layout, asset_dir, "test", 1)["coloredTextSupports"] == 1
+    second = next(item for item in second_run_layout["elements"] if item["id"].startswith("colored_support"))
+    assert second["src"] != new["src"]
+    assert first_asset_path.read_bytes() == first_asset_bytes
 
 
 def test_large_colored_module_is_not_mistaken_for_title_strip(tmp_path: Path) -> None:
