@@ -131,10 +131,10 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
         area = w * h
         if pixels < minimum or w < 10 or h < 8 or area > width * height * 0.4:
             continue
-        # A narrow, nearly full-width support bar is still a local object.
-        # The area and inset checks below exclude page-wide washes.
+        # A bounded title plate may touch a page edge. Reject only components
+        # spanning the whole page; the area cap above excludes broad washes.
         margin_x, margin_y = max(2, round(width * 0.02)), max(2, round(height * 0.02))
-        if x < margin_x or y < margin_y or x + w > width - margin_x or y + h > height - margin_y:
+        if x < margin_x and y < margin_y and x + w > width - margin_x and y + h > height - margin_y:
             continue
         if pixels / max(1, area) < 0.72:
             continue

@@ -203,6 +203,23 @@ def test_neutral_pale_plate_survives_near_white_gradient_filter(tmp_path):
     assert all(item["width"] * item["height"] < width * height * 0.4 for item in assets)
 
 
+def test_pale_header_plate_touching_page_edge_remains_movable(tmp_path):
+    height, width = 180, 300
+    image = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        shade = round(247 + 7 * y / (height - 1))
+        image[y, :] = (shade, shade, shade)
+    cv2.rectangle(image, (55, 0), (220, 44), (246, 246, 246), -1)
+
+    assets, _ = extract_residual_objects(
+        image, np.zeros((height, width), np.uint8), tmp_path / "assets", "demo", 1,
+    )
+
+    assert any(item["y"] == 0 and item["x"] <= 55
+               and item["x"] + item["width"] >= 220 for item in assets)
+    assert all(item["width"] * item["height"] < width * height * 0.4 for item in assets)
+
+
 def test_low_contrast_wide_support_strip_is_movable(tmp_path):
     image = np.full((240, 420, 3), 250, np.uint8)
     cv2.rectangle(image, (25, 75), (395, 110), (248, 248, 248), -1)
