@@ -239,6 +239,30 @@ def test_container_cleanup_uses_raw_ocr_bounds_instead_of_expanded_textbox(tmp_p
     assert np.max(np.abs(pixel.astype(int) - source[86, 150].astype(int))) < 10
 
 
+def test_faint_text_shadow_is_not_exported_as_visual_asset(tmp_path):
+    from app.services.reconstruction.white_objectization import _is_text_shadow_residual
+
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    image = np.full((35, 80, 4), 250, np.uint8)
+    image[:, :, 3] = 0
+    image[8:29:3, 12:68:3, 3] = 255
+    path = asset_dir / "shadow.png"
+    cv2.imwrite(str(path), image)
+    asset = {"id": "shadow", "type": "image", "x": 30, "y": 25, "width": 80, "height": 35, "src": f"/media/assets/demo/{path.name}"}
+    title = {"id": "title", "type": "text", "x": 25, "y": 20, "width": 120, "height": 45,
+             "style": {"color": "#17365D"}, "metadata": {"rawOCRBBox": [25, 20, 145, 65]}}
+
+    assert _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    image[8:29:3, 12:68:3, :3] = (60, 120, 190)
+    cv2.imwrite(str(path), image)
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    image[:, :, :3] = 250
+    image[:, :, 3] = 255
+    cv2.imwrite(str(path), image)
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+
+
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     source = np.full((220, 360, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)

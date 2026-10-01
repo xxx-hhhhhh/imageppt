@@ -52,6 +52,17 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
             occupied[y1:y2, x1:x2] = 255
 
     residual_assets, residual_stats = extract_residual_objects(source, occupied, asset_dir, project_id, page_index)
+    shadow_assets = [item for item in residual_assets if _is_text_shadow_residual(item, active, asset_dir, width, height)]
+    shadow_ids = {item["id"] for item in shadow_assets}
+    residual_assets = [item for item in residual_assets if item["id"] not in shadow_ids]
+    shadow_pixels = sum(int((item.get("metadata") or {}).get("sourcePixelArea") or 0) for item in shadow_assets)
+    candidate_pixels = max(0, int(residual_stats["residualCandidateArea"]) - shadow_pixels)
+    covered_pixels = sum(int((item.get("metadata") or {}).get("sourcePixelArea") or 0) for item in residual_assets)
+    residual_stats["residualObjectsCount"] = len(residual_assets)
+    residual_stats["residualCoverageArea"] = covered_pixels
+    residual_stats["residualCandidateArea"] = candidate_pixels
+    residual_stats["residualObjectizationRate"] = round(covered_pixels / candidate_pixels, 4) if candidate_pixels else 1.0
+    residual_stats["textShadowDiscardedCount"] = len(shadow_assets)
     elements.extend(residual_assets)
     layer_objectized_elements(elements)
     background_path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +131,43 @@ def _occupy_text_glyphs(source: np.ndarray, occupied: np.ndarray, box: tuple[int
             glyphs[labels == label] = 255
     glyphs = cv2.dilate(glyphs, np.ones((3, 3), np.uint8), iterations=1)
     occupied[y1:y2, x1:x2][glyphs != 0] = 255
+
+
+def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, width: int, height: int) -> bool:
+    """Discard faint OCR antialias fragments already owned by editable text."""
+    path = asset_dir / Path(str(asset.get("src") or "")).name
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None or image.ndim != 3 or image.shape[2] != 4:
+        return False
+    alpha = image[:, :, 3] > 32
+    count = int(np.count_nonzero(alpha))
+    if count < 12 or count / alpha.size >= 0.42:
+        return False
+    colors = image[:, :, :3][alpha]
+    median = np.median(colors, axis=0)
+    if float(np.min(median)) < 244 or float(np.max(median) - np.min(median)) > 15:
+        return False
+    ax, ay = int(asset.get("x") or 0), int(asset.get("y") or 0)
+    overlap = np.zeros(alpha.shape, np.bool_)
+    has_dark_text = False
+    for item in active:
+        if item.get("type") != "text":
+            continue
+        raw = (item.get("metadata") or {}).get("rawOCRBBox")
+        box = _clip(raw, width, height) if isinstance(raw, list) and len(raw) == 4 else _box(item, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        left, top, right, bottom = max(ax, x1), max(ay, y1), min(ax + alpha.shape[1], x2), min(ay + alpha.shape[0], y2)
+        if right <= left or bottom <= top:
+            continue
+        color = str((item.get("style") or {}).get("color") or "#111827").lstrip("#")
+        try:
+            has_dark_text |= len(color) == 6 and max(bytes.fromhex(color)) < 190
+        except ValueError:
+            pass
+        overlap[top - ay:bottom - ay, left - ax:right - ax] = True
+    return has_dark_text and float(np.count_nonzero(alpha & overlap)) / count >= 0.95
 
 
 def layer_objectized_elements(elements: list[dict]) -> None:
