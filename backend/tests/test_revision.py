@@ -127,6 +127,45 @@ def test_same_revision_round_on_two_pages_keeps_both_visual_assets(tmp_path: Pat
     assert inspect_assets(root, store.get_slide(project_id, 2))["missingAssetCount"] == 0
 
 
+def test_rejected_revision_discards_only_new_candidate_assets(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("rollback-assets")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    existing = root / "assets" / "existing.png"
+    cv2.imwrite(str(existing), np.full((12, 12, 3), (35, 95, 185), np.uint8))
+    existing_bytes = existing.read_bytes()
+    source = np.full((130, 240, 3), 255, np.uint8)
+    cv2.rectangle(source, (80, 40), (120, 80), (45, 100, 190), -1)
+    cv2.imwrite(str(root / "source.png"), source)
+    background = root / "backgrounds" / "page_1.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    layout = {"slide": {"width": 240, "height": 130}, "elements": []}
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(background, layout, preview)
+    preview_bytes = preview.read_bytes()
+    (root / "visual_score.json").write_text(json.dumps(run_visual_qa(root / "source.png", preview, root, layout)), encoding="utf-8")
+    real_assess = revision.assess_revision
+
+    def reject_candidate(*args, **kwargs):
+        result = real_assess(*args, **kwargs)
+        result["integrityErrors"].append("forced_rejection")
+        return result
+
+    monkeypatch.setattr(revision, "assess_revision", reject_candidate)
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is False
+    assert result["rollbackTriggered"] is True
+    assert result["discardedCandidateAssets"] >= 1
+    assert list((root / "assets").glob("*.png")) == [existing]
+    assert existing.read_bytes() == existing_bytes
+    assert preview.read_bytes() == preview_bytes
+
+
 def test_revision_endpoint_uses_saved_page_and_reports_result(tmp_path: Path, monkeypatch) -> None:
     store, project_id, _ = _project(tmp_path, suppressed=True)
     monkeypatch.setattr(api_main, "store", store)

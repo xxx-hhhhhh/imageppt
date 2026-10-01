@@ -18,7 +18,7 @@ from app.services.reconstruction.asset_ownership import is_badge_owned_text, res
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
-from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, localize_project_assets, protected_visuals
+from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
@@ -87,6 +87,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     baseline_assets = inspect_assets(root, baseline)
     if baseline_assets["missingAssetCount"]:
         raise ValueError("Current slide has missing image assets; repair the existing result before revision")
+    asset_files_before = {path.resolve() for path in (root / "assets").glob("*") if path.is_file()}
     score_before = json.loads(score_path.read_text(encoding="utf-8"))
     history_path = root / f"revision_history_{page}.json"
     history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
@@ -338,6 +339,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         "editableCoverageBefore": coverage_before, "editableCoverageAfter": coverage_after,
         "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
         **reported_integrity, "inpaintedRegions": inpainted_regions if accepted else 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": not accepted,
+        "discardedCandidateAssets": 0,
     }
     if accepted:
         needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
@@ -353,6 +355,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         _commit_revision(store, project_id, page, candidate, candidate_dir, replacements,
                          {score_path: score_after, validation_path: score_after, problem_path: accepted_problem})
     else:
+        report["discardedCandidateAssets"] = _discard_candidate_assets(root, candidate, asset_files_before)
         score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, **reported_integrity, "inpaintedRegions": 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": True})
         score_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
         validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
@@ -362,6 +365,23 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
+
+
+def _discard_candidate_assets(root: Path, candidate: dict, preexisting: set[Path]) -> int:
+    """Remove only new files referenced by a rejected candidate."""
+    asset_dir = (root / "assets").resolve()
+    discard: set[Path] = set()
+    for item in candidate.get("elements", []):
+        if item.get("type") != "image":
+            continue
+        path = asset_path(root, item.get("src"))
+        if path is not None:
+            resolved = path.resolve()
+            if resolved.parent == asset_dir and resolved not in preexisting:
+                discard.add(resolved)
+    for path in discard:
+        path.unlink(missing_ok=True)
+    return len(discard)
 
 
 def _visual_retention_regressed(before: dict, after: dict) -> bool:
