@@ -285,6 +285,10 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
     if _visual_retention_regressed(baseline_audit, candidate_audit):
         integrity["integrityErrors"].append("source_visual_loss")
+    ghosting_before = count_text_ghosting(source, background, baseline)
+    ghosting_after = count_text_ghosting(source, candidate_bg, candidate)
+    if ghosting_after > ghosting_before:
+        integrity["integrityErrors"].append("text_ghosting_regressed")
     before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")
     after_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in candidate_audit["issues"] if issue.get("problem") == "visualContentMismatch")
     if any(issue.get("problem") == "visualContentMismatch" for issue in target_issues):
@@ -305,7 +309,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_after = float(measure_text_coverage(candidate, detected)["editableTextCoverage"])
     asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {})
     score_after.update(asset_metrics)
-    enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=count_text_ghosting(source, candidate_bg, candidate), background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
+    enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=ghosting_after, background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
     issues_after = collect_revision_issues(candidate, score_after, raw_scene)
     prior_regions = {item.get("elementId"): float(item.get("score") or 0) for item in score_before.get("regions", [])}
     improved = sorted({str(item.get("elementId")) for item in score_after.get("regions", []) if item.get("elementId") in changed_ids and float(item.get("score") or 0) > prior_regions.get(item.get("elementId"), 0) + 0.02})

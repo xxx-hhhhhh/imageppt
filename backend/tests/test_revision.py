@@ -55,6 +55,20 @@ def test_revision_restores_missing_editable_text_without_full_analysis(tmp_path:
     assert store.get_slide(project_id, 1)["elements"][0]["metadata"].get("suppressRender") is None
 
 
+def test_revision_rolls_back_when_new_text_ghosting_appears(tmp_path: Path, monkeypatch) -> None:
+    store, project_id, baseline = _project(tmp_path, suppressed=True)
+    original_preview = (tmp_path / project_id / "reconstructed_preview.png").read_bytes()
+    monkeypatch.setattr(revision, "count_text_ghosting", lambda _source, background, _layout: int("revisions" in Path(background).parts))
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is False
+    assert result["rollbackTriggered"] is True
+    assert "text_ghosting_regressed" in result["integrityErrors"]
+    assert store.get_slide(project_id, 1) == baseline
+    assert (tmp_path / project_id / "reconstructed_preview.png").read_bytes() == original_preview
+
+
 def test_revision_keeps_previous_page_when_metrics_do_not_improve(tmp_path: Path) -> None:
     store, project_id, original = _project(tmp_path, suppressed=False, duplicate=True)
     result = revise_problem_regions(store, project_id, 1)
