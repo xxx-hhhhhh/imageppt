@@ -244,7 +244,8 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
         # textured interiors use a text-cleaned movable crop instead.
         text_mask = np.zeros((h, w), np.uint8)
         for item in texts:
-            text_box = _box(item, width, height)
+            raw_box = (item.get("metadata") or {}).get("rawOCRBBox")
+            text_box = _clip(raw_box, width, height) if isinstance(raw_box, list) and len(raw_box) == 4 else _box(item, width, height)
             if text_box:
                 tx1, ty1, tx2, ty2 = text_box
                 cv2.rectangle(text_mask, (max(0, tx1 - x - 2), max(0, ty1 - y - 2)), (min(w - 1, tx2 - x + 2), min(h - 1, ty2 - y + 2)), 255, -1)

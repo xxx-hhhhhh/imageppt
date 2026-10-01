@@ -219,6 +219,26 @@ def test_small_contour_within_long_ocr_line_stays_owned_by_editable_text():
     assert not _is_text_glyph_candidate((55, 10, 455, 110), [line], 500, 160)
 
 
+def test_container_cleanup_uses_raw_ocr_bounds_instead_of_expanded_textbox(tmp_path):
+    source = np.full((210, 390, 3), 255, np.uint8)
+    cv2.rectangle(source, (35, 25), (350, 180), (85, 55, 35), 3)
+    cv2.rectangle(source, (42, 48), (343, 92), (175, 80, 20), -1)
+    cv2.putText(source, "TITLE", (100, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 390, "height": 210}, "elements": [
+        {"id": "title", "type": "text", "x": 75, "y": 42, "width": 210, "height": 72,
+         "text": "TITLE", "metadata": {"rawOCRBBox": [96, 54, 200, 80]}}
+    ]}
+    objectize_on_white(source_path, tmp_path / "background.png", layout, tmp_path / "assets", "raw-ocr", 1)
+    assets = [item for item in layout["elements"] if item.get("metadata", {}).get("layerRole") == "container" and item["type"] == "image"]
+    assert assets
+    panel = next(item for item in assets if item["x"] <= 42 and item["x"] + item["width"] >= 343)
+    image = cv2.imread(str(tmp_path / "assets" / Path(panel["src"]).name), cv2.IMREAD_UNCHANGED)
+    pixel = image[86 - panel["y"], 150 - panel["x"], :3]
+    assert np.max(np.abs(pixel.astype(int) - source[86, 150].astype(int))) < 10
+
+
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     source = np.full((220, 360, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)
