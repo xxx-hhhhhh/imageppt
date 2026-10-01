@@ -28,6 +28,7 @@ from app.services.reconstruction.text_erasure import count_text_ghosting, erase_
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization
+from app.services.reconstruction.asset_ownership import restore_image_owned_text
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
 
@@ -257,6 +258,9 @@ class ReconstructionPipeline:
             layout, typography_stats = typography_layout_refiner.refine(layout)
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
+            reconstruction_stats["imageOwnedTextRestored"] = len(restore_image_owned_text(
+                normalized_path, layout, page_output / "assets", project_id,
+                prefix=f"page_{page_index}_owned_text"))
             if white_objectized:
                 white_stats = objectize_on_white(normalized_path, background_path, layout, page_output / "assets", project_id, page_index)
                 reconstruction_stats.update(white_stats)

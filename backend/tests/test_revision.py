@@ -181,6 +181,53 @@ def test_complex_white_slide_keeps_visual_assets_across_two_revisions(tmp_path: 
             assert preview_path.read_bytes() == prior_preview
 
 
+def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("badge-revision")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 240, 3), 255, np.uint8)
+    cv2.circle(source, (110, 90), 50, (30, 40, 190), -1)
+    cv2.putText(source, "AI", (90, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    damaged = source[40:140, 60:160].copy()
+    damaged[39:65, 31:71] = (245, 245, 245)
+    alpha = np.zeros((100, 100), np.uint8)
+    cv2.circle(alpha, (50, 50), 50, 255, -1)
+    cv2.imwrite(str(root / "assets" / "badge.png"), np.dstack((damaged, alpha)))
+    layout = {"slide": {"width": 240, "height": 180}, "elements": [
+        {"id": "badge", "type": "image", "x": 60, "y": 40, "width": 100, "height": 100,
+         "zIndex": 10, "src": f"/media/assets/{project_id}/badge.png",
+         "metadata": {"reconstructionStrategy": "cutout_image", "preserveWholeAsset": True,
+                      "textCleaned": True, "editableTextIds": ["letters"]}},
+        {"id": "letters", "type": "text", "x": 90, "y": 79, "width": 40, "height": 26,
+         "zIndex": 11, "text": "AI", "metadata": {"rawOCRBBox": [90, 79, 130, 105],
+                                               "suppressed": True, "ownedBy": "badge"}},
+    ]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds" / "page_1.png", layout, root / "reconstructed_preview.png")
+    score = run_visual_qa(root / "source.png", root / "reconstructed_preview.png", root, layout)
+    score.update({"detectedTextCount": 1, "editableTextCoverage": 0.0})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    before = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", root / "reconstructed_preview.png", layout)
+    assert any(issue["problem"] == "visualContentMismatch" for issue in before["issues"])
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", root / "reconstructed_preview.png", current)
+    assert result["accepted"] is True
+    assert result["replacedAssetCount"] == 1, {"targeted": result["targetedIssues"], "integrity": result["integrityErrors"], "changed": result["improvedRegions"]}
+    assert result["missingAssetCount"] == 0
+    assert after["visualMismatchPixels"] < before["visualMismatchPixels"] * 0.2
+    assert len([item for item in current["elements"] if item["type"] == "image"]) == 1
+    assert current["elements"][0]["metadata"]["sourceContentPreserved"] is True
+
+
 def test_missing_candidate_asset_rolls_back_without_changing_preview(tmp_path: Path, monkeypatch) -> None:
     store, project_id = _image_project(tmp_path, monkeypatch)
     root = tmp_path / project_id

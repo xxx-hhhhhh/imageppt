@@ -154,9 +154,15 @@ class AIReconstructionPlanner:
                         item for item in elements
                         if item.get("type") not in {"background", "group"} and _covered_by_asset(item, box)
                     ]
+                    embedded_badge_text = {
+                        item["id"] for item in covered
+                        if item.get("type") == "text" and _inside_whole_badge(item, covered)
+                    }
                     editable_text = [
                         item for item in covered
                         if item.get("type") == "text"
+                        and item.get("id") not in embedded_badge_text
+                        and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
                         and item.get("role") not in {"logo", "decorative_text"}
                         and float(item.get("confidence") or 0) >= 0.5
                         and str(item.get("text") or "").strip()
@@ -217,7 +223,7 @@ class AIReconstructionPlanner:
                             metadata.update({"plannerModuleId": module_id, "reconstructionStrategy": "editable_text", "reconstructionStrategySource": "planner", "textCleanedFromAsset": asset_id})
                             item["zIndex"] = z_index + 1
                             continue
-                        if item.get("type") == "text" and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.5:
+                        if item.get("type") == "text" and item.get("id") not in embedded_badge_text and not any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")) and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.5:
                             continue
                         if not metadata.get("suppressed"):
                             stats["plannerSuppressedElements"] += 1
@@ -564,6 +570,24 @@ def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> f
     left_area = (left[2] - left[0]) * (left[3] - left[1])
     right_area = (right[2] - right[0]) * (right[3] - right[1])
     return area / max(1, left_area + right_area - area)
+
+
+def _inside_whole_badge(text: dict[str, Any], covered: list[dict[str, Any]]) -> bool:
+    for visual in covered:
+        if visual.get("type") != "image":
+            continue
+        metadata = visual.get("metadata") or {}
+        if not (metadata.get("wholeBadgeAsset") or metadata.get("componentType") == "wholeBadgeImage" or visual.get("componentType") == "wholeBadgeImage"):
+            continue
+        bounds = visual.get("bbox") or {}
+        try:
+            left, top = float(bounds["left"]), float(bounds["top"])
+            right, bottom = left + float(bounds["width"]), top + float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _coverage(text, (left, top, right, bottom)) >= 0.85:
+            return True
+    return False
 
 
 def _coverage(item: dict[str, Any], box: tuple[int, int, int, int]) -> float:

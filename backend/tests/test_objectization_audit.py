@@ -68,6 +68,28 @@ def test_audit_counts_visual_recolored_instead_of_erased(tmp_path):
     assert report["salientVisualPixels"] >= report["visualMismatchPixels"]
 
 
+def test_suppressed_badge_text_does_not_hide_erased_internal_symbol(tmp_path):
+    source = np.full((150, 240, 3), 255, np.uint8)
+    cv2.circle(source, (95, 75), 40, (30, 45, 190), -1)
+    cv2.putText(source, "AI", (77, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    preview = source.copy()
+    cv2.rectangle(preview, (76, 65), (111, 88), (255, 255, 255), -1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    cv2.imwrite(str(tmp_path / "preview.png"), preview)
+    layout = {"elements": [
+        {"id": "badge", "type": "image", "x": 55, "y": 35, "width": 80, "height": 80,
+         "src": "badge.png", "metadata": {"wholeBadgeAsset": True}},
+        {"id": "letters", "type": "text", "x": 76, "y": 65, "width": 36, "height": 23,
+         "text": "AI", "metadata": {"rawOCRBBox": [76, 65, 112, 88], "suppressed": True, "ownedBy": "badge"}},
+    ]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png", tmp_path / "preview.png", layout)
+
+    assert report["missingVisualPixels"] > 100
+    assert any(issue["problem"] in {"missingVisualObject", "visualContentMismatch"} for issue in report["issues"])
+
+
 def test_audit_flags_image_owner_that_renders_blank(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (70, 70), 22, (40, 80, 180), -1)

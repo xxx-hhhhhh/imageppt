@@ -67,6 +67,33 @@ def test_detected_visual_outside_ai_plan_becomes_editable_image_asset(tmp_path: 
         assert crop.size == (140, 130)
 
 
+def test_whole_badge_keeps_embedded_letters_in_image(tmp_path: Path) -> None:
+    source = tmp_path / "badge.png"
+    with Image.new("RGB", (300, 220), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((80, 50, 180, 150), fill="#C71818")
+        draw.text((115, 90), "AI", fill="white")
+        image.save(source)
+    badge = _element("badge", "image", (80, 50, 100, 100))
+    badge["metadata"].update({"wholeBadgeAsset": True, "componentType": "wholeBadgeImage"})
+    letters = _element("letters", "text", (110, 84, 40, 30), "AI")
+    scene = {"canvas": {"width": 300, "height": 220}, "elements": [badge, letters],
+             "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+                 {"id": "badge-module", "reconstructionStrategy": "movable_image",
+                  "bbox": {"left": 80 / 300, "top": 50 / 220, "width": 100 / 300, "height": 100 / 220},
+                  "confidence": 0.95}
+             ]}}}
+
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "badge-project", 1)
+
+    planned = next(item for item in scene["elements"] if item.get("id", "").startswith("planner_page_1_region_"))
+    assert planned["metadata"]["textCleaned"] is False
+    assert planned["metadata"]["editableTextIds"] == []
+    assert letters["metadata"]["ownedBy"] == planned["id"]
+    with Image.open(tmp_path / "assets" / f"{planned['id']}.png") as crop:
+        assert crop.getpixel((40, 50)) == Image.open(source).getpixel((120, 100))
+
+
 def test_bounded_unplanned_visual_is_movable_and_removed_from_background(tmp_path: Path, monkeypatch) -> None:
     project_id = "visual-ownership"
     project = tmp_path / project_id

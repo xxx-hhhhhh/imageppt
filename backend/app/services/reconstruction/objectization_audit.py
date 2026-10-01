@@ -7,6 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.services.reconstruction.asset_ownership import is_badge_owned_text
 from app.services.reconstruction.residual_objects import is_meaningful_stroke, visual_candidate_mask
 
 
@@ -45,12 +46,16 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     # Editable glyphs need not land on precisely the same raster pixels.
     for item in layout.get("elements", []):
         if item.get("type") == "text":
+            if item not in active and is_badge_owned_text(item, layout):
+                continue
             box = _box(item, width, height)
             if box:
                 x1, y1, x2, y2 = box
                 lost[y1:y2, x1:x2] = False
     for item in layout.get("elements", []):
         if item.get("type") == "text":
+            if item not in active and is_badge_owned_text(item, layout):
+                continue
             box = _box(item, width, height)
             if box:
                 x1, y1, x2, y2 = box

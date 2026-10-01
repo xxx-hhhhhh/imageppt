@@ -14,6 +14,7 @@ from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, restore_image_owned_text
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
@@ -93,6 +94,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     score_before["objectizationAudit"] = baseline_audit
     saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
     issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene), *baseline_audit["issues"]]}.values())
+    baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
+    issues_before = [issue for issue in issues_before if not (
+        issue.get("problem") == "missingEditableText"
+        and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
+    )]
     priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "missingBackplate": 2, "missingVisualObject": 2, "blankVisualOwner": 2, "visualContentMismatch": 2, "squareCutoutUnresolved": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
@@ -199,7 +205,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 inpainted_regions += separate_foreground(candidate_bg, unseparated, professional_provider=local_provider)
             changed_ids.update(item["id"] for item in new_assets)
 
-    recovered = repair_missing_regions(source, candidate, target_issues, root / "assets", project_id, round_number)
+    mismatch_boxes = [issue["bbox"] for issue in target_issues if issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)]
+    restored_visuals = restore_image_owned_text(source, candidate, root / "assets", project_id,
+                                                prefix=f"revision_{round_number}_owned_text", target_boxes=mismatch_boxes) if mismatch_boxes else []
+    changed_ids.update(restored_visuals)
+    restored_items = [by_id[item_id] for item_id in restored_visuals if item_id in by_id]
+    repair_issues = [issue for issue in target_issues if not (
+        issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
+        and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]
+    recovered = repair_missing_regions(source, candidate, repair_issues, root / "assets", project_id, round_number)
     changed_ids.update(str(item["id"]) for item in recovered)
     for issue in target_issues:
         if issue["problem"] != "visualContentMismatch" or not isinstance(issue.get("bbox"), list):
@@ -207,6 +221,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         x1, y1, x2, y2 = issue["bbox"]
         issue_area = max(1, (x2 - x1) * (y2 - y1))
         for old in baseline.get("elements", []):
+            if old.get("id") in restored_visuals:
+                continue
             if old.get("type") not in {"rectangle", "roundedRectangle", "ellipse", "image"}:
                 continue
             ox1, oy1 = float(old.get("x") or 0), float(old.get("y") or 0)
@@ -242,9 +258,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
     if _visual_retention_regressed(baseline_audit, candidate_audit):
         integrity["integrityErrors"].append("source_visual_loss")
+    before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")
+    after_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in candidate_audit["issues"] if issue.get("problem") == "visualContentMismatch")
     if any(issue.get("problem") == "visualContentMismatch" for issue in target_issues):
-        before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")
-        after_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in candidate_audit["issues"] if issue.get("problem") == "visualContentMismatch")
         if after_mismatch >= before_mismatch:
             integrity["integrityErrors"].append("visual_mismatch_not_improved")
     score_after["objectizationAudit"] = candidate_audit
@@ -276,7 +292,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
-    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
+    restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch) and len(issues_after) <= len(issues_before) + 1
     reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
                           "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
                           "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],
@@ -369,6 +386,8 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
         if item.get("type") != "text" or not str(item.get("text") or "").strip() or item.get("role") in {"logo", "decorative_text"}:
             continue
         item_id = item["id"]
+        if is_badge_owned_text(item, layout):
+            continue
         if meta.get("duplicateSuppressed") or str(meta.get("ownedBy") or "").startswith("text_"):
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
