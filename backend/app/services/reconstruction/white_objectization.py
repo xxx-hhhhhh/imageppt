@@ -193,7 +193,7 @@ def layer_objectized_elements(elements: list[dict]) -> None:
     # Extracted visual crops own their source pixels; residual crops only fill
     # surrounding gaps and must stay underneath the movable object.
     for planned in visuals:
-        if (planned.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner"}:
+        if (planned.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner", "leading_text_icon"}:
             continue
         box = _box_unclipped(planned)
         residuals = [item for item in visuals if item is not planned

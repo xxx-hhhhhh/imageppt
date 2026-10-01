@@ -102,7 +102,7 @@ def transfer_planned_visual_pixels(layout: dict, asset_dir: Path, project_id: st
     active = [item for item in layout.get("elements", []) if item.get("type") == "image"
               and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     planned = [item for item in active if (item.get("metadata") or {}).get("reconstructionStrategySource")
-               in {"planner", "round_contour", "merged_contour_owner"}]
+               in {"planner", "round_contour", "merged_contour_owner", "leading_text_icon"}]
     lower = [item for item in active if (item.get("metadata") or {}).get("reconstructionStrategySource")
              in {"residual_detection", "objectization_qa"}]
     staged: dict[str, tuple[dict, np.ndarray, Path]] = {}
@@ -165,7 +165,7 @@ def count_duplicate_planned_visual_pixels(layout: dict, asset_dir: Path) -> int:
               and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     total = 0
     for owner in active:
-        if (owner.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner"}:
+        if (owner.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner", "leading_text_icon"}:
             continue
         image = cv2.imread(str(_asset_path(owner, asset_dir)), cv2.IMREAD_UNCHANGED)
         if image is None or image.ndim != 3:

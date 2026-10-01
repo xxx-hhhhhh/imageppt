@@ -26,6 +26,7 @@ from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.colored_text_support import extract_colored_text_supports
+from app.services.reconstruction.leading_text_icons import extract_leading_text_icons
 from app.services.reconstruction.visual_asset_ownership import resolve_duplicate_contour_assets, transfer_planned_visual_pixels
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
@@ -183,6 +184,7 @@ class ReconstructionPipeline:
             "plannedVisualPixelsClearedFromOtherAssets": 0,
             "trimmedOverlappingAssets": 0,
             "duplicateVisualAssetsSuppressed": 0,
+            "leadingTextIconsExtracted": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
@@ -275,6 +277,18 @@ class ReconstructionPipeline:
                 object_qa = repair_objectized_modules(normalized_path, layout, page_output / "assets", project_id)
                 layout["metadata"]["objectizationQA"] = object_qa
                 self._write_json(page_output / ("objectization_qa.json" if page_index == 1 else f"objectization_qa_{page_index}.json"), object_qa)
+                reconstruction_stats["leadingTextIconsExtracted"] += extract_leading_text_icons(
+                    normalized_path, layout, page_output / "assets", project_id, page_index)
+                # A later visual critique reapplies scene boxes to this layout.
+                # Keep its text positions aligned with the newly separated icon.
+                if reconstruction_stats["leadingTextIconsExtracted"]:
+                    shifted = {item["id"]: item for item in layout.get("elements", [])
+                               if (item.get("metadata") or {}).get("leadingVisualOwner")}
+                    for scene_item in scene_refined.get("elements", []):
+                        item = shifted.get(scene_item.get("id"))
+                        if item is not None:
+                            scene_item["bbox"] = {"left": item["x"], "top": item["y"],
+                                                  "width": item["width"], "height": item["height"]}
             asset_repairs: list[dict] = []
             local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
             asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
@@ -390,6 +404,7 @@ class ReconstructionPipeline:
             score["plannedVisualPixelsClearedFromOtherAssets"] = reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"]
             score["trimmedOverlappingAssets"] = reconstruction_stats["trimmedOverlappingAssets"]
             score["duplicateVisualAssetsSuppressed"] = reconstruction_stats["duplicateVisualAssetsSuppressed"]
+            score["leadingTextIconsExtracted"] = reconstruction_stats["leadingTextIconsExtracted"]
             if white_objectized:
                 score["objectizationQA"] = object_qa
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
@@ -545,6 +560,7 @@ class ReconstructionPipeline:
                 "plannedVisualPixelsClearedFromOtherAssets": reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"],
                 "trimmedOverlappingAssets": reconstruction_stats["trimmedOverlappingAssets"],
                 "duplicateVisualAssetsSuppressed": reconstruction_stats["duplicateVisualAssetsSuppressed"],
+                "leadingTextIconsExtracted": reconstruction_stats["leadingTextIconsExtracted"],
                 "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
