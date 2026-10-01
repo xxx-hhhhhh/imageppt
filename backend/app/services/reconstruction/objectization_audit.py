@@ -197,7 +197,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         # A transparent crop may occupy only a small part of its bounding box.
         # Judge the pixels it actually owns, not unrelated white space nearby.
         owner_pixels = _visual_mask(item, box, source_path)
-        source_detail = contrast[y1:y2, x1:x2] >= 8
+        source_detail = (contrast[y1:y2, x1:x2] >= 8) & ~np.all(source[y1:y2, x1:x2] >= 253, axis=2)
         if np.any(owner_pixels):
             source_detail &= owner_pixels != 0
         if np.count_nonzero(source_detail) < max(minimum, source_detail.size * 0.05):

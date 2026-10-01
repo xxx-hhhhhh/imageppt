@@ -54,6 +54,29 @@ def test_audit_reports_large_visual_still_baked_into_background(tmp_path):
                for issue in report["issues"])
 
 
+def test_audit_does_not_call_visible_stripes_blank_assets(tmp_path):
+    height, width = 240, 420
+    source = np.full((height, width, 3), 255, np.uint8)
+    for index in range(12):
+        cv2.rectangle(source, (0, index * 20), (width - 1, index * 20 + 15),
+                      (70 + index * 3, 90 + index * 3, 130 + index * 3), -1)
+    source_path = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    preview = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": width, "height": height}, "elements": []}
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "stripes", 1)
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background, layout, preview)
+
+    report = audit_objectization(source_path, background, preview, layout)
+
+    assert len([item for item in layout["elements"] if item["type"] == "image"]) == 12
+    assert not any(issue["problem"] == "blankVisualOwner" for issue in report["issues"])
+
+
 def test_audit_catches_flat_dark_surface_lost_to_white(tmp_path):
     source = np.full((120, 200, 3), (52, 31, 21), np.uint8)
     cv2.putText(source, "A", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)
