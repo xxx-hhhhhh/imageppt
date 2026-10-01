@@ -477,6 +477,8 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
     selected: list[tuple[int, int, int, int]] = []
     for x, y, w, h, contour, rounded in candidates[:80]:
         box = (x, y, x + w, y + h)
+        if _contains_distinct_filled_regions(source, box):
+            continue
         if _is_text_glyph_candidate(box, active, width, height):
             continue
         if any(_overlap_min(box, prior) > 0.75 for prior in selected):
@@ -529,6 +531,35 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             occupied[y:y + h, x:x + w] = 255
         selected.append(box)
     return shapes, assets
+
+
+def _contains_distinct_filled_regions(source: np.ndarray, parent: tuple[int, int, int, int]) -> bool:
+    """Find repeated flat nodes inside a connected outer flowchart contour."""
+    x1, y1, x2, y2 = parent
+    width, height = x2 - x1, y2 - y1
+    if width < source.shape[1] * 0.45 or height < 24:
+        return False
+    region = source[y1:y2, x1:x2]
+    quantized = ((region.astype(np.uint16) + 8) // 16).clip(0, 15)
+    packed = (quantized[:, :, 0] << 8) | (quantized[:, :, 1] << 4) | quantized[:, :, 2]
+    counts = np.bincount(packed.ravel().astype(np.int32), minlength=4096)
+    blocks = []
+    for color in np.argsort(counts)[-8:]:
+        if counts[color] < width * height * 0.10:
+            continue
+        mask = cv2.morphologyEx(np.uint8(packed == color), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        for index in range(1, count):
+            bx, by, bw, bh, pixels = [int(value) for value in stats[index]]
+            if (bw >= width * 0.08 and bw <= width * 0.45 and bh >= height * 0.55
+                    and pixels >= width * height * 0.08 and pixels / max(1, bw * bh) >= 0.70):
+                blocks.append((bx, by, bx + bw, by + bh))
+    for index, first in enumerate(blocks):
+        for second in blocks[index + 1:]:
+            gap = max(first[0], second[0]) - min(first[2], second[2])
+            if gap >= max(6, width * 0.035):
+                return True
+    return False
 
 
 def _is_text_glyph_candidate(box: tuple[int, int, int, int], active: list[dict], width: int, height: int) -> bool:
@@ -756,10 +787,47 @@ def _extract_flat_containers(source: np.ndarray, active: list[dict], elements: l
         identifier = f"white_container_page_{page_index}_{created:03d}"
         group_id = _bind_container_module(members, identifier)
         z_index = min([int(item.get("zIndex") or 20) for item in members], default=10) - 1
-        elements.append({"id": identifier, "type": kind, "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": fill, "stroke": fill, "strokeWidth": 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
+        outline = _flat_container_outline(source, box, fill)
+        element_box, stroke = outline if outline is not None else (box, None)
+        ex1, ey1, ex2, ey2 = element_box
+        elements.append({"id": identifier, "type": "roundedRectangle" if stroke else kind, "x": ex1, "y": ey1, "width": ex2 - ex1, "height": ey2 - ey1, "rotation": 0, "zIndex": z_index, "groupId": group_id, "style": {"fill": fill, "stroke": stroke or fill, "strokeWidth": 2 if stroke else 0, "opacity": 1}, "metadata": {"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")]}})
         _occupy_shape_color(source, occupied, box, fill)
+        if stroke:
+            stroke_bgr = np.frombuffer(bytes.fromhex(stroke[1:])[::-1], dtype=np.uint8).astype(np.int16)
+            ring = occupied[ey1:ey2, ex1:ex2]
+            border = np.ones(ring.shape, np.bool_)
+            border[y - ey1:y + h - ey1, x - ex1:x + w - ex1] = False
+            matching = np.max(np.abs(source[ey1:ey2, ex1:ex2].astype(np.int16) - stroke_bgr), axis=2) <= 25
+            ring[border & matching] = 255
         created_boxes.append(box)
     return created
+
+
+def _flat_container_outline(source: np.ndarray, box: tuple[int, int, int, int], fill: str) -> tuple[tuple[int, int, int, int], str] | None:
+    """Attach a bounded border to its flat node rather than a residual image."""
+    x1, y1, x2, y2 = box
+    height, width = source.shape[:2]
+    # The flat-color mask excludes a two-pixel outline. Shape renderers draw
+    # through the far coordinate, so the far edge needs only one extra pixel.
+    outer = (max(0, x1 - 2), max(0, y1 - 2), min(width, x2 + 1), min(height, y2 + 1))
+    ox1, oy1, ox2, oy2 = outer
+    if ox1 == x1 or oy1 == y1 or ox2 == x2 or oy2 == y2:
+        return None
+    patch = source[oy1:oy2, ox1:ox2]
+    ring = np.ones(patch.shape[:2], np.bool_)
+    ring[y1 - oy1:y2 - oy1, x1 - ox1:x2 - ox1] = False
+    colors = patch[ring]
+    fill_bgr = np.frombuffer(bytes.fromhex(fill[1:])[::-1], dtype=np.uint8).astype(np.int16)
+    page_color = _border_color(source)
+    contrasted = ((np.max(np.abs(colors.astype(np.int16) - fill_bgr), axis=1) >= 25)
+                  & (np.max(np.abs(colors.astype(np.int16) - page_color), axis=1) >= 20))
+    if np.mean(contrasted) < 0.30:
+        return None
+    selected = colors[contrasted]
+    median = np.median(selected, axis=0).astype(np.uint8)
+    if np.mean(np.max(np.abs(selected.astype(np.int16) - median.astype(np.int16)), axis=1) <= 20) < 0.70:
+        return None
+    return outer, _hex_bgr(median)
 
 
 def _module_members(active: list[dict], box: tuple[int, int, int, int]) -> list[dict]:

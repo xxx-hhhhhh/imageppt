@@ -12,6 +12,7 @@ from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.text_erasure import erase_editable_text_sources
 from app.services.pptx.renderer import PPTXRenderer
 from app.services.visual_qa.analyzer import render_preview
+from backend.tests.fixtures.generate_fixtures import generate
 
 
 def test_dark_flat_page_is_a_movable_shape_over_white_base(tmp_path):
@@ -324,6 +325,29 @@ def test_edge_aligned_pale_plate_survives_preview_and_ppt(tmp_path, monkeypatch)
     audit = audit_objectization(source_path, background_path, erased_path, {"elements": []})
     assert any(issue["problem"] in {"missingBackplate", "missingVisualObject"}
                and issue["bbox"][1] == 0 for issue in audit["issues"])
+
+
+def test_connected_flowchart_keeps_nodes_and_connectors_independently_movable(tmp_path):
+    source_path = next(path for path in generate(tmp_path / "fixtures") if path.stem == "06_flowchart")
+    source = cv2.imread(str(source_path))
+    background = tmp_path / "background.png"
+    layout = {"slide": {"width": 960, "height": 540}, "elements": []}
+    objectize_on_white(source_path, background, layout, tmp_path / "assets", "flow", 1)
+    nodes = [item for item in layout["elements"] if item["type"] in {"rectangle", "roundedRectangle"}
+             and 220 <= item["y"] <= 235 and item["height"] >= 70]
+    assert len(nodes) == 4
+    assert all(item["width"] < 180 for item in nodes)
+    assert any(item["type"] == "image" and 220 <= item["y"] <= 235 for item in layout["elements"])
+    for item in layout["elements"]:
+        if item["type"] == "image":
+            item["src"] = str(tmp_path / "assets" / Path(item["src"]).name)
+    render_preview(background, layout, tmp_path / "preview.png")
+    error = np.max(np.abs(cv2.imread(str(tmp_path / "preview.png")).astype(np.int16) - source.astype(np.int16)), axis=2)
+    assert np.count_nonzero(error >= 48) < source.shape[0] * source.shape[1] * 0.002
+    first = min(nodes, key=lambda item: item["x"])
+    first["x"] += 900
+    render_preview(background, layout, tmp_path / "moved.png")
+    assert np.all(cv2.imread(str(tmp_path / "moved.png"))[270, 70] >= 245)
 
 
 def test_dense_page_artwork_uses_bounded_assets_without_fake_shapes(tmp_path):
