@@ -97,6 +97,20 @@ def test_audit_detects_missing_pale_plate_and_writes_owner_debug(tmp_path):
     assert (tmp_path / "debug.png").is_file()
 
 
+def test_sparse_pale_chart_line_is_a_visual_object_not_solid_backplate(tmp_path):
+    source = np.full((130, 230, 3), 255, np.uint8)
+    cv2.line(source, (30, 85), (190, 45), (225, 230, 235), 2)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+
+    assert report["missingVisualObjects"] >= 1
+    assert report["missingBackplates"] == 0
+
+
 def test_audit_detects_neutral_plate_missing_from_gradient_page(tmp_path):
     source = np.empty((180, 300, 3), np.uint8)
     for y in range(180):

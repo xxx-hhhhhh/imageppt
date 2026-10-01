@@ -88,7 +88,8 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         median = np.median(colors, axis=0)
         flat = float(np.mean(np.max(np.abs(colors.astype(np.float32) - median), axis=1) <= 9)) >= 0.65
         pale = float(np.max(np.abs(median - page_color))) <= 35
-        problem = "missingBackplate" if flat and pale else "missingVisualObject"
+        dense = len(colors) / max(1, w * h) >= 0.70
+        problem = "missingBackplate" if flat and pale and dense else "missingVisualObject"
         report["missingBackplates" if problem == "missingBackplate" else "missingVisualObjects"] += 1
         report["issues"].append({"problem": problem, "elementId": f"unowned_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
     for item in active:
@@ -163,7 +164,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
             common.update({"type": "rectangle", "style": {"fill": color, "stroke": color, "strokeWidth": 0, "opacity": 1}})
             metadata["reconstructionStrategy"] = "native_shape"
         else:
-            mask = np.uint8(np.max(np.abs(crop.astype(np.int16) - page_color), axis=2) >= 5) * 255
+            mask = np.uint8(np.max(np.abs(crop.astype(np.int16) - page_color), axis=2) >= 2) * 255
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
             for item in existing:
                 tx1, ty1, tx2, ty2 = _box(item, width, height)
