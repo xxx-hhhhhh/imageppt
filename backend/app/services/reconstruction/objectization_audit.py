@@ -26,6 +26,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
+              "monolithicPageImageCount": 0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
@@ -159,6 +160,13 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if box is None:
             continue
         x1, y1, x2, y2 = box
+        if (x2 - x1) * (y2 - y1) >= width * height * 0.80:
+            asset_alpha = _visual_mask(item, box, source_path)
+            occupied_fraction = float(np.mean(asset_alpha > 32))
+            if occupied_fraction >= 0.95:
+                report["monolithicPageImageCount"] += 1
+                report["issues"].append({"problem": "monolithicPageImage", "elementId": item.get("id"),
+                                         "bbox": list(box), "occupiedFraction": round(occupied_fraction, 3)})
         # A transparent crop may occupy only a small part of its bounding box.
         # Judge the pixels it actually owns, not unrelated white space nearby.
         owner_pixels = _visual_mask(item, box, source_path)

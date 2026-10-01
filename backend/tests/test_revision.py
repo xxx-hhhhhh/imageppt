@@ -538,6 +538,11 @@ def test_integrity_rejects_silent_shape_loss_even_when_preview_is_unchanged(tmp_
     assert "lost_existing_shapes" not in assess_revision(root, baseline, candidate, *paths)["integrityErrors"]
 
 
+def test_revision_keeps_monolithic_image_issue_until_it_is_actually_fixed() -> None:
+    issue = {"problem": "monolithicPageImage", "elementId": "screenshot", "bbox": [0, 0, 300, 180]}
+    assert issue in revision.collect_revision_issues({"elements": []}, {"issues": [issue]})
+
+
 def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
@@ -574,6 +579,8 @@ def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp
 
 
 def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None:
+    assert revision._visual_retention_regressed(
+        {"monolithicPageImageCount": 0}, {"monolithicPageImageCount": 1})
     assert revision._visual_retention_regressed(
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10},
         {"retainedVisualCoverage": 0.91, "missingVisualPixels": 48},

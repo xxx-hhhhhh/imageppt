@@ -125,6 +125,35 @@ def test_initial_recovery_restores_icon_inside_text_box(tmp_path, monkeypatch):
     assert len([item for item in layout["elements"] if item["type"] == "text"]) == 1
 
 
+def test_audit_flags_opaque_slide_screenshot_but_not_irregular_cutout(tmp_path):
+    source = np.full((180, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (30, 25), (100, 95), (35, 95, 180), -1)
+    cv2.rectangle(source, (180, 50), (260, 135), (40, 160, 70), -1)
+    (tmp_path / "assets").mkdir()
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "background.png"), np.full_like(source, 255))
+    cv2.imwrite(str(tmp_path / "preview.png"), source)
+    cv2.imwrite(str(tmp_path / "assets" / "screenshot.png"), source)
+    opaque = {"elements": [{"id": "screenshot", "type": "image", "x": 0, "y": 0,
+                            "width": 300, "height": 180, "src": "/media/assets/demo/screenshot.png"}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", opaque)
+    assert report["monolithicPageImageCount"] == 1
+    assert any(issue["problem"] == "monolithicPageImage" for issue in report["issues"])
+
+    alpha = np.zeros(source.shape[:2], np.uint8)
+    polygon = np.array([[5, 25], [100, 5], [295, 30], [280, 165], [35, 175]], np.int32)
+    cv2.fillPoly(alpha, [polygon], 255)
+    cutout = np.dstack((source, alpha))
+    cv2.imwrite(str(tmp_path / "assets" / "cutout.png"), cutout)
+    irregular = {"elements": [{"id": "cutout", "type": "image", "x": 0, "y": 0,
+                               "width": 300, "height": 180, "src": "/media/assets/demo/cutout.png"}]}
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", irregular)
+    assert report["monolithicPageImageCount"] == 0
+
+
 def test_audit_does_not_mark_preserved_white_badge_detail_as_missing(tmp_path):
     source = np.full((150, 240, 3), 255, np.uint8)
     cv2.circle(source, (95, 75), 40, (30, 85, 195), -1)
