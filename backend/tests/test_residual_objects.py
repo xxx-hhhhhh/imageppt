@@ -5,7 +5,7 @@ import numpy as np
 from pptx import Presentation
 
 from app.services.pptx import renderer as renderer_module
-from app.services.reconstruction.residual_objects import extract_residual_objects, visual_candidate_mask
+from app.services.reconstruction.residual_objects import _group_components, extract_residual_objects, visual_candidate_mask
 
 
 def test_disconnected_visual_parts_group_into_movable_ppt_images(tmp_path, monkeypatch):
@@ -50,6 +50,19 @@ def test_many_small_decorations_are_not_silently_dropped_by_asset_limit(tmp_path
     assert all(any(item["x"] <= x < item["x"] + item["width"]
                    and item["y"] <= y < item["y"] + item["height"] for item in assets)
                for x, y in centers)
+
+
+def test_spatial_grouping_keeps_same_nearby_color_and_area_rules():
+    components = [
+        {"box": (20, 20, 30, 30), "color": np.array([30, 90, 190])},
+        {"box": (34, 20, 44, 30), "color": np.array([32, 92, 188])},
+        {"box": (47, 20, 57, 30), "color": np.array([180, 30, 20])},
+        {"box": (140, 20, 150, 30), "color": np.array([30, 90, 190])},
+    ]
+
+    groups = _group_components(components, 200, 120)
+
+    assert sorted(sorted(group) for group in groups) == [[0, 1], [2], [3]]
 
 
 def test_residual_detection_respects_owners_and_colored_background(tmp_path):

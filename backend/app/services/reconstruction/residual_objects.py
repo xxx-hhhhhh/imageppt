@@ -166,8 +166,20 @@ def _group_components(components: list[dict], width: int, height: int) -> list[l
         return index
 
     gap_limit = max(5, round(min(width, height) * 0.018))
+    cell_size = max(32, gap_limit * 4)
+    spatial_cells: dict[tuple[int, int], list[int]] = {}
+    for index, component in enumerate(components):
+        x1, y1, x2, y2 = component["box"]
+        for cell_y in range(y1 // cell_size, (y2 - 1) // cell_size + 1):
+            for cell_x in range(x1 // cell_size, (x2 - 1) // cell_size + 1):
+                spatial_cells.setdefault((cell_x, cell_y), []).append(index)
     for index, first in enumerate(components):
-        for other in range(index + 1, len(components)):
+        x1, y1, x2, y2 = first["box"]
+        nearby: set[int] = set()
+        for cell_y in range(max(0, y1 - gap_limit) // cell_size, (y2 + gap_limit - 1) // cell_size + 1):
+            for cell_x in range(max(0, x1 - gap_limit) // cell_size, (x2 + gap_limit - 1) // cell_size + 1):
+                nearby.update(spatial_cells.get((cell_x, cell_y), ()))
+        for other in sorted(candidate for candidate in nearby if candidate > index):
             second = components[other]
             a, b = first["box"], second["box"]
             dx = max(0, a[0] - b[2], b[0] - a[2])
