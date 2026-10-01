@@ -250,6 +250,40 @@ def test_transparent_image_bbox_does_not_hide_missing_visual_content(tmp_path):
     assert any(issue["bbox"][0] <= 175 <= issue["bbox"][2] for issue in report["issues"] if issue["problem"] == "missingVisualObject")
 
 
+def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    project_id = "a" * 32
+    root = tmp_path / project_id
+    (root / "assets").mkdir(parents=True)
+    source = np.full((180, 300, 3), 255, np.uint8)
+    source[35:145, 35:265] = (252, 252, 252)
+    alpha = np.zeros((110, 230), np.uint8)
+    alpha[:, :] = 255
+    alpha[45:90, 90:185] = 0
+    asset = np.dstack((source[35:145, 35:265], alpha))
+    cv2.imwrite(str(root / "assets" / "card.png"), asset)
+    source_path, background, preview = root / "source.png", root / "background.png", root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "card", "type": "image", "x": 35, "y": 35, "width": 230, "height": 110, "zIndex": 1,
+         "src": f"/media/assets/{project_id}/card.png"},
+        {"id": "label", "type": "text", "text": "Label", "x": 115, "y": 70, "width": 65, "height": 20,
+         "zIndex": 2, "style": {"fontSize": 17, "color": "#502D23"}},
+    ]}
+    render_preview(background, layout, preview)
+    before = cv2.imread(str(preview))
+    assert np.all(before[112, 170] == 255)
+
+    recovered = recover_initial_missing_regions(source_path, background, preview, layout, root / "assets", project_id, 1)
+
+    assert recovered >= 1
+    after = cv2.imread(str(preview))
+    assert np.max(np.abs(after[112, 170].astype(int) - source[112, 170].astype(int))) < 3
+    assert any((item.get("metadata") or {}).get("qaIssue") == "paleAssetGap" for item in layout["elements"])
+    assert next(item for item in layout["elements"] if item["id"] == "label")["type"] == "text"
+
+
 def test_revision_repairs_only_missing_local_plate(tmp_path):
     store = ProjectStore(tmp_path)
     project_id = store.create("plate-revision")["id"]

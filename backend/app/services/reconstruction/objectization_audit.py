@@ -197,13 +197,14 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
 
     before = audit_objectization(source_path, background_path, preview_path, layout)
     issues = [issue for issue in before["issues"] if issue.get("problem") in {"missingBackplate", "missingVisualObject"}]
-    if not issues:
-        return 0
     candidate = copy.deepcopy(layout)
     created = repair_missing_regions(source_path, candidate, issues, asset_dir, project_id, 0,
                                      asset_prefix=f"initial_page_{page_index}")
+    created.extend(_recover_pale_asset_gaps(source_path, preview_path, candidate, asset_dir, project_id, page_index))
     if not created:
         return 0
+    from app.services.reconstruction.white_objectization import layer_objectized_elements
+    layer_objectized_elements(candidate.get("elements", []))
     candidate_preview = preview_path.with_name(f"{preview_path.stem}_object_recovery.png")
     accepted = False
     try:
@@ -212,6 +213,17 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
         valid = not any(issue.get("problem") == "objectizationAuditUnavailable" for issue in after["issues"])
         improved = (valid and after["missingVisualPixels"] < before["missingVisualPixels"]
                     and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
+        if not improved and any((item.get("metadata") or {}).get("qaIssue") == "paleAssetGap" for item in created):
+            source = cv2.imread(str(source_path))
+            previous = cv2.imread(str(preview_path))
+            current = cv2.imread(str(candidate_preview))
+            if source is not None and previous is not None and current is not None:
+                pale = _pale_gap_pixels(source, previous)
+                before_gap = int(np.count_nonzero(pale))
+                after_gap = int(np.count_nonzero(_pale_gap_pixels(source, current) & pale))
+                improved = (valid and before_gap >= 200 and after_gap <= before_gap * 0.8
+                            and after["missingVisualPixels"] <= before["missingVisualPixels"] + 24
+                            and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
         if improved:
             candidate_preview.replace(preview_path)
             layout["elements"] = candidate["elements"]
@@ -224,6 +236,63 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
             for item in created:
                 if item.get("type") == "image":
                     (asset_dir / Path(str(item.get("src") or "")).name).unlink(missing_ok=True)
+
+
+def _pale_gap_pixels(source: np.ndarray, preview: np.ndarray) -> np.ndarray:
+    """Low contrast support that has become page white after reconstruction."""
+    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
+    difference = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
+    return ((hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 32)
+            & np.all(preview >= 253, axis=2) & (difference >= 3))
+
+
+def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict,
+                             asset_dir: Path, project_id: str, page_index: int) -> list[dict]:
+    """Restore bounded pale support omitted by an otherwise valid movable asset."""
+    source = cv2.imread(str(source_path))
+    preview = cv2.imread(str(preview_path))
+    if source is None or preview is None or source.shape != preview.shape:
+        return []
+    height, width = source.shape[:2]
+    missing = _pale_gap_pixels(source, preview)
+    if not np.any(missing):
+        return []
+    for item in layout.get("elements", []):
+        if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        box = _box(item, width, height)
+        if box:
+            x1, y1, x2, y2 = box
+            missing[y1:y2, x1:x2] = False
+    created: list[dict] = []
+    for owner in list(layout.get("elements", [])):
+        if owner.get("type") != "image" or any((owner.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        box = _box(owner, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        area = (x2 - x1) * (y2 - y1)
+        if area > width * height * 0.55:
+            continue
+        owner_alpha = _visual_mask(owner, box, source_path)
+        gap = np.uint8(missing[y1:y2, x1:x2] & (owner_alpha == 0)) * 255
+        gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        if np.count_nonzero(gap) < max(120, round(area * 0.004)):
+            continue
+        identifier = f"initial_page_{page_index}_pale_gap_{len(created) + 1:03d}"
+        path = asset_dir / f"{identifier}.png"
+        if not cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], gap))):
+            continue
+        item = {"id": identifier, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1,
+                "rotation": 0, "zIndex": int(owner.get("zIndex") or 0) + 1, "groupId": owner.get("groupId"),
+                "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1},
+                "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "objectization_audit",
+                             "layerRole": "container_detail", "qaIssue": "paleAssetGap", "parentId": owner.get("id")}}
+        layout.setdefault("elements", []).append(item)
+        created.append(item)
+        missing[y1:y2, x1:x2][gap != 0] = False
+    return created
 
 
 def _overlaps(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
