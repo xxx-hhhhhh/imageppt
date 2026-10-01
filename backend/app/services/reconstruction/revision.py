@@ -396,7 +396,10 @@ def _visual_retention_regressed(before: dict, after: dict) -> bool:
                      and largest_after > largest_before + 24)
     mismatch_growth = int(after.get("visualMismatchPixels") or 0) - int(before.get("visualMismatchPixels") or 0)
     lost_to_wrong_color = salient > 0 and mismatch_growth > max(24, round(salient * 0.005))
-    return lost_to_white or lost_to_wrong_color
+    pale_before = int(before.get("paleAssetGapPixels") or 0)
+    pale_growth = int(after.get("paleAssetGapPixels") or 0) - pale_before
+    lost_pale_support = pale_growth > max(48, min(300, round(pale_before * 0.015)))
+    return lost_to_white or lost_to_wrong_color or lost_pale_support
 
 
 def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:

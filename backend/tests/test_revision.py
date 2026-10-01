@@ -533,6 +533,14 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"salientVisualPixels": 10000, "visualMismatchPixels": 120},
         {"salientVisualPixels": 10000, "visualMismatchPixels": 135},
     )
+    assert revision._visual_retention_regressed(
+        {"missingVisualPixels": 10, "paleAssetGapPixels": 200},
+        {"missingVisualPixels": 10, "paleAssetGapPixels": 320},
+    )
+    assert not revision._visual_retention_regressed(
+        {"missingVisualPixels": 10, "paleAssetGapPixels": 200},
+        {"missingVisualPixels": 10, "paleAssetGapPixels": 220},
+    )
 
 
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:

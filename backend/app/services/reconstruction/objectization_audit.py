@@ -23,6 +23,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
+              "paleAssetGapPixels": 0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
@@ -40,6 +41,17 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if item.get("type") in VISUAL_TYPES:
             x1, y1, x2, y2 = box
             owner_mask[y1:y2, x1:x2] = cv2.max(owner_mask[y1:y2, x1:x2], _visual_mask(item, box, source_path))
+    local_asset_regions = np.zeros((height, width), np.bool_)
+    for item in active:
+        if item.get("type") != "image":
+            continue
+        box = _box(item, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        if (x2 - x1) * (y2 - y1) <= width * height * 0.55:
+            local_asset_regions[y1:y2, x1:x2] = True
+    report["paleAssetGapPixels"] = int(np.count_nonzero(_pale_gap_pixels(source, preview) & local_asset_regions))
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     salient = visual_candidate_mask(source)
     contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
