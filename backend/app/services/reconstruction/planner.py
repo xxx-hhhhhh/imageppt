@@ -183,7 +183,10 @@ class AIReconstructionPlanner:
                         ty2 = min(y2 - y1, round(bottom - y1))
                         if tx2 > tx1 and ty2 > ty1:
                             pad_x = min(12, max(2, round((tx2 - tx1) * 0.05)))
-                            pad_y = max(2, round((ty2 - ty1) * 0.20))
+                            # OCR boxes already bound the glyphs. A height-based
+                            # margin can erase a chart axis or card border that
+                            # sits just above a caption.
+                            pad_y = 2
                             cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
                     if text_area_ratio > 0.20 and (module_id.startswith(("detected_visual_", "segmented_visual_", "contour_visual_")) or strategy == "mixed_component"):

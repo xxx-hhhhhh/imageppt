@@ -241,6 +241,27 @@ def test_chart_movable_image_keeps_its_label_editable(tmp_path: Path) -> None:
     assert scene["reconstructionPlan"]["modules"][0]["requestedStrategy"] == "movable_image"
 
 
+def test_chart_caption_cleaning_preserves_nearby_axis_line(tmp_path: Path) -> None:
+    source = tmp_path / "chart_axis.png"
+    with Image.new("RGB", (320, 220), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.line((45, 177, 220, 177), fill="#133a88", width=2)
+        draw.text((90, 183), "Chart", fill="#102b5c")
+        image.save(source)
+    label = _element("axis-caption", "text", (85, 183, 75, 20), "Chart")
+    label["metadata"]["rawOCRBBox"] = [85, 183, 160, 203]
+    scene = {"canvas": {"width": 320, "height": 220}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "chart", "role": "chart", "reconstructionStrategy": "movable_image",
+         "bbox": {"left": 0.1, "top": 0.2, "width": 0.65, "height": 0.75}, "confidence": 0.95},
+    ]}}, "elements": [label]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    asset = next(item for item in scene["elements"] if item["type"] == "image")
+    with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as image:
+        # Three pixels above the OCR box belongs to the chart, not the caption.
+        assert image.convert("RGB").getpixel((68, 133)) == (19, 58, 136)
+    assert label["metadata"]["textCleanedFromAsset"] == asset["id"]
+
+
 def test_flowchart_prefers_reliable_shapes_and_falls_back_for_complex_nodes(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (400, 300), "white").save(source)
