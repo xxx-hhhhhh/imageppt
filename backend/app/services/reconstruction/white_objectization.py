@@ -190,10 +190,10 @@ def layer_objectized_elements(elements: list[dict]) -> None:
                  if (item.get("metadata") or {}).get("reconstructionStrategySource") != "colored_text_support"
                  and _intersects(asset_box, _box_unclipped(item))]
         asset["zIndex"] = max([int(item.get("zIndex") or 0) for item in below], default=0) + 1
-    # Planned image crops own their source visuals; residual crops only fill
-    # surrounding gaps and must stay underneath the planned object.
+    # Extracted visual crops own their source pixels; residual crops only fill
+    # surrounding gaps and must stay underneath the movable object.
     for planned in visuals:
-        if (planned.get("metadata") or {}).get("reconstructionStrategySource") != "planner":
+        if (planned.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner"}:
             continue
         box = _box_unclipped(planned)
         residuals = [item for item in visuals if item is not planned

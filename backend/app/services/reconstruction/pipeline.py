@@ -26,7 +26,7 @@ from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.colored_text_support import extract_colored_text_supports
-from app.services.reconstruction.visual_asset_ownership import transfer_planned_visual_pixels
+from app.services.reconstruction.visual_asset_ownership import resolve_duplicate_contour_assets, transfer_planned_visual_pixels
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
@@ -182,6 +182,7 @@ class ReconstructionPipeline:
             "ghostingCount": 0,
             "plannedVisualPixelsClearedFromOtherAssets": 0,
             "trimmedOverlappingAssets": 0,
+            "duplicateVisualAssetsSuppressed": 0,
         }
         typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
@@ -289,6 +290,7 @@ class ReconstructionPipeline:
                 reconstruction_stats[key] += value
             if white_objectized:
                 reconstruction_stats.update(extract_colored_text_supports(normalized_path, layout, page_output / "assets", project_id, page_index))
+                reconstruction_stats["duplicateVisualAssetsSuppressed"] += 2 * resolve_duplicate_contour_assets(normalized_path, layout, page_output / "assets", project_id)
                 reconstruction_stats.update(transfer_planned_visual_pixels(layout, page_output / "assets", project_id))
                 layer_objectized_elements(layout.get("elements", []))
             if local_provider:
@@ -387,6 +389,7 @@ class ReconstructionPipeline:
             score["initialRecoveredVisuals"] = reconstruction_stats["initialRecoveredVisuals"]
             score["plannedVisualPixelsClearedFromOtherAssets"] = reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"]
             score["trimmedOverlappingAssets"] = reconstruction_stats["trimmedOverlappingAssets"]
+            score["duplicateVisualAssetsSuppressed"] = reconstruction_stats["duplicateVisualAssetsSuppressed"]
             if white_objectized:
                 score["objectizationQA"] = object_qa
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
@@ -541,6 +544,7 @@ class ReconstructionPipeline:
                 "initialRecoveredVisuals": reconstruction_stats["initialRecoveredVisuals"],
                 "plannedVisualPixelsClearedFromOtherAssets": reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"],
                 "trimmedOverlappingAssets": reconstruction_stats["trimmedOverlappingAssets"],
+                "duplicateVisualAssetsSuppressed": reconstruction_stats["duplicateVisualAssetsSuppressed"],
                 "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
                 "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
                 "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
