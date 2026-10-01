@@ -8,6 +8,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from app.services.pptx.renderer import _path_from_src
+
 
 def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_dir: Path, project_id: str, target_ids: set[str] | None = None) -> dict[str, Any]:
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
@@ -100,7 +102,7 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             continue
         if item.get("type") != "image" or not item.get("src") or (item.get("metadata") or {}).get("suppressed"):
             continue
-        path = asset_dir / Path(str(item["src"])).name
+        path = _asset_path(item, asset_dir)
         if not path.exists():
             continue
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
@@ -142,7 +144,7 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
 def _mark_image_alpha(mask: np.ndarray, item: dict, asset_dir: Path,
                       plate: tuple[int, int, int, int]) -> bool:
     """Mask only visible pixels of a transparent foreground image."""
-    path = asset_dir / Path(str(item.get("src") or "")).name
+    path = _asset_path(item, asset_dir)
     image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
     if image is None or image.ndim != 3 or image.shape[2] != 4:
         return False
@@ -161,6 +163,13 @@ def _mark_image_alpha(mask: np.ndarray, item: dict, asset_dir: Path,
     region = mask[top:bottom, left:right]
     region[visible > 32] = 255
     return True
+
+
+def _asset_path(item: dict, asset_dir: Path) -> Path:
+    local = asset_dir / Path(str(item.get("src") or "")).name
+    if local.is_file():
+        return local
+    return _path_from_src(item.get("src")) or local
 
 
 def _local_plate(source: np.ndarray, foreground: list[dict]) -> tuple[int, int, int, int, str, bool, np.ndarray] | None:

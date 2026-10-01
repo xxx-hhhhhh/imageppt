@@ -107,6 +107,8 @@ def test_textured_backplate_keeps_image_icon_independently_movable(tmp_path, mon
     project_id = "textured-module"
     asset_dir = tmp_path / project_id / "assets"
     asset_dir.mkdir(parents=True)
+    external_dir = tmp_path / "source-module" / "assets"
+    external_dir.mkdir(parents=True)
     source = np.full((220, 380, 3), 250, np.uint8)
     source[35:145, 42:255] = (232, 237, 243)
     for x in range(42, 255, 7):
@@ -117,15 +119,16 @@ def test_textured_backplate_keeps_image_icon_independently_movable(tmp_path, mon
     alpha = np.zeros((30, 30), np.uint8)
     cv2.circle(alpha, (15, 15), 13, 255, -1)
     icon = np.dstack((source[63:93, 60:90], alpha))
-    cv2.imwrite(str(asset_dir / "icon.png"), icon)
+    cv2.imwrite(str(external_dir / "icon.png"), icon)
     layout = {"elements": [
         {"id": "icon", "type": "image", "x": 60, "y": 63, "width": 30, "height": 30,
-         "zIndex": 10, "groupId": "card", "src": f"/media/assets/{project_id}/icon.png"},
+         "zIndex": 10, "groupId": "card", "src": "/media/assets/source-module/icon.png"},
     ]}
 
     report = repair_objectized_modules(source_path, layout, asset_dir, project_id)
 
     assert report["moduleImageFallbacks"] == 1
+    assert report["roundCutoutIssues"] == 0
     assert not layout["elements"][0].get("metadata", {}).get("suppressed")
     plate = next(item for item in layout["elements"] if (item.get("metadata") or {}).get("layerRole") == "container")
     assert plate["metadata"]["foregroundCleaned"] is True
