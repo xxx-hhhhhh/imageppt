@@ -97,6 +97,8 @@ export interface RevisionResponse {
   replacedAssetCount: number;
   inpaintedRegions: number;
   protectedRegions: number;
+  newlyLostVisualPixels: number;
+  largestNewVisualLoss: number;
   rollbackTriggered: boolean;
   regionalAnalysis?: { elementId?: string; problem: string; bbox: number[]; pixelDifference: number; edgeDifference: number; strategyChange: string }[];
 }

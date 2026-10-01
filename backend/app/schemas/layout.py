@@ -108,4 +108,6 @@ class RevisionResponse(BaseModel):
     replacedAssetCount: int = 0
     inpaintedRegions: int = 0
     protectedRegions: int = 0
+    newlyLostVisualPixels: int = 0
+    largestNewVisualLoss: int = 0
     rollbackTriggered: bool = False

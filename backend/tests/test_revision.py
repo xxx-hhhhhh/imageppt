@@ -188,6 +188,8 @@ def test_revision_endpoint_uses_saved_page_and_reports_result(tmp_path: Path, mo
     payload = response.json()
     assert payload["revisionRound"] == 1
     assert payload["accepted"] is True
+    assert payload["newlyLostVisualPixels"] == 0
+    assert payload["largestNewVisualLoss"] == 0
     assert payload["layout"]["elements"][0]["text"] == "HELLO"
     assert TestClient(api_main.app).post(f"/api/projects/{project_id}/pages/2/revise").status_code == 404
 
@@ -860,6 +862,30 @@ def test_revision_guard_rejects_many_small_deleted_decorations(tmp_path: Path) -
     assert after["largestMissingVisualRegion"] < 24
     assert after["missingVisualPixels"] >= 500
     assert revision._visual_retention_regressed(before, after)
+
+
+def test_revision_rejects_new_icon_loss_hidden_by_larger_visual_repair(tmp_path: Path) -> None:
+    source = np.full((180, 300, 3), 255, np.uint8)
+    cv2.rectangle(source, (25, 35), (105, 85), (70, 125, 190), -1)
+    cv2.circle(source, (245, 125), 9, (35, 90, 190), -1)
+    before = source.copy()
+    before[35:86, 25:106] = 255  # Large plate is missing in the first revision.
+    after = source.copy()
+    after[116:135, 236:255] = 255  # Repair plate, accidentally erase small icon.
+    for name, image in (("source.png", source), ("before.png", before), ("after.png", after),
+                        ("background.png", np.full_like(source, 255))):
+        cv2.imwrite(str(tmp_path / name), image)
+    baseline_audit = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                         tmp_path / "before.png", {"elements": []})
+    candidate_audit = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                          tmp_path / "after.png", {"elements": []})
+    assert candidate_audit["missingVisualPixels"] < baseline_audit["missingVisualPixels"]
+    integrity = assess_revision(tmp_path, {"elements": []}, {"elements": []},
+                                tmp_path / "background.png", tmp_path / "background.png",
+                                tmp_path / "before.png", tmp_path / "after.png", [[0, 0, 300, 180]],
+                                source_path=tmp_path / "source.png")
+    assert integrity["newlyLostVisualPixels"] >= 200
+    assert "new_source_visual_loss" in integrity["integrityErrors"]
 
 
 def test_unrelated_preview_region_change_is_rejected(tmp_path: Path) -> None:

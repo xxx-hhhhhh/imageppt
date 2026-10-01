@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from app.services.reconstruction.residual_objects import visual_candidate_mask
+
 
 VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}
 
@@ -129,7 +131,7 @@ def white_area_ratio(path: Path) -> float:
     return float(np.mean(np.all(image >= 245, axis=2)))
 
 
-def assess_revision(root: Path, baseline: dict, candidate: dict, background_before: Path, background_after: Path, preview_before: Path, preview_after: Path, protected_boxes: list[list[float]] | None = None) -> dict:
+def assess_revision(root: Path, baseline: dict, candidate: dict, background_before: Path, background_after: Path, preview_before: Path, preview_after: Path, protected_boxes: list[list[float]] | None = None, source_path: Path | None = None) -> dict:
     before = inspect_assets(root, baseline)
     after = inspect_assets(root, candidate)
     before_by_id = {str(item.get("id")): item for item in visible_images(baseline)}
@@ -172,6 +174,7 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
     preview_before_white = white_area_ratio(preview_before)
     preview_after_white = white_area_ratio(preview_after)
     outside_change = _outside_change_ratio(preview_before, preview_after, protected_boxes or [])
+    newly_lost, largest_new_loss = _new_source_visual_loss(source_path, preview_before, preview_after, candidate)
     errors = []
     if after["missingAssetCount"]:
         errors.append("missing_assets")
@@ -185,6 +188,8 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         errors.append("background_over_whitened")
     if preview_after_white > preview_before_white + 0.035:
         errors.append("preview_over_whitened")
+    if largest_new_loss >= 24 or newly_lost >= 64:
+        errors.append("new_source_visual_loss")
     if outside_change > 0.015:
         errors.append("untargeted_preview_change")
     if len(protected_visuals(candidate)) < len(protected_visuals(baseline)) - 1:
@@ -197,8 +202,44 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         "backgroundWhiteBefore": round(background_before_white, 4), "backgroundWhiteAfter": round(background_after_white, 4),
         "previewWhiteBefore": round(preview_before_white, 4), "previewWhiteAfter": round(preview_after_white, 4),
         "outsideTargetChangeRatio": round(outside_change, 4),
+        "newlyLostVisualPixels": newly_lost, "largestNewVisualLoss": largest_new_loss,
         "integrityErrors": errors,
     }
+
+
+def _new_source_visual_loss(source_path: Path | None, preview_before: Path, preview_after: Path,
+                            candidate: dict) -> tuple[int, int]:
+    """Catch a newly erased local object even when other fixes improve page totals."""
+    if source_path is None:
+        return 0, 0
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    before = cv2.imread(str(preview_before), cv2.IMREAD_COLOR)
+    after = cv2.imread(str(preview_after), cv2.IMREAD_COLOR)
+    if source is None or before is None or after is None or source.shape != before.shape or source.shape != after.shape:
+        return 0, 0
+    candidate_mask = visual_candidate_mask(source)
+    source_int = source.astype(np.int16)
+    before_erased = np.all(before >= 253, axis=2) & (np.max(np.abs(source_int - before.astype(np.int16)), axis=2) >= 2)
+    after_erased = np.all(after >= 253, axis=2) & (np.max(np.abs(source_int - after.astype(np.int16)), axis=2) >= 2)
+    newly_lost = np.uint8(candidate_mask & after_erased & ~before_erased)
+    height, width = newly_lost.shape
+    for item in candidate.get("elements", []):
+        metadata = item.get("metadata") or {}
+        if item.get("type") != "text" or any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw = metadata.get("rawOCRBBox")
+        if isinstance(raw, list) and len(raw) == 4:
+            x1, y1, x2, y2 = (int(round(float(value))) for value in raw)
+        else:
+            x1, y1 = int(round(float(item.get("x") or 0))), int(round(float(item.get("y") or 0)))
+            x2 = x1 + int(round(float(item.get("width") or 0)))
+            y2 = y1 + int(round(float(item.get("height") or 0)))
+        x1, y1, x2, y2 = max(0, x1 - 2), max(0, y1 - 2), min(width, x2 + 2), min(height, y2 + 2)
+        if x2 > x1 and y2 > y1:
+            newly_lost[y1:y2, x1:x2] = 0
+    count, _, stats, _ = cv2.connectedComponentsWithStats(newly_lost, 8)
+    largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
+    return int(np.count_nonzero(newly_lost)), largest
 
 
 def _separated_background_is_covered(background_before: Path, background_after: Path,

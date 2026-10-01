@@ -312,7 +312,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             if item.get("id") in changed_ids:
                 x, y = float(item.get("x") or 0), float(item.get("y") or 0)
                 target_boxes.append([x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)])
-    integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview, target_boxes)
+    integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview,
+                                target_boxes, source_path=source)
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
     if _visual_retention_regressed(baseline_audit, candidate_audit):
