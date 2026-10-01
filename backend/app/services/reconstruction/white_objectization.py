@@ -40,6 +40,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
         metadata = item.setdefault("metadata", {})
         if item.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} and not item.get("src") and (item.get("style") or {}).get("fill") and metadata.get("reconstructionStrategy") in {None, "local_image", "background_image"}:
             metadata.update({"reconstructionStrategy": "native_shape", "reconstructionStrategySource": "white_objectization"})
+    broad_panels = _extract_large_flat_inset_panels(source, active, elements, occupied, page_index)
     round_assets = _extract_round_assets(source, active, elements, occupied, asset_dir, project_id, page_index)
     if dense_visual_artwork(source):
         # Repeated map/photo texture can resemble dozens of flat containers.
@@ -99,7 +100,52 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     cv2.imwrite(str(background_path), np.full_like(source, 255))
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
-    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+    return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + broad_panels + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets + broad_panels, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, **residual_stats}
+
+
+def _extract_large_flat_inset_panels(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, page_index: int) -> int:
+    """Keep a near-page-sized, bounded flat panel as a shape, not a discarded wash."""
+    height, width = source.shape[:2]
+    border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+    page_color = np.median(border, axis=0).astype(np.int16)
+    contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
+    mask = np.uint8(contrast >= 18) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    created = 0
+    for label in range(1, count):
+        x, y, w, h, pixels = [int(value) for value in stats[label]]
+        box = (x, y, x + w, y + h)
+        if w * h < width * height * 0.75 or min(x, y, width - x - w, height - y - h) < 2:
+            continue
+        if pixels / max(1, w * h) < 0.55:
+            continue
+        if any(_overlap_of_first(box, _box(item, width, height)) > 0.85
+               for item in active if item.get("type") not in {"text", "background"} and _box(item, width, height)):
+            continue
+        region = source[y:y + h, x:x + w]
+        rim_size = max(2, round(min(w, h) * 0.03))
+        rim = np.concatenate((region[:rim_size].reshape(-1, 3), region[-rim_size:].reshape(-1, 3),
+                              region[:, :rim_size].reshape(-1, 3), region[:, -rim_size:].reshape(-1, 3)))
+        color = np.median(rim, axis=0).astype(np.uint8)
+        close = np.max(np.abs(region.astype(np.int16) - color.astype(np.int16)), axis=2) <= 10
+        rim_close = np.max(np.abs(rim.astype(np.int16) - color.astype(np.int16)), axis=1) <= 10
+        if float(np.mean(rim_close)) < 0.85 or float(np.mean(close)) < 0.55:
+            continue
+        corner_size = max(2, min(w, h) // 50)
+        corners = (close[:corner_size, :corner_size], close[:corner_size, -corner_size:],
+                   close[-corner_size:, :corner_size], close[-corner_size:, -corner_size:])
+        if any(float(np.mean(corner)) < 0.75 for corner in corners):
+            continue
+        created += 1
+        fill = _hex_bgr(color)
+        elements.append({"id": f"large_flat_panel_{page_index}_{created}", "type": "rectangle",
+                         "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": 0,
+                         "style": {"fill": fill, "strokeWidth": 0, "opacity": 1},
+                         "metadata": {"reconstructionStrategy": "native_shape",
+                                      "reconstructionStrategySource": "large_inset_panel", "layerRole": "container"}})
+        _occupy_shape_color(source, occupied, box, fill)
+    return created
 
 
 def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list[dict], occupied: np.ndarray, asset_dir: Path, project_id: str, page_index: int) -> int:

@@ -65,6 +65,42 @@ def test_wide_pale_support_survives_white_objectization(tmp_path, monkeypatch):
     assert len(slide.shapes) == len(layout["elements"])
 
 
+def test_large_bounded_panel_is_native_and_keeps_inner_visual_movable(tmp_path, monkeypatch):
+    from app.services.pptx import renderer
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    source = np.full((240, 420, 3), 255, np.uint8)
+    cv2.rectangle(source, (5, 5), (414, 234), (65, 105, 160), -1)
+    cv2.rectangle(source, (200, 120), (390, 220), (35, 55, 80), -1)
+    cv2.circle(source, (300, 145), 18, (30, 210, 230), -1)
+    cv2.putText(source, "PANEL", (80, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "backgrounds" / "page_1.png"
+    preview_path = tmp_path / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 420, "height": 240}, "elements": [
+        {"id": "title", "type": "text", "x": 75, "y": 65, "width": 150, "height": 45,
+         "zIndex": 20, "text": "PANEL", "style": {"color": "#FFFFFF", "fontSize": 32},
+         "metadata": {"rawOCRBBox": [75, 65, 225, 110]}}]}
+
+    objectize_on_white(source_path, background_path, layout, tmp_path / "demo" / "assets", "demo", 1)
+    render_preview(background_path, layout, preview_path)
+    preview = cv2.imread(str(preview_path))
+    panels = [item for item in layout["elements"] if (item.get("metadata") or {}).get("reconstructionStrategySource") == "large_inset_panel"]
+    assert len(panels) == 1
+    assert panels[0]["type"] == "rectangle"
+    assert panels[0]["x"] == 5 and panels[0]["y"] == 5
+    assert panels[0]["width"] == 410 and panels[0]["height"] == 230
+    assert any(item["type"] == "image" and item["x"] <= 300 <= item["x"] + item["width"] for item in layout["elements"])
+    assert all(item["width"] * item["height"] < 420 * 240 * 0.5
+               for item in layout["elements"] if item["type"] == "image")
+    assert np.array_equal(preview[50, 300], source[50, 300])
+    assert np.array_equal(preview[200, 300], source[200, 300])
+    assert np.array_equal(preview[145, 300], source[145, 300])
+    assert np.all(cv2.imread(str(background_path)) == 255)
+    audit = audit_objectization(source_path, background_path, preview_path, layout)
+    assert audit["missingVisualPixels"] < 100
+
+
 def test_white_surface_extracts_unowned_visual_and_keeps_text_editable(tmp_path):
     source = np.full((240, 400, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 40), (105, 115), (30, 70, 180), -1)
