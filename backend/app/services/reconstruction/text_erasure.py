@@ -90,7 +90,7 @@ def erase_editable_text_sources(
             continue
         mask = np.zeros(original.shape[:2], np.uint8)
         owned_text = []
-        text_regions: list[tuple[int, int, int, int]] = []
+        text_regions: list[tuple[tuple[int, int, int, int], str | None]] = []
         for item, (x1, y1, x2, y2) in texts:
             left, top = max(ax, x1), max(ay, y1)
             right, bottom = min(ax + aw, x2), min(ay + ah, y2)
@@ -103,7 +103,7 @@ def erase_editable_text_sources(
             local_box = (round((left - ax) * sx), round((top - ay) * sy),
                          round((right - ax) * sx), round((bottom - ay) * sy))
             _mark(mask, local_box, 2)
-            text_regions.append(local_box)
+            text_regions.append((local_box, (item.get("style") or {}).get("color")))
             owned_text.append(item["id"])
         if not owned_text:
             continue
@@ -115,14 +115,23 @@ def erase_editable_text_sources(
             # through that support. Reconstruct the local surface instead.
             alpha = original[:, :, 3]
             source_rgb = original[:, :, :3].copy()
+            support = np.pad(np.uint8(alpha > 32), (1, 1))
+            exterior = support.copy()
+            cv2.floodFill(exterior, None, (0, 0), 2)
+            holes = exterior[1:-1, 1:-1] == 0
             cleaned_rgb = source_rgb.copy()
             # A single residual crop may contain several colored surfaces.
             # Repair each OCR line against its own local surface; a union mask
             # would choose one palette color and wash out the other modules.
-            for local_box in text_regions:
+            for local_box, glyph_color in text_regions:
                 line_mask = np.zeros(mask.shape, np.uint8)
                 _mark(line_mask, local_box, 2)
-                cleaned_rgb = _clean_residual_surface(cleaned_rgb, alpha, line_mask, complex_cleaner)
+                local_alpha = alpha.copy()
+                eligible = _light_glyph_on_colored_surface(source_rgb, line_mask, glyph_color)
+                if eligible:
+                    local_alpha[(line_mask > 0) & holes] = 255
+                cleaned_rgb = _clean_residual_surface(cleaned_rgb, local_alpha, line_mask, complex_cleaner,
+                                                      glyph_color=glyph_color if eligible else None)
             original[:, :, :3] = cleaned_rgb
             # Close glyph-sized holes inside the existing support without
             # expanding its outline into neighboring white space. Only pixels
@@ -132,10 +141,6 @@ def erase_editable_text_sources(
             # A broad pale plate often has transparent glyph-shaped holes.
             # Fill cavities enclosed by that plate, while leaving exterior
             # transparency untouched even when the OCR box crosses its edge.
-            support = np.pad(np.uint8(alpha > 32), (1, 1))
-            exterior = support.copy()
-            cv2.floodFill(exterior, None, (0, 0), 2)
-            holes = exterior[1:-1, 1:-1] == 0
             refill = (mask > 0) & (holes | ((enclosed_support > 32) & (contrast >= 18)))
             alpha[refill] = np.maximum(alpha[refill], enclosed_support[refill])
             alpha[refill & holes] = 255
@@ -161,9 +166,34 @@ def erase_editable_text_sources(
 
 
 def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray,
-                            complex_cleaner: ComplexTextCleaner | None) -> np.ndarray:
+                            complex_cleaner: ComplexTextCleaner | None,
+                            *, glyph_color: str | None = None) -> np.ndarray:
     """Prefer a flat local plate color when nearby artwork would bleed inward."""
     local = (mask > 0) & (alpha > 32)
+    color = str(glyph_color or "").lstrip("#")
+    if len(color) == 6 and np.count_nonzero(local) >= 80:
+        try:
+            glyph_bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).astype(np.int16)
+        except ValueError:
+            glyph_bgr = None
+        if glyph_bgr is not None:
+            source = rgb.astype(np.int16)
+            color_distance = np.max(np.abs(source - glyph_bgr), axis=2)
+            candidate = np.uint8(local & (color_distance <= 38)) * 255
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+            glyphs = np.zeros(candidate.shape, np.uint8)
+            _, _, box_width, box_height = cv2.boundingRect(mask)
+            max_component = max(20, min(round(box_height * box_height * 2),
+                                        round(box_width * box_height * 0.12)))
+            for index in range(1, count):
+                if 2 <= int(stats[index, cv2.CC_STAT_AREA]) <= max_component:
+                    glyphs[labels == index] = 255
+            background_pixels = source[local & (glyphs == 0)]
+            if (np.count_nonzero(glyphs) >= 8 and np.count_nonzero(glyphs) <= np.count_nonzero(local) * 0.38
+                    and len(background_pixels) >= 30
+                    and np.max(np.abs(np.median(background_pixels, axis=0) - glyph_bgr)) >= 45):
+                glyphs = cv2.dilate(glyphs, np.ones((3, 3), np.uint8), iterations=1)
+                return cv2.inpaint(rgb, glyphs, 3, cv2.INPAINT_TELEA)
     if np.count_nonzero(local) >= 80:
         pixels = rgb[local].astype(np.int16)
         median = np.median(pixels, axis=0)
@@ -222,6 +252,24 @@ def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray
             cleaned[mask > 0] = np.uint8(np.round(median))
             return cleaned
     return _clean(rgb, mask, complex_cleaner)
+
+
+def _light_glyph_on_colored_surface(rgb: np.ndarray, mask: np.ndarray,
+                                    glyph_color: str | None) -> bool:
+    color = str(glyph_color or "").lstrip("#")
+    if len(color) != 6 or np.count_nonzero(mask) < 80:
+        return False
+    try:
+        glyph_bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).reshape(1, 1, 3)
+    except ValueError:
+        return False
+    glyph_hsv = cv2.cvtColor(glyph_bgr, cv2.COLOR_BGR2HSV)[0, 0]
+    if int(glyph_hsv[1]) > 50 or int(glyph_hsv[2]) < 200:
+        return False
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
+    local = mask > 0
+    vivid = (hsv[:, :, 1] >= 65) & (hsv[:, :, 2] >= 45)
+    return float(np.mean(vivid[local])) >= 0.35
 
 
 def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) -> int:

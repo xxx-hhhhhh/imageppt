@@ -164,6 +164,73 @@ def test_residual_asset_repairs_each_text_line_on_its_own_colored_surface(tmp_pa
     assert np.max(np.abs(cleaned[94, 105, :3].astype(int) - np.array([240, 245, 250]))) < 20
 
 
+def test_residual_text_erasure_preserves_gradient_between_glyphs(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    base = np.full((110, 320, 3), 255, np.uint8)
+    for x in range(20, 300):
+        base[30:80, x] = (30 + (x - 20) // 5, 70 + (x - 20) // 4, 175 + (x - 20) // 7)
+    source = base.copy()
+    cv2.putText(source, "GRADIENT", (78, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "gradient.png"
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full(source.shape[:2], 255, np.uint8))))
+    layout = {"elements": [
+        {"id": "title", "type": "text", "text": "GRADIENT",
+         "style": {"color": "#FFFFFF"}, "metadata": {"rawOCRBBox": [72, 40, 220, 72]}},
+        {"id": "gradient", "type": "image", "x": 0, "y": 0, "width": 320, "height": 110,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)[:, :, :3]
+    region = np.zeros(base.shape[:2], np.bool_)
+    region[42:70, 76:218] = True
+    original_glyphs = np.any(source != base, axis=2) & region
+    undamaged_plate = region & ~original_glyphs
+    difference = np.max(np.abs(cleaned.astype(int) - base.astype(int)), axis=2)
+    assert np.mean(difference[undamaged_plate]) < 5
+    assert np.mean(difference[original_glyphs]) < 35
+
+
+def test_residual_gradient_support_fills_ocr_hole_without_flat_patch(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    base = np.full((110, 320, 3), 255, np.uint8)
+    for x in range(20, 300):
+        base[30:80, x] = (30 + (x - 20) // 5, 70 + (x - 20) // 4, 175 + (x - 20) // 7)
+    source = base.copy()
+    cv2.putText(source, "GRADIENT", (78, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    alpha = np.full(source.shape[:2], 255, np.uint8)
+    alpha[38:75, 70:224] = 0  # OCR ownership left a transparent hole in the movable plate.
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "gradient.png"
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, alpha)))
+    layout = {"elements": [
+        {"id": "title", "type": "text", "text": "GRADIENT",
+         "style": {"color": "#FFFFFF"}, "metadata": {"rawOCRBBox": [72, 40, 220, 72]}},
+        {"id": "gradient", "type": "image", "x": 0, "y": 0, "width": 320, "height": 110,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    region = np.zeros(base.shape[:2], np.bool_)
+    region[42:70, 76:218] = True
+    original_glyphs = np.any(source != base, axis=2) & region
+    undamaged_plate = region & ~original_glyphs
+    difference = np.max(np.abs(cleaned[:, :, :3].astype(int) - base.astype(int)), axis=2)
+    assert np.min(cleaned[region, 3]) > 220
+    assert np.mean(difference[undamaged_plate]) < 5
+    assert np.mean(difference[original_glyphs]) < 35
+
+
 def test_flat_card_text_repair_avoids_nearby_icon_color_bleed(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "backgrounds").mkdir(parents=True)
