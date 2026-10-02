@@ -15,6 +15,7 @@ from app.services.reconstruction.revision import revise_problem_regions
 from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, recover_legacy_revision_assets
 from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.white_objectization import objectize_on_white
+from app.services.reconstruction.residual_partition import partition_sparse_residuals
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.pptx import renderer
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
@@ -77,6 +78,47 @@ def test_revision_keeps_previous_page_when_metrics_do_not_improve(tmp_path: Path
     assert store.get_slide(project_id, 1) == original
     history = json.loads((tmp_path / project_id / "revision_history_1.json").read_text(encoding="utf-8"))
     assert history[0]["accepted"] is False
+
+
+def test_partitioned_visual_assets_survive_two_revision_rounds(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store, project_id, layout = _project(tmp_path, suppressed=False, duplicate=True)
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    source = cv2.imread(str(root / "source.png"))
+    panel = np.zeros((80, 210, 4), np.uint8)
+    cv2.rectangle(panel, (0, 0), (209, 79), (200, 150, 80, 255), 1)
+    panel[12:39, 130:166] = (30, 100, 220, 255)
+    panel[46:73, 130:166] = (50, 180, 40, 255)
+    visible = panel[:, :, 3] > 0
+    source_region = source[10:90, 15:225]
+    source_region[visible] = panel[:, :, :3][visible]
+    cv2.putText(source, "HELLO", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "assets" / "panel.png"), panel)
+    layout["elements"].append({"id": "panel", "type": "image", "x": 15, "y": 10,
+                               "width": 210, "height": 80, "zIndex": 1,
+                               "src": f"/media/assets/{project_id}/panel.png",
+                               "metadata": {"layerRole": "residual"}})
+    assert partition_sparse_residuals(layout, root / "assets", project_id)["residualPartsCreated"] == 2
+    store.save_slide(project_id, 1, layout)
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    score.update({"detectedTextCount": 2, "editableTextCoverage": 1})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    original_assets = {item["id"]: item["src"] for item in layout["elements"] if item.get("type") == "image"}
+
+    for _ in range(2):
+        result = revise_problem_regions(store, project_id, 1)
+        current = store.get_slide(project_id, 1)
+        current_assets = {item["id"]: item["src"] for item in current["elements"] if item.get("type") == "image"}
+        assert current_assets == original_assets
+        assert result["missingAssetCount"] == 0
+        assert inspect_assets(root, current)["missingAssetCount"] == 0
+        rendered = cv2.imread(str(preview))
+        assert np.array_equal(rendered[30, 160], source[30, 160])
+        assert np.array_equal(rendered[65, 160], source[65, 160])
 
 
 def test_revision_targets_missing_visual_before_color_mismatches(tmp_path: Path, monkeypatch) -> None:
