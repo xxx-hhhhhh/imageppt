@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from app.services.reconstruction.revision_integrity import asset_path
+from app.services.reconstruction.text_erasure import _clean_residual_surface, _mark
 
 
 def restore_hidden_source_assets(source_path: Path, layout: dict, issues: list[dict],
@@ -80,7 +81,8 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
                                  asset_dir: Path, project_id: str, revision_round: int) -> list[str]:
     """Replace only proven local asset color damage using copy-on-write files."""
     boxes = [(issue.get("bbox"), issue.get("reason")) for issue in issues
-             if issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten"}
+             if issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
+                                        "colored_residual_washed_out"}
              and isinstance(issue.get("bbox"), list) and len(issue["bbox"]) == 4]
     if not boxes:
         return []
@@ -116,12 +118,18 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
         source_hues = source_hsv[global_y[:, None], global_x[None, :]]
         asset_hues = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
         restore = np.zeros((rows, columns), np.bool_)
+        colored_damage = np.zeros((rows, columns), np.bool_)
         for (x1, y1, x2, y2), reason in boxes:
             in_issue = ((global_x[None, :] >= x1) & (global_x[None, :] < x2)
                         & (global_y[:, None] >= y1) & (global_y[:, None] < y2))
             if reason == "dark_residual_over_pale_source":
                 wrong_color = ((source_hues[:, :, 2] >= 240) & (source_hues[:, :, 1] <= 30)
                                & (asset_hues[:, :, 2] <= 150))
+            elif reason == "colored_residual_washed_out":
+                wrong_color = ((source_hues[:, :, 1] >= 60) & (source_hues[:, :, 2] >= 35)
+                               & (asset_hues[:, :, 1] <= 30) & (asset_hues[:, :, 2] >= 230))
+                if np.count_nonzero(in_issue & wrong_color & (image[:, :, 3] > 32)) >= 200:
+                    colored_damage |= in_issue
             else:
                 difference = np.max(np.abs(source_pixels.astype(np.int16) - image[:, :, :3].astype(np.int16)), axis=2)
                 wrong_color = ((source_hues[:, :, 2] >= 225) & (source_hues[:, :, 1] >= 12)
@@ -129,11 +137,40 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
                                & (asset_hues[:, :, 1] <= 10) & (difference >= 15))
             restore |= in_issue & wrong_color
         restore &= valid_x[None, :] & valid_y[:, None] & (image[:, :, 3] > 32)
-        count = int(np.count_nonzero(restore))
+        colored_damage &= valid_x[None, :] & valid_y[:, None] & (image[:, :, 3] > 32)
+        count = int(np.count_nonzero(restore | colored_damage))
         if count < 24:
             continue
         repaired = image.copy()
-        repaired[:, :, :3][restore] = source_pixels[restore]
+        repaired[:, :, :3][restore | colored_damage] = source_pixels[restore | colored_damage]
+        if np.any(colored_damage):
+            # The source crop includes the old glyphs. Remove only OCR lines
+            # that touch this damaged patch before staging the new asset.
+            cleaned = repaired[:, :, :3].copy()
+            for text in layout.get("elements", []):
+                meta = text.get("metadata") or {}
+                if (text.get("type") != "text" or any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy"))):
+                    continue
+                raw = meta.get("rawOCRBBox")
+                if not isinstance(raw, list) or len(raw) != 4:
+                    tx, ty = float(text.get("x") or 0), float(text.get("y") or 0)
+                    raw = [tx, ty, tx + float(text.get("width") or 0), ty + float(text.get("height") or 0)]
+                text_pixels = ((global_x[None, :] >= raw[0]) & (global_x[None, :] < raw[2])
+                               & (global_y[:, None] >= raw[1]) & (global_y[:, None] < raw[3]))
+                if np.count_nonzero(text_pixels & colored_damage) < 12:
+                    continue
+                local = np.zeros((rows, columns), np.uint8)
+                _mark(local, (round((raw[0] - x) * columns / w), round((raw[1] - y) * rows / h),
+                              round((raw[2] - x) * columns / w), round((raw[3] - y) * rows / h)), 2)
+                light_glyph = ((local > 0) & colored_damage & (source_hues[:, :, 1] <= 60)
+                               & (source_hues[:, :, 2] >= 190))
+                if np.count_nonzero(light_glyph) >= 10:
+                    glyph_mask = cv2.dilate(np.uint8(light_glyph) * 255,
+                                            np.ones((3, 3), np.uint8), iterations=1)
+                    cleaned = cv2.inpaint(cleaned, glyph_mask, 3, cv2.INPAINT_TELEA)
+                else:
+                    cleaned = _clean_residual_surface(cleaned, repaired[:, :, 3], local, None)
+            repaired[:, :, :3] = cleaned
         target = asset_dir / f"revision_{revision_round}_{item['id']}_pale_restored.png"
         if not cv2.imwrite(str(target), repaired):
             continue

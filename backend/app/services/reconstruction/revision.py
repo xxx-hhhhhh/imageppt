@@ -120,7 +120,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 "assetBakedIntoBackground": 8, "professionalInpaintingPending": 9, "backgroundResidual": 10}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: (
-        0 if item.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten"}
+        0 if item.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
+                                    "colored_residual_washed_out"}
         else priority.get(item["problem"], 9),
         -int(item.get("pixelArea") or 0)))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
@@ -269,14 +270,17 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 inpainted_regions += separate_foreground(candidate_bg, unseparated, professional_provider=local_provider)
             changed_ids.update(item["id"] for item in new_assets)
 
-    mismatch_boxes = [issue["bbox"] for issue in target_issues if issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)]
+    mismatch_boxes = [issue["bbox"] for issue in target_issues if issue.get("problem") == "visualContentMismatch"
+                      and issue.get("reason") != "colored_residual_washed_out"
+                      and isinstance(issue.get("bbox"), list)]
     restored_visuals = restore_image_owned_text(source, candidate, root / "assets", project_id,
                                                 prefix=f"revision_{round_number}_owned_text", target_boxes=mismatch_boxes) if mismatch_boxes else []
     changed_ids.update(restored_visuals)
     restored_items = [by_id[item_id] for item_id in restored_visuals if item_id in by_id]
     repair_issues = [issue for issue in target_issues if not (
         issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
-        and issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten"}
+        and issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
+                                    "colored_residual_washed_out"}
         and restored_pale_assets) and not (
         issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
         and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]

@@ -264,8 +264,11 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if w < max(80, round(width * 0.05)) or h < 10 or pixels / max(1, w * h) < 0.4:
             continue
         washed_pixels += pixels
-        report["issues"].append({"problem": "coloredAssetWashedOut", "elementId": f"washed_{x}_{y}",
-                                 "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
+        report["visualMismatchRegions"] += 1
+        report["visualMismatchPixels"] += pixels
+        report["issues"].append({"problem": "visualContentMismatch", "elementId": f"washed_{x}_{y}",
+                                 "bbox": [x, y, x + w, y + h], "pixelArea": pixels,
+                                 "reason": "colored_residual_washed_out"})
     report["washedColoredAssetPixels"] = washed_pixels
     missing = _bounded_components(np.uint8(lost) * 255, 9, width, height)
     for x, y, w, h, pixels in missing:

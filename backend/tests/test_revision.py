@@ -15,7 +15,7 @@ from app.services.reconstruction.revision import revise_problem_regions
 from app.services.reconstruction.revision_integrity import assess_revision, inspect_assets, recover_legacy_revision_assets
 from app.services.reconstruction.objectization_audit import audit_objectization
 from app.services.reconstruction.white_objectization import objectize_on_white
-from app.services.reconstruction.text_erasure import erase_editable_text_sources
+from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.pptx import renderer
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 
@@ -941,6 +941,55 @@ def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp
     assert old_asset.is_file()
     assert next(item for item in current["elements"] if item["id"] == "old")["metadata"]["suppressed"] is True
     assert np.array_equal(cv2.imread(str(preview))[50, 60], source[50, 60])
+
+
+def test_revision_repairs_washed_colored_ribbon_without_restoring_old_text(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("washed-ribbon")['id']
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((160, 340, 3), 255, np.uint8)
+    source[45:100, 25:315] = (30, 95, 190)
+    cv2.putText(source, "TITLE", (105, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (250, 250, 255), 2)
+    washed = source.copy()
+    washed[54:87, 70:275] = (250, 250, 250)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    old_asset = root / "assets" / "ribbon.png"
+    cv2.imwrite(str(old_asset), np.dstack((washed[45:100, 25:315],
+                                         np.full((55, 290), 255, np.uint8))))
+    layout = {"slide": {"width": 340, "height": 160}, "elements": [
+        {"id": "ribbon", "type": "image", "x": 25, "y": 45, "width": 290, "height": 55,
+         "zIndex": 1, "src": f"/media/assets/{project_id}/ribbon.png",
+         "metadata": {"layerRole": "residual", "textCleaned": True}},
+        {"id": "title", "type": "text", "text": "TITLE", "x": 105, "y": 56,
+         "width": 100, "height": 35, "zIndex": 2,
+         "style": {"fontSize": 24, "color": "#FFFFFF"},
+         "metadata": {"rawOCRBBox": [100, 55, 205, 87]}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    score.update({"detectedTextCount": 1, "editableTextCoverage": 1.0})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    before = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, layout)
+    assert before["washedColoredAssetPixels"] > 5000
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, current)
+    assert result["accepted"] is True
+    assert after["washedColoredAssetPixels"] == 0
+    assert inspect_assets(root, current)["missingAssetCount"] == 0
+    assert count_text_ghosting(root / "source.png", root / "backgrounds" / "page_1.png", current) == 0
+    assert next(item for item in current["elements"] if item["id"] == "ribbon")["src"] != layout["elements"][0]["src"]
+    assert np.array_equal(cv2.imread(str(old_asset), cv2.IMREAD_UNCHANGED)[25, 225, :3], [250, 250, 250])
+    assert np.max(np.abs(cv2.imread(str(preview))[70, 250].astype(int) - source[70, 250].astype(int))) < 25
 
 
 def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None:

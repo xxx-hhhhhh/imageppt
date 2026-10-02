@@ -687,7 +687,9 @@ def test_audit_flags_broad_colored_residual_washed_to_white(tmp_path):
                                  tmp_path / "preview.png", layout)
 
     assert report["washedColoredAssetPixels"] > 5000
-    assert any(issue["problem"] == "coloredAssetWashedOut" for issue in report["issues"])
+    assert any(issue["problem"] == "visualContentMismatch"
+               and issue.get("reason") == "colored_residual_washed_out"
+               for issue in report["issues"])
 
 
 def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path, monkeypatch):
