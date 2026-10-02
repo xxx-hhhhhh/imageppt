@@ -152,6 +152,24 @@ def erase_editable_text_sources(
 def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray,
                             complex_cleaner: ComplexTextCleaner | None) -> np.ndarray:
     """Prefer a flat local plate color when nearby artwork would bleed inward."""
+    # OCR boxes often include the empty space around several short labels.
+    # Inpainting that entire box can pull a neighboring dark photograph into
+    # an intact pale plate. Preserve locally flat, bright source pixels; thin
+    # light glyphs fail the neighborhood agreement test and remain erasable.
+    if np.any(mask):
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
+        pale = (hsv[:, :, 2] >= 230) & (hsv[:, :, 1] <= 35) & (alpha > 32)
+        similar = np.zeros(mask.shape, np.uint8)
+        source_pixels = rgb.astype(np.int16)
+        padded = cv2.copyMakeBorder(source_pixels, 1, 1, 1, 1, cv2.BORDER_REPLICATE)
+        for dy in range(3):
+            for dx in range(3):
+                neighbor = padded[dy:dy + rgb.shape[0], dx:dx + rgb.shape[1]]
+                similar += (np.max(np.abs(neighbor - source_pixels), axis=2) <= 12).astype(np.uint8)
+        mask = mask.copy()
+        mask[pale & (similar >= 7)] = 0
+        if not np.any(mask):
+            return rgb.copy()
     ring = cv2.dilate(mask, np.ones((17, 17), np.uint8))
     samples = rgb[(ring > 0) & (mask == 0) & (alpha > 32)]
     if len(samples) >= 30:

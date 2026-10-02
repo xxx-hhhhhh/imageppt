@@ -61,6 +61,31 @@ def test_residual_image_repairs_text_without_punching_alpha_hole(tmp_path: Path)
     assert count_text_ghosting(source_path, background_path, layout) == 0
 
 
+def test_residual_text_box_does_not_pull_dark_visual_into_pale_gap(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "samples.png"
+    source = np.full((90, 180, 3), (250, 250, 250), np.uint8)
+    source[20:43, 12:168] = (25, 40, 70)
+    cv2.putText(source, "K=5", (35, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (35, 55, 90), 1)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full(source.shape[:2], 255, np.uint8))))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "K=5", "metadata": {"rawOCRBBox": [30, 40, 100, 70]}},
+        {"id": "samples", "type": "image", "x": 0, "y": 0, "width": 180, "height": 90,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    assert np.min(cleaned[46:50, 35:100, :3]) >= 240
+    assert np.max(np.abs(cleaned[25, 120, :3].astype(int) - source[25, 120].astype(int))) <= 2
+    assert np.mean(cleaned[51:65, 35:80, :3]) > np.mean(source[51:65, 35:80]) + 4
+
+
 def test_residual_ribbon_preserves_color_beneath_editable_label(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "backgrounds").mkdir(parents=True)
