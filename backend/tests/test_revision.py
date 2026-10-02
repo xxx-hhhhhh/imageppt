@@ -1043,6 +1043,14 @@ def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None
         {"missingVisualPixels": 10, "paleAssetGapPixels": 200},
         {"missingVisualPixels": 10, "paleAssetGapPixels": 220},
     )
+    assert revision._visual_retention_regressed(
+        {"missingVisualPixels": 10, "textBoundPaleGapPixels": 1000},
+        {"missingVisualPixels": 10, "textBoundPaleGapPixels": 1350},
+    )
+    assert not revision._visual_retention_regressed(
+        {"missingVisualPixels": 10, "textBoundPaleGapPixels": 1000},
+        {"missingVisualPixels": 10, "textBoundPaleGapPixels": 1030},
+    )
 
 
 def test_revision_guard_rejects_many_small_deleted_decorations(tmp_path: Path) -> None:

@@ -521,11 +521,14 @@ def _visual_retention_regressed(before: dict, after: dict) -> bool:
     pale_before = int(before.get("paleAssetGapPixels") or 0)
     pale_growth = int(after.get("paleAssetGapPixels") or 0) - pale_before
     lost_pale_support = pale_growth > max(48, min(300, round(pale_before * 0.015)))
+    text_support_before = int(before.get("textBoundPaleGapPixels") or 0)
+    text_support_growth = int(after.get("textBoundPaleGapPixels") or 0) - text_support_before
+    lost_text_support = text_support_growth > max(48, min(300, round(text_support_before * 0.015)))
     washed_growth = int(after.get("washedColoredAssetPixels") or 0) - int(before.get("washedColoredAssetPixels") or 0)
     lost_colored_asset = washed_growth > 200
     surface_growth = int(after.get("pageSurfaceMismatchPixels") or 0) - int(before.get("pageSurfaceMismatchPixels") or 0)
     monolithic_growth = int(after.get("monolithicPageImageCount") or 0) > int(before.get("monolithicPageImageCount") or 0)
-    return (lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support
+    return (lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support or lost_text_support
             or lost_colored_asset or surface_growth > 100 or monolithic_growth)
 
 
