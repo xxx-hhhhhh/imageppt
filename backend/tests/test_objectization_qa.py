@@ -32,7 +32,10 @@ def test_module_qa_does_not_copy_a_shared_page_column_for_each_group(tmp_path):
     assert report["moduleImageFallbacks"] == 0
     assert report["recoveredBackplates"] == 0
     assert all(item["type"] == "text" for item in layout["elements"])
-    assert any(issue["problem"] == "modulePlateSpansOtherModules" for issue in report["issues"])
+    assert report["sharedBackplateCandidates"] == 3
+    assert report["missingBackplates"] == 0
+    assert report["unresolvedBackplates"] == 0
+    assert not report["issues"]
 
 
 def test_objectization_qa_restores_missing_plate_and_repairs_square_badge(tmp_path, monkeypatch):
