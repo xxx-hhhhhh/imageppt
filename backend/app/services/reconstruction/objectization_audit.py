@@ -401,9 +401,21 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
             current = cv2.imread(str(candidate_preview))
             if source is not None and previous is not None and current is not None:
                 pale = _pale_gap_pixels(source, previous)
-                before_gap = int(np.count_nonzero(pale))
-                after_gap = int(np.count_nonzero(_pale_gap_pixels(source, current) & pale))
-                improved = (valid and before_gap >= 200 and after_gap <= before_gap * 0.8
+                target = np.zeros(pale.shape, np.bool_)
+                for item in created:
+                    if (item.get("metadata") or {}).get("qaIssue") not in {"paleAssetGap", "paleTextSupportGap"}:
+                        continue
+                    box = _box(item, source.shape[1], source.shape[0])
+                    if box is None:
+                        continue
+                    x1, y1, x2, y2 = box
+                    target[y1:y2, x1:x2] |= _visual_mask(item, box, source_path) > 32
+                before_gap = int(np.count_nonzero(pale & target))
+                after_gap = int(np.count_nonzero(_pale_gap_pixels(source, current) & pale & target))
+                global_after_gap = int(np.count_nonzero(_pale_gap_pixels(source, current)))
+                global_before_gap = int(np.count_nonzero(pale))
+                improved = (valid and before_gap >= 80 and after_gap <= before_gap * 0.8
+                            and global_after_gap <= global_before_gap + 24
                             and after["missingVisualPixels"] <= before["missingVisualPixels"] + 24
                             and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
         if improved:
@@ -530,7 +542,11 @@ def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: 
             continue
         support = np.median(crop[pale], axis=0).astype(np.int16)
         ink = np.uint8(np.max(np.abs(crop.astype(np.int16) - support), axis=2) >= 28) * 255
-        if np.mean(ink != 0) > 0.38:
+        # Bold headings can legitimately occupy nearly half a pale label.
+        # Keep their supporting surface when the surrounding pale color is
+        # still dominant, then erase only the glyph pixels in the new asset.
+        ink_limit = 0.48 if float(np.mean(pale)) >= 0.60 else 0.38
+        if np.mean(ink != 0) > ink_limit:
             continue
         ink = cv2.dilate(ink, np.ones((3, 3), np.uint8), iterations=1)
         cleaned = cv2.inpaint(crop, ink, 3, cv2.INPAINT_TELEA) if np.any(ink) else crop

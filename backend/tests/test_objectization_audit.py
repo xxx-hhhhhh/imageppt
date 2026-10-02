@@ -631,6 +631,36 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     assert next(item for item in layout["elements"] if item["id"] == "label")["type"] == "text"
 
 
+def test_local_pale_support_recovery_is_not_diluted_by_page_wash(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    project_id = "e" * 32
+    root = tmp_path / project_id
+    (root / "assets").mkdir(parents=True)
+    source = np.full((180, 300, 3), 252, np.uint8)
+    source[65:115, 70:230] = (249, 249, 249)
+    alpha = np.full((70, 180), 255, np.uint8)
+    alpha[20:50, 60:120] = 0
+    cv2.imwrite(str(root / "assets" / "card.png"), np.dstack((source[55:125, 60:240], alpha)))
+    source_path, background, preview = root / "source.png", root / "background.png", root / "preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "card", "type": "image", "x": 60, "y": 55, "width": 180, "height": 70,
+         "zIndex": 1, "src": f"/media/assets/{project_id}/card.png",
+         "metadata": {"reconstructionStrategySource": "residual_detection", "layerRole": "residual"}},
+    ]}
+    render_preview(background, layout, preview)
+    before = cv2.imread(str(preview))
+    assert np.all(before[90, 150] == 255)
+
+    recovered = recover_initial_missing_regions(source_path, background, preview, layout,
+                                                root / "assets", project_id, 1)
+
+    assert recovered >= 1
+    after = cv2.imread(str(preview))
+    assert np.max(np.abs(after[90, 150].astype(int) - source[90, 150].astype(int))) <= 2
+
+
 def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path, monkeypatch):
     from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
 
