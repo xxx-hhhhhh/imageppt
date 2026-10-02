@@ -19,6 +19,7 @@ from app.services.reconstruction.objectization_qa import repair_objectized_modul
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.residual_objects import extract_residual_objects
+from app.services.reconstruction.residual_bleed import repair_dark_residual_bleed
 from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
@@ -118,7 +119,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
                 "assetBakedIntoBackground": 8, "professionalInpaintingPending": 9, "backgroundResidual": 10}
     tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
-    ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
+    ranked = sorted(issues_before, key=lambda item: (
+        0 if item.get("reason") == "dark_residual_over_pale_source" else priority.get(item["problem"], 9),
+        -int(item.get("pixelArea") or 0)))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
     candidate = copy.deepcopy(baseline)
     candidate_dir = root / "revisions" / f"round_{round_number}"
@@ -138,6 +141,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     inpainted_regions = 0
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
     regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
+    restored_pale_assets = repair_dark_residual_bleed(source, candidate, target_issues,
+                                                       root / "assets", project_id, round_number)
+    changed_ids.update(restored_pale_assets)
 
     if any(issue.get("problem") in {"pageSurfaceLost", "pageSurfaceBakedIntoBackground"} for issue in target_issues):
         image = cv2.imread(str(source), cv2.IMREAD_COLOR)
@@ -261,6 +267,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     changed_ids.update(restored_visuals)
     restored_items = [by_id[item_id] for item_id in restored_visuals if item_id in by_id]
     repair_issues = [issue for issue in target_issues if not (
+        issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
+        and issue.get("reason") == "dark_residual_over_pale_source" and restored_pale_assets) and not (
         issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
         and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]
     unsupported_issues = [issue for issue in repair_issues if issue.get("problem") == "unsupportedNativeShape"]

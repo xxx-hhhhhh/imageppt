@@ -674,6 +674,49 @@ def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tm
     assert current["elements"][0]["metadata"]["sourceContentPreserved"] is True
 
 
+def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("pale-gap-revision")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 320, 3), 255, np.uint8)
+    source[30:63, 30:250] = (30, 50, 80)
+    damaged = source[30:100, 30:250].copy()
+    damaged[33:48, 10:170] = (30, 50, 80)
+    source_path = root / "source.png"
+    old_asset = root / "assets" / "residual.png"
+    background = root / "backgrounds" / "page_1.png"
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    cv2.imwrite(str(old_asset), np.dstack((damaged, np.full(damaged.shape[:2], 255, np.uint8))))
+    old_bytes = old_asset.read_bytes()
+    layout = {"slide": {"width": 320, "height": 180}, "elements": [
+        {"id": "residual", "type": "image", "x": 30, "y": 30, "width": 220, "height": 70,
+         "zIndex": 2, "src": f"/media/assets/{project_id}/residual.png",
+         "metadata": {"layerRole": "residual", "reconstructionStrategy": "cutout_image"}},
+    ]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(source_path)})
+    store.save_slide(project_id, 1, layout)
+    render_preview(background, layout, preview)
+    score = run_visual_qa(source_path, preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    before = audit_objectization(source_path, background, preview, layout)
+    assert before["falseVisualAdditionPixels"] > 1000
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(source_path, background, preview, current)
+    assert result["accepted"] is True, result
+    assert result["missingAssetCount"] == 0
+    assert after["falseVisualAdditionPixels"] == 0
+    assert old_asset.read_bytes() == old_bytes
+    assert current["elements"][0]["src"] != layout["elements"][0]["src"]
+
+
 def test_missing_candidate_asset_rolls_back_without_changing_preview(tmp_path: Path, monkeypatch) -> None:
     store, project_id = _image_project(tmp_path, monkeypatch)
     root = tmp_path / project_id
