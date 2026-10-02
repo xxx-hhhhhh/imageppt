@@ -667,6 +667,29 @@ def test_local_pale_support_recovery_is_not_diluted_by_page_wash(tmp_path, monke
     assert np.max(np.abs(after[90, 150].astype(int) - source[90, 150].astype(int))) <= 2
 
 
+def test_audit_flags_broad_colored_residual_washed_to_white(tmp_path):
+    source = np.full((160, 340, 3), 255, np.uint8)
+    source[45:100, 25:315] = (30, 95, 190)
+    background = np.full_like(source, 255)
+    washed = source.copy()
+    washed[54:87, 70:275] = (250, 250, 250)
+    (tmp_path / "assets").mkdir()
+    for name, image in (("source.png", source), ("background.png", background),
+                        ("preview.png", washed)):
+        cv2.imwrite(str(tmp_path / name), image)
+    cv2.imwrite(str(tmp_path / "assets" / "ribbon.png"),
+                np.dstack((washed[45:100, 25:315], np.full((55, 290), 255, np.uint8))))
+    layout = {"elements": [{"id": "ribbon", "type": "image", "x": 25, "y": 45,
+                            "width": 290, "height": 55, "src": "/media/assets/demo/ribbon.png",
+                            "metadata": {"layerRole": "residual"}}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["washedColoredAssetPixels"] > 5000
+    assert any(issue["problem"] == "coloredAssetWashedOut" for issue in report["issues"])
+
+
 def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path, monkeypatch):
     from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
 

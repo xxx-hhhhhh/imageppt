@@ -24,7 +24,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
-              "falseVisualAdditionPixels": 0, "fadedPaleSupportPixels": 0,
+              "falseVisualAdditionPixels": 0, "fadedPaleSupportPixels": 0, "washedColoredAssetPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "paleAssetGapPixels": 0, "unownedPaleSupportPixels": 0, "textBoundPaleGapPixels": 0,
               "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
@@ -252,6 +252,21 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
                                  "bbox": [x, y, x + w, y + h], "pixelArea": pixels,
                                  "reason": "pale_support_overwritten"})
     report["fadedPaleSupportPixels"] = faded_pixels
+    # A text-cleaned residual can accidentally replace a colored ribbon with
+    # a broad white patch. Small glyphs are excluded: editable text may move
+    # slightly without meaning that the underlying visual asset was lost.
+    washed_color = ((source_hsv[:, :, 1] >= 60) & (source_hsv[:, :, 2] >= 35)
+                    & (preview_hsv[:, :, 1] <= 30) & (preview_hsv[:, :, 2] >= 230)
+                    & (residual_owner_mask > 32))
+    washed_pixels = 0
+    for x, y, w, h, pixels in _bounded_components(np.uint8(washed_color) * 255,
+                                                   max(2000, round(width * height * 0.001)), width, height):
+        if w < max(80, round(width * 0.05)) or h < 10 or pixels / max(1, w * h) < 0.4:
+            continue
+        washed_pixels += pixels
+        report["issues"].append({"problem": "coloredAssetWashedOut", "elementId": f"washed_{x}_{y}",
+                                 "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
+    report["washedColoredAssetPixels"] = washed_pixels
     missing = _bounded_components(np.uint8(lost) * 255, 9, width, height)
     for x, y, w, h, pixels in missing:
         if pixels < max(40, round(width * height * 0.00003)) and not _small_solid_decoration(

@@ -945,6 +945,10 @@ def test_revision_replaces_wrong_color_image_without_deleting_original_asset(tmp
 
 def test_local_visual_loss_is_rejected_even_below_page_white_threshold() -> None:
     assert revision._visual_retention_regressed(
+        {"washedColoredAssetPixels": 0}, {"washedColoredAssetPixels": 6000})
+    assert not revision._visual_retention_regressed(
+        {"washedColoredAssetPixels": 6000}, {"washedColoredAssetPixels": 0})
+    assert revision._visual_retention_regressed(
         {"monolithicPageImageCount": 0}, {"monolithicPageImageCount": 1})
     assert revision._visual_retention_regressed(
         {"retainedVisualCoverage": 0.98, "missingVisualPixels": 10},
