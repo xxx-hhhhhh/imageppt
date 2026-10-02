@@ -104,6 +104,46 @@ def test_revision_targets_missing_visual_before_color_mismatches(tmp_path: Path,
     assert any(issue["problem"] == "missingVisualObject" for issue in result["targetedIssues"])
 
 
+def test_revision_restores_local_pale_plate_without_replacing_existing_image(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("pale-plate-revision")["id"]
+    root = tmp_path / project_id
+    (root / "backgrounds").mkdir()
+    (root / "assets").mkdir()
+    source = np.full((180, 300, 3), 255, np.uint8)
+    source[35:145, 35:265] = (250, 251, 253)
+    alpha = np.full((110, 230), 255, np.uint8)
+    alpha[45:90, 90:185] = 0
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds" / "page_1.png"), np.full_like(source, 255))
+    cv2.imwrite(str(root / "assets" / "card.png"), np.dstack((source[35:145, 35:265], alpha)))
+    layout = {"slide": {"width": 300, "height": 180}, "elements": [
+        {"id": "card", "type": "image", "x": 35, "y": 35, "width": 230, "height": 110,
+         "zIndex": 1, "src": f"/media/assets/{project_id}/card.png",
+         "metadata": {"reconstructionStrategySource": "residual_detection", "layerRole": "residual"}},
+    ]}
+    store.save_slide(project_id, 1, layout)
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(root / "source.png")})
+    preview = root / "reconstructed_preview.png"
+    render_preview(root / "backgrounds" / "page_1.png", layout, preview)
+    score = run_visual_qa(root / "source.png", preview, root, layout)
+    score.update({"detectedTextCount": 0, "editableTextCoverage": 1.0})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    before = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, layout)
+    assert before["unownedPaleSupportPixels"] > 1000
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(root / "source.png", root / "backgrounds" / "page_1.png", preview, current)
+    assert result["accepted"] is True
+    assert after["unownedPaleSupportPixels"] < before["unownedPaleSupportPixels"]
+    assert inspect_assets(root, current)["missingAssetCount"] == 0
+    assert (root / "assets" / "card.png").is_file()
+    assert next(item for item in current["elements"] if item["id"] == "card")["src"] != layout["elements"][0]["src"]
+
+
 def test_same_revision_round_on_two_pages_keeps_both_visual_assets(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)

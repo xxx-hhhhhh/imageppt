@@ -26,7 +26,8 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "falseVisualAdditionPixels": 0, "fadedPaleSupportPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
-              "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
+              "paleAssetGapPixels": 0, "unownedPaleSupportPixels": 0, "textBoundPaleGapPixels": 0,
+              "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
               "monolithicPageImageCount": 0,
               "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
@@ -89,6 +90,45 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if (x2 - x1) * (y2 - y1) <= width * height * 0.55:
             local_asset_regions[y1:y2, x1:x2] = True
     report["paleAssetGapPixels"] = int(np.count_nonzero(_pale_gap_pixels(source, preview) & local_asset_regions))
+    pale_missing = _pale_gap_pixels(source, preview)
+    # A slightly off-white page surface is not a missing local plate. It is
+    # handled by the page-surface owner and may show a one-pixel crop seam.
+    border_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
+    page_distance = np.max(np.abs(source.astype(np.int16) - border_color), axis=2)
+    if float(np.mean(border_color)) < 253 and float(np.mean(page_distance <= 1)) >= 0.65:
+        pale_missing[page_distance <= 1] = False
+    text_bound_pale = np.zeros((height, width), np.bool_)
+    for item in active:
+        if item.get("type") != "text":
+            continue
+        box = _box(item, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        text_bound_pale[y1:y2, x1:x2] |= pale_missing[y1:y2, x1:x2]
+        pale_missing[y1:y2, x1:x2] = False
+    report["textBoundPaleGapPixels"] = int(np.count_nonzero(text_bound_pale))
+    unowned_pale = np.zeros((height, width), np.bool_)
+    for item in active:
+        if item.get("type") != "image":
+            continue
+        box = _box(item, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        area = (x2 - x1) * (y2 - y1)
+        if area > width * height * 0.55:
+            continue
+        alpha = _visual_mask(item, box, source_path)
+        gap = np.uint8(pale_missing[y1:y2, x1:x2] & (alpha <= 32)) * 255
+        stable = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        pixels = int(np.count_nonzero(stable))
+        if pixels < max(250, round(area * 0.01)):
+            continue
+        unowned_pale[y1:y2, x1:x2] |= stable != 0
+        report["issues"].append({"problem": "paleAssetGap", "elementId": item.get("id"),
+                                 "bbox": list(box), "pixelArea": pixels})
+    report["unownedPaleSupportPixels"] = int(np.count_nonzero(unowned_pale))
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     salient = visual_candidate_mask(source)
     contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
@@ -441,7 +481,9 @@ def _pale_gap_pixels(source: np.ndarray, preview: np.ndarray) -> np.ndarray:
 
 
 def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict,
-                             asset_dir: Path, project_id: str, page_index: int) -> list[dict]:
+                             asset_dir: Path, project_id: str, page_index: int,
+                             *, target_ids: set[str] | None = None,
+                             asset_prefix: str | None = None) -> list[dict]:
     """Restore bounded pale support omitted by an otherwise valid movable asset."""
     source = cv2.imread(str(source_path))
     preview = cv2.imread(str(preview_path))
@@ -462,6 +504,8 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
     created: list[dict] = []
     for owner in list(layout.get("elements", [])):
         if owner.get("type") != "image" or any((owner.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        if target_ids is not None and str(owner.get("id")) not in target_ids:
             continue
         box = _box(owner, width, height)
         if box is None:
@@ -487,7 +531,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                 merged[selected, :3] = source[y1:y2, x1:x2][selected]
                 merged[selected, 3] = 255
                 if np.count_nonzero(selected) >= max(120, round(area * 0.004)):
-                    identifier = f"initial_page_{page_index}_pale_merged_{uuid4().hex[:10]}"
+                    identifier = f"{asset_prefix or f'initial_page_{page_index}'}_pale_merged_{uuid4().hex[:10]}"
                     path = asset_dir / f"{identifier}.png"
                     if cv2.imwrite(str(path), merged):
                         owner["src"] = f"/media/assets/{project_id}/{path.name}"
@@ -496,7 +540,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                         created.append(owner)
                         missing[y1:y2, x1:x2][selected] = False
                         continue
-        identifier = f"initial_page_{page_index}_pale_gap_{len(created) + 1:03d}"
+        identifier = f"{asset_prefix or f'initial_page_{page_index}'}_pale_gap_{len(created) + 1:03d}"
         path = asset_dir / f"{identifier}.png"
         if not cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], gap))):
             continue
@@ -508,7 +552,8 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         layout.setdefault("elements", []).append(item)
         created.append(item)
         missing[y1:y2, x1:x2][gap != 0] = False
-    created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index))
+    if target_ids is None:
+        created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index))
     return created
 
 

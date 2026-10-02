@@ -618,7 +618,11 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     render_preview(background, layout, preview)
     before = cv2.imread(str(preview))
     assert np.all(before[112, 170] == 255)
-    assert audit_objectization(source_path, background, preview, layout)["paleAssetGapPixels"] > 1000
+    before_audit = audit_objectization(source_path, background, preview, layout)
+    assert before_audit["paleAssetGapPixels"] > 1000
+    assert before_audit["unownedPaleSupportPixels"] > 100
+    assert any(issue["problem"] == "paleAssetGap" and issue["elementId"] == "card"
+               for issue in before_audit["issues"])
 
     recovered = recover_initial_missing_regions(source_path, background, preview, layout, root / "assets", project_id, 1)
 
@@ -627,7 +631,9 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     assert np.max(np.abs(after[112, 170].astype(int) - source[112, 170].astype(int))) < 3
     assert any((item.get("metadata") or {}).get("qaIssue") == "paleAssetGap" for item in layout["elements"])
     assert any((item.get("metadata") or {}).get("qaIssue") == "paleTextSupportGap" for item in layout["elements"])
-    assert audit_objectization(source_path, background, preview, layout)["paleAssetGapPixels"] < 200
+    after_audit = audit_objectization(source_path, background, preview, layout)
+    assert after_audit["paleAssetGapPixels"] < 200
+    assert after_audit["unownedPaleSupportPixels"] == 0
     assert next(item for item in layout["elements"] if item["id"] == "label")["type"] == "text"
 
 

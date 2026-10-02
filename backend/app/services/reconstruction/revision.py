@@ -13,7 +13,7 @@ from app.services.inpainting.service import InpaintingService
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
-from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions
+from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
 from app.services.reconstruction.asset_ownership import is_badge_owned_text, restore_image_owned_text
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
@@ -26,7 +26,7 @@ from app.services.reconstruction.text_erasure import count_text_ghosting, erase_
 from app.services.reconstruction.white_objectization import _occupy_text_glyphs, detect_flat_page_surface
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
-OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -113,7 +113,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         issue.get("problem") == "missingEditableText"
         and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
     )]
-    priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1, "unsupportedNativeShape": 1,
+    priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1, "unsupportedNativeShape": 1, "paleAssetGap": 1,
                 "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
                 "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
@@ -146,6 +146,12 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     restored_pale_assets = repair_residual_color_damage(source, candidate, target_issues,
                                                          root / "assets", project_id, round_number)
     changed_ids.update(restored_pale_assets)
+    pale_targets = {str(issue.get("elementId")) for issue in target_issues if issue.get("problem") == "paleAssetGap"}
+    if pale_targets:
+        pale_repairs = _recover_pale_asset_gaps(source, preview, candidate, root / "assets", project_id, page,
+                                                target_ids=pale_targets,
+                                                asset_prefix=f"revision_page_{page}_round_{round_number}")
+        changed_ids.update(str(item["id"]) for item in pale_repairs)
 
     if any(issue.get("problem") in {"pageSurfaceLost", "pageSurfaceBakedIntoBackground"} for issue in target_issues):
         image = cv2.imread(str(source), cv2.IMREAD_COLOR)
@@ -392,11 +398,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
-    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch) and len(issues_after) <= len(issues_before) + 1
+    pale_repaired = (bool(pale_targets) and int(baseline_audit.get("unownedPaleSupportPixels") or 0)
+                     - int(candidate_audit.get("unownedPaleSupportPixels") or 0) >= 120
+                     and visual_delta >= -0.005 and coverage_delta >= -0.01)
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
     reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
                           "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
                           "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],
