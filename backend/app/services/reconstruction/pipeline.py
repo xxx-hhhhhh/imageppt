@@ -28,6 +28,7 @@ from app.services.reconstruction.text_erasure import count_text_ghosting, erase_
 from app.services.reconstruction.colored_text_support import extract_colored_text_supports
 from app.services.reconstruction.leading_text_icons import extract_leading_text_icons
 from app.services.reconstruction.visual_asset_ownership import resolve_duplicate_contour_assets, transfer_planned_visual_pixels
+from app.services.reconstruction.residual_partition import partition_sparse_residuals
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
@@ -307,6 +308,7 @@ class ReconstructionPipeline:
                 reconstruction_stats["duplicateVisualAssetsSuppressed"] += 2 * resolve_duplicate_contour_assets(normalized_path, layout, page_output / "assets", project_id)
                 reconstruction_stats.update(transfer_planned_visual_pixels(layout, page_output / "assets", project_id))
                 layer_objectized_elements(layout.get("elements", []))
+                reconstruction_stats.update(partition_sparse_residuals(layout, page_output / "assets", project_id))
             if local_provider:
                 reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
             reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
@@ -430,7 +432,7 @@ class ReconstructionPipeline:
             asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
             reconstruction_stats.update(asset_metrics)
             score.update(asset_metrics)
-            score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate", "splitMonolithicImages") if key in reconstruction_stats})
+            score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate", "splitMonolithicImages", "partitionedResidualAssets", "residualPartsCreated") if key in reconstruction_stats})
             text_coverage = measure_text_coverage(layout, len(regions))
             for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
                 reconstruction_stats[key] += int(text_coverage[key])
@@ -556,6 +558,8 @@ class ReconstructionPipeline:
                 "residualCoverageArea": reconstruction_stats["residualCoverageArea"],
                 "residualCandidateArea": reconstruction_stats["residualCandidateArea"],
                 "residualObjectizationRate": reconstruction_stats["residualObjectizationRate"],
+                "partitionedResidualAssets": reconstruction_stats.get("partitionedResidualAssets", 0),
+                "residualPartsCreated": reconstruction_stats.get("residualPartsCreated", 0),
                 "initialRecoveredVisuals": reconstruction_stats["initialRecoveredVisuals"],
                 "plannedVisualPixelsClearedFromOtherAssets": reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"],
                 "trimmedOverlappingAssets": reconstruction_stats["trimmedOverlappingAssets"],
