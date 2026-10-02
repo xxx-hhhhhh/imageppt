@@ -323,12 +323,15 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
         return False
     alpha = image[:, :, 3] > 32
     count = int(np.count_nonzero(alpha))
-    if count < 12 or count / alpha.size >= 0.42:
+    if count < 12 or count / alpha.size >= 0.88:
         return False
     colors = image[:, :, :3][alpha]
     median = np.median(colors, axis=0)
-    if float(np.min(median)) < 244 or float(np.max(median) - np.min(median)) > 15:
-        return False
+    dark_pixels = colors[np.max(colors, axis=1) <= 190]
+    ink_median = np.median(dark_pixels, axis=0) if len(dark_pixels) >= max(12, round(count * 0.08)) else median
+    faint_shadow = (count / alpha.size < 0.42 and float(np.min(median)) >= 244
+                    and float(np.max(median) - np.min(median)) <= 15)
+    dark_glyphs = False
     ax, ay = int(asset.get("x") or 0), int(asset.get("y") or 0)
     overlap = np.zeros(alpha.shape, np.bool_)
     has_dark_text = False
@@ -346,10 +349,24 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
         color = str((item.get("style") or {}).get("color") or "#111827").lstrip("#")
         try:
             has_dark_text |= len(color) == 6 and max(bytes.fromhex(color)) < 190
+            if len(color) == 6:
+                ink_bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).astype(np.int16)
+                dark_glyphs |= (max(bytes.fromhex(color)) < 190
+                                and float(np.max(np.abs(ink_median - ink_bgr))) <= 75)
         except ValueError:
             pass
         overlap[top - ay:bottom - ay, left - ax:right - ax] = True
-    return has_dark_text and float(np.count_nonzero(alpha & overlap)) / count >= 0.95
+    if not has_dark_text or float(np.count_nonzero(alpha & overlap)) / count < 0.95:
+        return False
+    if faint_shadow:
+        return True
+    if not dark_glyphs or image.shape[1] / max(1, image.shape[0]) < 1.8:
+        return False
+    # A true local plate has broad support pixels. A duplicate dark OCR crop
+    # consists of sparse ink on an otherwise pale text box and would inpaint
+    # into a dark rectangle if retained as an image object.
+    hsv = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
+    return float(np.mean((hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 40))) >= 0.35
 
 
 def layer_objectized_elements(elements: list[dict]) -> None:

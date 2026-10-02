@@ -614,6 +614,34 @@ def test_faint_text_shadow_is_not_exported_as_visual_asset(tmp_path):
     assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
 
 
+def test_dark_ocr_only_residual_is_not_exported_as_a_second_text_image(tmp_path):
+    from app.services.reconstruction.white_objectization import _is_text_shadow_residual
+
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    source = np.full((32, 120, 3), (245, 249, 252), np.uint8)
+    cv2.putText(source, "DETAILS", (4, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (120, 45, 15), 2)
+    alpha = np.uint8(np.max(np.abs(source.astype(np.int16) - np.array([245, 249, 252])), axis=2) > 25) * 255
+    asset_path = asset_dir / "ocr_only.png"
+    cv2.imwrite(str(asset_path), np.dstack((source, alpha)))
+    asset = {"id": "ocr_only", "type": "image", "x": 20, "y": 30, "width": 120, "height": 32,
+             "src": f"/media/assets/demo/{asset_path.name}"}
+    title = {"id": "label", "type": "text", "x": 20, "y": 30, "width": 120, "height": 32,
+             "style": {"color": "#0F2D78"}, "metadata": {"rawOCRBBox": [20, 30, 140, 62]}}
+
+    assert _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    antialiased = cv2.dilate(alpha, np.ones((5, 5), np.uint8))
+    cv2.imwrite(str(asset_path), np.dstack((source, antialiased)))
+    assert _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    support = np.full((32, 120, 3), (225, 230, 253), np.uint8)
+    cv2.putText(support, "DETAILS", (4, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (120, 45, 15), 2)
+    cv2.imwrite(str(asset_path), np.dstack((support, np.full((32, 120), 255, np.uint8))))
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    cv2.rectangle(source, (0, 0), (119, 31), (120, 45, 15), -1)
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full((32, 120), 255, np.uint8))))
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+
+
 def test_residual_icon_inside_flat_card_is_not_claimed_by_card(tmp_path):
     source = np.full((220, 360, 3), 255, np.uint8)
     cv2.rectangle(source, (30, 30), (320, 180), (230, 220, 205), -1)

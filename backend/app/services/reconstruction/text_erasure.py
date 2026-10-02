@@ -170,6 +170,19 @@ def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray
         mask[pale & (similar >= 7)] = 0
         if not np.any(mask):
             return rgb.copy()
+    # When OCR covers almost the entire crop, the outer inpainting ring may
+    # contain mostly neighboring glyphs. A stable pale surface within the
+    # source crop is stronger evidence for the original card color.
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
+    pale_surface = (hsv[:, :, 2] >= 220) & (hsv[:, :, 1] <= 40) & (alpha > 32)
+    pale_samples = rgb[pale_surface]
+    if len(pale_samples) >= 30 and len(pale_samples) / max(1, np.count_nonzero(alpha > 32)) >= 0.35:
+        median = np.median(pale_samples, axis=0)
+        flat_fraction = float(np.mean(np.max(np.abs(pale_samples.astype(np.float32) - median), axis=1) <= 18))
+        if flat_fraction >= 0.70:
+            cleaned = rgb.copy()
+            cleaned[mask > 0] = np.uint8(np.round(median))
+            return cleaned
     ring = cv2.dilate(mask, np.ones((17, 17), np.uint8))
     samples = rgb[(ring > 0) & (mask == 0) & (alpha > 32)]
     if len(samples) >= 30:
