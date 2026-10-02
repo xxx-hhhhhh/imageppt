@@ -265,7 +265,7 @@ class ReconstructionPipeline:
             )
             layout = self._apply_refined_scene(layout, scene_refined)
             _ensure_uncovered_text_owners(layout, plan_coverage.get("uncoveredTextIds") or [])
-            layout, typography_stats = typography_layout_refiner.refine(layout)
+            layout, typography_stats = typography_layout_refiner.refine(layout, normalized_path)
             fit_text_to_ocr_lines(layout)
             suppress_text_like_assets(layout)
             reconstruction_stats["imageOwnedTextRestored"] = len(restore_image_owned_text(
@@ -368,7 +368,7 @@ class ReconstructionPipeline:
                     applied = len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
                     reconstruction_stats["criticAdjustmentsApplied"] += applied
                     layout = self._apply_refined_scene(layout, scene_refined)
-                    layout, _ = typography_layout_refiner.refine(layout)
+                    layout, _ = typography_layout_refiner.refine(layout, normalized_path)
                     fit_text_to_ocr_lines(layout)
                     suppress_text_like_assets(layout)
                     if white_objectized:

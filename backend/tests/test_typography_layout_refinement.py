@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import cv2
+import numpy as np
+
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -59,6 +62,36 @@ def test_font_roles_map_to_distinct_font_strategies() -> None:
     assert styles["main_title"]["fontPriority"] != styles["body_text"]["fontPriority"]
     assert styles["label"]["fontWeight"] >= 600
     assert stats["fontRoleAssignments"] == 3
+
+
+def test_source_heavy_title_uses_bold_sans_without_changing_editability(tmp_path) -> None:
+    source = np.full((150, 400, 3), 255, np.uint8)
+    cv2.putText(source, "TITLE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 7, cv2.LINE_AA)
+    source_path = tmp_path / "source.png"
+    assert cv2.imwrite(str(source_path), source)
+    title = _text("title", "TITLE", "main_title", 20, 30, 210, 55, 48)
+    title["style"]["color"] = "#000000"
+    refined, _ = TypographyLayoutRefiner().refine(
+        {"slide": {"width": 400, "height": 150}, "elements": [title]}, source_path
+    )
+    result = refined["elements"][0]
+    assert result["type"] == "text"
+    assert result["text"] == "TITLE"
+    assert result["style"]["fontClass"] == "bold-sans"
+    assert result["metadata"]["sourceFontEvidence"] == "bold-sans"
+
+
+def test_source_thin_title_keeps_serif_policy(tmp_path) -> None:
+    source = np.full((150, 400, 3), 255, np.uint8)
+    cv2.putText(source, "TITLE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 1, cv2.LINE_AA)
+    source_path = tmp_path / "source.png"
+    assert cv2.imwrite(str(source_path), source)
+    title = _text("title", "TITLE", "main_title", 20, 30, 210, 55, 48)
+    title["style"]["color"] = "#000000"
+    refined, _ = TypographyLayoutRefiner().refine(
+        {"slide": {"width": 400, "height": 150}, "elements": [title]}, source_path
+    )
+    assert refined["elements"][0]["style"]["fontClass"] == "serif"
 
 
 def test_font_size_refinement_is_bounded_and_traceable() -> None:
