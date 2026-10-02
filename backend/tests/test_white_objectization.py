@@ -605,6 +605,16 @@ def test_faint_text_shadow_is_not_exported_as_visual_asset(tmp_path):
              "style": {"color": "#17365D"}, "metadata": {"rawOCRBBox": [25, 20, 145, 65]}}
 
     assert _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    image[14:20, 32:38, :3] = (40, 190, 60)
+    image[14:20, 32:38, 3] = 255
+    cv2.imwrite(str(path), image)
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    image[14:20, 32:38, :3] = 250
+    image[14:20, 32:38, 3] = 0
+    image[10:20, 22:42, 3] = 255
+    cv2.imwrite(str(path), image)
+    assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)
+    image[10:20, 22:42, 3] = 0
     image[8:29:3, 12:68:3, :3] = (60, 120, 190)
     cv2.imwrite(str(path), image)
     assert not _is_text_shadow_residual(asset, [title], asset_dir, 200, 100)

@@ -335,6 +335,7 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
     ax, ay = int(asset.get("x") or 0), int(asset.get("y") or 0)
     overlap = np.zeros(alpha.shape, np.bool_)
     has_dark_text = False
+    text_colors: list[np.ndarray] = []
     for item in active:
         if item.get("type") != "text":
             continue
@@ -351,12 +352,15 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
             has_dark_text |= len(color) == 6 and max(bytes.fromhex(color)) < 190
             if len(color) == 6:
                 ink_bgr = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8).astype(np.int16)
+                text_colors.append(ink_bgr)
                 dark_glyphs |= (max(bytes.fromhex(color)) < 190
                                 and float(np.max(np.abs(ink_median - ink_bgr))) <= 75)
         except ValueError:
             pass
         overlap[top - ay:bottom - ay, left - ax:right - ax] = True
     if not has_dark_text or float(np.count_nonzero(alpha & overlap)) / count < 0.95:
+        return False
+    if _has_solid_visual_inside_shadow(image, alpha, text_colors):
         return False
     if faint_shadow:
         return True
@@ -367,6 +371,24 @@ def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, w
     # into a dark rectangle if retained as an image object.
     hsv = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
     return float(np.mean((hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 40))) >= 0.35
+
+
+def _has_solid_visual_inside_shadow(image: np.ndarray, alpha: np.ndarray,
+                                    text_colors: list[np.ndarray]) -> bool:
+    """Do not discard a bounded icon or support plate with faint OCR fringe."""
+    pixels = image[:, :, :3]
+    hsv = cv2.cvtColor(pixels, cv2.COLOR_BGR2HSV)
+    vivid = alpha & (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 35)
+    for color in text_colors:
+        vivid &= np.max(np.abs(pixels.astype(np.int16) - color), axis=2) >= 65
+    pale = alpha & (hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 40)
+    for mask, minimum in ((vivid, 12), (pale, max(60, round(alpha.size * 0.05)))):
+        count, _, stats, _ = cv2.connectedComponentsWithStats(np.uint8(mask), 8)
+        for index in range(1, count):
+            _, _, width, height, area = [int(value) for value in stats[index]]
+            if width >= 4 and height >= 4 and area >= minimum and area / (width * height) >= 0.65:
+                return True
+    return False
 
 
 def layer_objectized_elements(elements: list[dict]) -> None:
