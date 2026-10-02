@@ -98,6 +98,10 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     if float(np.mean(border_color)) < 253 and float(np.mean(page_distance <= 1)) >= 0.65:
         pale_missing[page_distance <= 1] = False
     text_bound_pale = np.zeros((height, width), np.bool_)
+    # A page may be only two or three RGB levels below white. That diffuse
+    # surface is not a missing local support beneath OCR text; counting it
+    # would make revision rollback react to harmless page texture changes.
+    visible_pale_support = np.min(source, axis=2) <= 250
     for item in active:
         if item.get("type") != "text":
             continue
@@ -105,7 +109,8 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         if box is None:
             continue
         x1, y1, x2, y2 = box
-        text_bound_pale[y1:y2, x1:x2] |= pale_missing[y1:y2, x1:x2]
+        text_bound_pale[y1:y2, x1:x2] |= (pale_missing[y1:y2, x1:x2]
+                                         & visible_pale_support[y1:y2, x1:x2])
         pale_missing[y1:y2, x1:x2] = False
     report["textBoundPaleGapPixels"] = int(np.count_nonzero(text_bound_pale))
     unowned_pale = np.zeros((height, width), np.bool_)

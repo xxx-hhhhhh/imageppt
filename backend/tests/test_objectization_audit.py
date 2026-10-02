@@ -21,6 +21,22 @@ from app.services.visual_qa.analyzer import render_preview, run_visual_qa
 FIXTURE = Path(__file__).parent / "fixtures" / "complex_modules.png"
 
 
+def test_text_bound_pale_gap_counts_local_support_without_page_noise(tmp_path):
+    source = np.full((100, 200, 3), (253, 252, 252), np.uint8)
+    source[20:80, 50:150] = (246, 242, 242)
+    preview = np.full_like(source, 255)
+    for name, image in (("source.png", source), ("background.png", preview),
+                        ("preview.png", preview)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "label", "type": "text", "x": 40, "y": 10,
+                            "width": 120, "height": 80, "text": "Label"}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["textBoundPaleGapPixels"] == 60 * 100
+
+
 def test_audit_reports_large_colored_visual_mismatch(tmp_path):
     source = np.full((200, 400, 3), 255, np.uint8)
     preview = source.copy()
