@@ -10,11 +10,11 @@ import numpy as np
 from app.services.reconstruction.revision_integrity import asset_path
 
 
-def repair_dark_residual_bleed(source_path: Path, layout: dict, issues: list[dict],
-                               asset_dir: Path, project_id: str, revision_round: int) -> list[str]:
-    """Replace only proven dark additions, writing new assets before switching src."""
-    boxes = [issue.get("bbox") for issue in issues
-             if issue.get("reason") == "dark_residual_over_pale_source"
+def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[dict],
+                                 asset_dir: Path, project_id: str, revision_round: int) -> list[str]:
+    """Replace only proven local asset color damage using copy-on-write files."""
+    boxes = [(issue.get("bbox"), issue.get("reason")) for issue in issues
+             if issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten"}
              and isinstance(issue.get("bbox"), list) and len(issue["bbox"]) == 4]
     if not boxes:
         return []
@@ -33,7 +33,7 @@ def repair_dark_residual_bleed(source_path: Path, layout: dict, issues: list[dic
         x, y = float(item.get("x") or 0), float(item.get("y") or 0)
         w, h = float(item.get("width") or 0), float(item.get("height") or 0)
         if w <= 0 or h <= 0 or not any(x < box[2] and x + w > box[0] and y < box[3] and y + h > box[1]
-                                      for box in boxes):
+                                      for box, _ in boxes):
             continue
         path = asset_path(root, item.get("src"))
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
@@ -46,16 +46,23 @@ def repair_dark_residual_bleed(source_path: Path, layout: dict, issues: list[dic
         valid_y = (global_y >= 0) & (global_y < height)
         global_x = np.clip(global_x, 0, width - 1)
         global_y = np.clip(global_y, 0, height - 1)
-        in_issue = np.zeros((rows, columns), np.bool_)
-        for x1, y1, x2, y2 in boxes:
-            in_issue |= ((global_x[None, :] >= x1) & (global_x[None, :] < x2)
-                         & (global_y[:, None] >= y1) & (global_y[:, None] < y2))
         source_pixels = source[global_y[:, None], global_x[None, :]]
         source_hues = source_hsv[global_y[:, None], global_x[None, :]]
         asset_hues = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
-        restore = (in_issue & valid_x[None, :] & valid_y[:, None] & (image[:, :, 3] > 32)
-                   & (source_hues[:, :, 2] >= 240) & (source_hues[:, :, 1] <= 30)
-                   & (asset_hues[:, :, 2] <= 150))
+        restore = np.zeros((rows, columns), np.bool_)
+        for (x1, y1, x2, y2), reason in boxes:
+            in_issue = ((global_x[None, :] >= x1) & (global_x[None, :] < x2)
+                        & (global_y[:, None] >= y1) & (global_y[:, None] < y2))
+            if reason == "dark_residual_over_pale_source":
+                wrong_color = ((source_hues[:, :, 2] >= 240) & (source_hues[:, :, 1] <= 30)
+                               & (asset_hues[:, :, 2] <= 150))
+            else:
+                difference = np.max(np.abs(source_pixels.astype(np.int16) - image[:, :, :3].astype(np.int16)), axis=2)
+                wrong_color = ((source_hues[:, :, 2] >= 225) & (source_hues[:, :, 1] >= 12)
+                               & (source_hues[:, :, 1] <= 55) & (asset_hues[:, :, 2] >= 248)
+                               & (asset_hues[:, :, 1] <= 10) & (difference >= 15))
+            restore |= in_issue & wrong_color
+        restore &= valid_x[None, :] & valid_y[:, None] & (image[:, :, 3] > 32)
         count = int(np.count_nonzero(restore))
         if count < 24:
             continue

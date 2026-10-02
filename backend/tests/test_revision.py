@@ -674,7 +674,9 @@ def test_revision_restores_damaged_whole_badge_instead_of_adding_square_patch(tm
     assert current["elements"][0]["metadata"]["sourceContentPreserved"] is True
 
 
-def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("damage_kind", ["dark_bleed", "pale_fade"])
+def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_path: Path, monkeypatch,
+                                                                            damage_kind: str) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     store = ProjectStore(tmp_path)
     project_id = store.create("pale-gap-revision")["id"]
@@ -683,8 +685,10 @@ def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_
     (root / "backgrounds").mkdir()
     source = np.full((180, 320, 3), 255, np.uint8)
     source[30:63, 30:250] = (30, 50, 80)
+    if damage_kind == "pale_fade":
+        source[63:100, 30:250] = (225, 230, 253)
     damaged = source[30:100, 30:250].copy()
-    damaged[33:48, 10:170] = (30, 50, 80)
+    damaged[33:48, 10:170] = (30, 50, 80) if damage_kind == "dark_bleed" else (253, 254, 252)
     source_path = root / "source.png"
     old_asset = root / "assets" / "residual.png"
     background = root / "backgrounds" / "page_1.png"
@@ -704,7 +708,8 @@ def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_
     score = run_visual_qa(source_path, preview, root, layout)
     (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
     before = audit_objectization(source_path, background, preview, layout)
-    assert before["falseVisualAdditionPixels"] > 1000
+    metric = "falseVisualAdditionPixels" if damage_kind == "dark_bleed" else "fadedPaleSupportPixels"
+    assert before[metric] > 1000
 
     result = revise_problem_regions(store, project_id, 1)
 
@@ -712,7 +717,7 @@ def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_
     after = audit_objectization(source_path, background, preview, current)
     assert result["accepted"] is True, result
     assert result["missingAssetCount"] == 0
-    assert after["falseVisualAdditionPixels"] == 0
+    assert after[metric] == 0
     assert old_asset.read_bytes() == old_bytes
     assert current["elements"][0]["src"] != layout["elements"][0]["src"]
 

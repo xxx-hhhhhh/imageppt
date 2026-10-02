@@ -24,7 +24,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
-              "falseVisualAdditionPixels": 0,
+              "falseVisualAdditionPixels": 0, "fadedPaleSupportPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
               "monolithicPageImageCount": 0,
@@ -194,6 +194,24 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
                                  "bbox": [x, y, x + w, y + h], "pixelArea": pixels,
                                  "reason": "dark_residual_over_pale_source"})
     report["falseVisualAdditionPixels"] = false_addition_pixels
+    # A tinted pale plate can be hidden by an almost-white residual crop. It
+    # is still a lost movable support even though the preview is not pure white.
+    faded_support = ((source_hsv[:, :, 2] >= 225) & (source_hsv[:, :, 1] >= 12)
+                     & (source_hsv[:, :, 1] <= 55) & (preview_hsv[:, :, 2] >= 248)
+                     & (preview_hsv[:, :, 1] <= 10) & (color_error >= 15)
+                     & (residual_owner_mask > 32))
+    faded_pixels = 0
+    for x, y, w, h, pixels in _bounded_components(np.uint8(faded_support) * 255,
+                                                   max(120, round(width * height * 0.00008)), width, height):
+        if w < 20 or h < 5 or pixels / max(1, w * h) < 0.35:
+            continue
+        faded_pixels += pixels
+        report["visualMismatchRegions"] += 1
+        report["visualMismatchPixels"] += pixels
+        report["issues"].append({"problem": "visualContentMismatch", "elementId": f"faded_plate_{x}_{y}",
+                                 "bbox": [x, y, x + w, y + h], "pixelArea": pixels,
+                                 "reason": "pale_support_overwritten"})
+    report["fadedPaleSupportPixels"] = faded_pixels
     missing = _bounded_components(np.uint8(lost) * 255, 9, width, height)
     for x, y, w, h, pixels in missing:
         if pixels < max(40, round(width * height * 0.00003)) and not _small_solid_decoration(
