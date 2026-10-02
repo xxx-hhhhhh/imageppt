@@ -90,6 +90,7 @@ def erase_editable_text_sources(
             continue
         mask = np.zeros(original.shape[:2], np.uint8)
         owned_text = []
+        text_regions: list[tuple[int, int, int, int]] = []
         for item, (x1, y1, x2, y2) in texts:
             left, top = max(ax, x1), max(ay, y1)
             right, bottom = min(ax + aw, x2), min(ay + ah, y2)
@@ -99,7 +100,10 @@ def erase_editable_text_sources(
             if (right - left) * (bottom - top) / max(1, area) < 0.25:
                 continue
             sx, sy = original.shape[1] / aw, original.shape[0] / ah
-            _mark(mask, (round((left - ax) * sx), round((top - ay) * sy), round((right - ax) * sx), round((bottom - ay) * sy)), 2)
+            local_box = (round((left - ax) * sx), round((top - ay) * sy),
+                         round((right - ax) * sx), round((bottom - ay) * sy))
+            _mark(mask, local_box, 2)
+            text_regions.append(local_box)
             owned_text.append(item["id"])
         if not owned_text:
             continue
@@ -111,7 +115,14 @@ def erase_editable_text_sources(
             # through that support. Reconstruct the local surface instead.
             alpha = original[:, :, 3]
             source_rgb = original[:, :, :3].copy()
-            cleaned_rgb = _clean_residual_surface(source_rgb, alpha, mask, complex_cleaner)
+            cleaned_rgb = source_rgb.copy()
+            # A single residual crop may contain several colored surfaces.
+            # Repair each OCR line against its own local surface; a union mask
+            # would choose one palette color and wash out the other modules.
+            for local_box in text_regions:
+                line_mask = np.zeros(mask.shape, np.uint8)
+                _mark(line_mask, local_box, 2)
+                cleaned_rgb = _clean_residual_surface(cleaned_rgb, alpha, line_mask, complex_cleaner)
             original[:, :, :3] = cleaned_rgb
             # Close glyph-sized holes inside the existing support without
             # expanding its outline into neighboring white space. Only pixels
@@ -152,6 +163,24 @@ def erase_editable_text_sources(
 def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray,
                             complex_cleaner: ComplexTextCleaner | None) -> np.ndarray:
     """Prefer a flat local plate color when nearby artwork would bleed inward."""
+    local = (mask > 0) & (alpha > 32)
+    if np.count_nonzero(local) >= 80:
+        pixels = rgb[local].astype(np.int16)
+        median = np.median(pixels, axis=0)
+        stable_fraction = float(np.mean(np.max(np.abs(pixels - median), axis=1) <= 18))
+        x, y, w, h = cv2.boundingRect(mask)
+        boundary = np.zeros(mask.shape, np.bool_)
+        boundary[y:y + min(2, h), x:x + w] = True
+        boundary[max(y, y + h - 2):y + h, x:x + w] = True
+        boundary[y:y + h, x:x + min(2, w)] = True
+        boundary[y:y + h, max(x, x + w - 2):x + w] = True
+        edge_pixels = rgb[boundary & (alpha > 32)].astype(np.int16)
+        edge_agreement = (float(np.mean(np.max(np.abs(edge_pixels - median), axis=1) <= 18))
+                          if len(edge_pixels) >= 20 else 0.0)
+        if stable_fraction >= 0.58 and edge_agreement >= 0.58:
+            cleaned = rgb.copy()
+            cleaned[mask > 0] = np.uint8(np.round(median))
+            return cleaned
     # OCR boxes often include the empty space around several short labels.
     # Inpainting that entire box can pull a neighboring dark photograph into
     # an intact pale plate. Preserve locally flat, bright source pixels; thin

@@ -112,6 +112,58 @@ def test_residual_ribbon_preserves_color_beneath_editable_label(tmp_path: Path) 
     assert count_text_ghosting(source_path, background_path, layout) == 0
 
 
+def test_residual_ribbon_uses_local_color_when_asset_has_large_white_exterior(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    source = np.full((140, 300, 3), 255, np.uint8)
+    source[40:100, 20:280] = (35, 60, 185)
+    cv2.putText(source, "LABEL", (90, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (245, 248, 255), 2)
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "wide_asset.png"
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full(source.shape[:2], 255, np.uint8))))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "LABEL", "metadata": {"rawOCRBBox": [82, 56, 194, 86]}},
+        {"id": "ribbon", "type": "image", "x": 0, "y": 0, "width": 300, "height": 140,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    assert np.max(np.abs(cleaned[70, 110, :3].astype(int) - np.array([35, 60, 185]))) < 25
+    assert np.max(np.abs(cleaned[70, 150, :3].astype(int) - np.array([35, 60, 185]))) < 25
+    assert np.all(cleaned[60:85, 85:195, 3] > 220)
+
+
+def test_residual_asset_repairs_each_text_line_on_its_own_colored_surface(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "backgrounds").mkdir(parents=True)
+    (root / "assets").mkdir()
+    source = np.full((150, 300, 3), 255, np.uint8)
+    source[20:65, 20:280] = (35, 60, 185)
+    source[65:130, 20:280] = (240, 245, 250)
+    cv2.putText(source, "TITLE", (90, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (250, 250, 255), 2)
+    cv2.putText(source, "BODY", (90, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (25, 25, 25), 2)
+    background_path = root / "backgrounds" / "page_1.png"
+    asset_path = root / "assets" / "card.png"
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full(source.shape[:2], 255, np.uint8))))
+    layout = {"elements": [
+        {"id": "title", "type": "text", "text": "TITLE", "metadata": {"rawOCRBBox": [82, 29, 170, 59]}},
+        {"id": "body", "type": "text", "text": "BODY", "metadata": {"rawOCRBBox": [82, 81, 170, 111]}},
+        {"id": "card", "type": "image", "x": 0, "y": 0, "width": 300, "height": 150,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    assert np.max(np.abs(cleaned[42, 105, :3].astype(int) - np.array([35, 60, 185]))) < 25
+    assert np.max(np.abs(cleaned[94, 105, :3].astype(int) - np.array([240, 245, 250]))) < 20
+
+
 def test_flat_card_text_repair_avoids_nearby_icon_color_bleed(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "backgrounds").mkdir(parents=True)
