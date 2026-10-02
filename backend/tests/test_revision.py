@@ -429,6 +429,25 @@ def test_audited_baked_visual_reaches_revision_without_scene_regions() -> None:
                and issue["bbox"] == [20, 20, 380, 180] for issue in issues)
 
 
+def test_tiny_pale_container_score_does_not_claim_broken_whole_module() -> None:
+    layout = {"slide": {"width": 1600, "height": 900}, "elements": [
+        {"id": "border_fragment", "type": "image", "x": 400, "y": 300, "width": 20, "height": 20,
+         "metadata": {"layerRole": "container"}},
+        {"id": "chart", "type": "image", "x": 600, "y": 300, "width": 240, "height": 180,
+         "metadata": {"layerRole": "visual"}},
+    ]}
+    score = {"issues": [
+        {"problem": "criticalRegionMismatch", "elementId": "border_fragment"},
+        {"problem": "criticalRegionMismatch", "elementId": "chart"},
+    ]}
+
+    issues = revision.collect_revision_issues(layout, score)
+
+    assert not any(issue.get("elementId") == "border_fragment" for issue in issues)
+    assert any(issue["problem"] == "brokenChartOrModule" and issue["elementId"] == "chart"
+               for issue in issues)
+
+
 @pytest.mark.parametrize("visual_box", [(20, 20, 380, 180), (10, 10, 390, 190)])
 def test_revision_objectizes_large_visual_baked_into_background(tmp_path: Path, monkeypatch, visual_box) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)

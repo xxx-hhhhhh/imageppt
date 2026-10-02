@@ -556,6 +556,14 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)
             if item and item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:
                 x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+                # Tiny pale border fragments have unstable pixel scores after
+                # antialiasing; they are not evidence of a broken whole module.
+                slide = layout.get("slide") or {}
+                page_area = float(slide.get("width") or 0) * float(slide.get("height") or 0)
+                item_area = float(item.get("width") or 0) * float(item.get("height") or 0)
+                if ((item.get("metadata") or {}).get("layerRole") == "container"
+                        and page_area > 0 and item_area < max(400, page_area * 0.0005)):
+                    continue
                 issues.append({**issue, "problem": "brokenChartOrModule", "bbox": [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]})
     for item in layout.get("elements", []):
         meta = item.get("metadata") or {}
