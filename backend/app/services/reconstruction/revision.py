@@ -19,7 +19,7 @@ from app.services.reconstruction.objectization_qa import repair_objectized_modul
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.residual_objects import extract_residual_objects
-from app.services.reconstruction.residual_bleed import repair_residual_color_damage
+from app.services.reconstruction.residual_bleed import repair_residual_color_damage, restore_hidden_source_assets
 from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
@@ -142,6 +142,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     inpainted_regions = 0
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
     regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
+    changed_ids.update(restore_hidden_source_assets(source, candidate, target_issues, root / "assets"))
     restored_pale_assets = repair_residual_color_damage(source, candidate, target_issues,
                                                          root / "assets", project_id, round_number)
     changed_ids.update(restored_pale_assets)

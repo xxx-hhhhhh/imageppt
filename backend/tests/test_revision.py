@@ -722,6 +722,47 @@ def test_revision_repairs_residual_bleed_without_overwriting_previous_asset(tmp_
     assert current["elements"][0]["src"] != layout["elements"][0]["src"]
 
 
+def test_revision_reveals_source_matching_visual_hidden_under_plate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store = ProjectStore(tmp_path)
+    project_id = store.create("hidden-visual-revision")["id"]
+    root = tmp_path / project_id
+    (root / "assets").mkdir()
+    (root / "backgrounds").mkdir()
+    source = np.full((180, 320, 3), 255, np.uint8)
+    source[65:125, 40:260] = (247, 253, 249)
+    source[76:114, 60:240] = (225, 230, 253)
+    source_path = root / "source.png"
+    background = root / "backgrounds" / "page_1.png"
+    preview = root / "reconstructed_preview.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    cv2.imwrite(str(root / "assets" / "support.png"),
+                np.dstack((source[65:125, 40:260], np.full((60, 220), 255, np.uint8))))
+    layout = {"slide": {"width": 320, "height": 180}, "elements": [
+        {"id": "support", "type": "image", "x": 40, "y": 65, "width": 220, "height": 60,
+         "zIndex": 1, "src": f"/media/assets/{project_id}/support.png",
+         "metadata": {"layerRole": "residual", "reconstructionStrategy": "cutout_image"}},
+        {"id": "plate", "type": "roundedRectangle", "x": 40, "y": 65, "width": 220, "height": 60,
+         "zIndex": 10, "style": {"fill": "#F9FDF7", "opacity": 1}},
+    ]}
+    store.add_image(project_id, {"id": "source", "name": "source.png", "path": str(source_path)})
+    store.save_slide(project_id, 1, layout)
+    render_preview(background, layout, preview)
+    score = run_visual_qa(source_path, preview, root, layout)
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    assert audit_objectization(source_path, background, preview, layout)["fadedPaleSupportPixels"] > 1000
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    current = store.get_slide(project_id, 1)
+    after = audit_objectization(source_path, background, preview, current)
+    assert result["accepted"] is True, result
+    assert after["fadedPaleSupportPixels"] == 0
+    assert next(item for item in current["elements"] if item["id"] == "support")["zIndex"] > 10
+    assert result["missingAssetCount"] == 0
+
+
 def test_missing_candidate_asset_rolls_back_without_changing_preview(tmp_path: Path, monkeypatch) -> None:
     store, project_id = _image_project(tmp_path, monkeypatch)
     root = tmp_path / project_id

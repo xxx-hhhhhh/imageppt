@@ -10,6 +10,72 @@ import numpy as np
 from app.services.reconstruction.revision_integrity import asset_path
 
 
+def restore_hidden_source_assets(source_path: Path, layout: dict, issues: list[dict],
+                                 asset_dir: Path) -> list[str]:
+    """Raise source-matching image pixels above a plate that obscures them."""
+    boxes = [issue["bbox"] for issue in issues
+             if issue.get("reason") == "pale_support_overwritten"
+             and isinstance(issue.get("bbox"), list) and len(issue["bbox"]) == 4]
+    if not boxes:
+        return []
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    if source is None:
+        return []
+    height, width = source.shape[:2]
+    active = [item for item in layout.get("elements", []) if not any(
+        (item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    containers = [item for item in active if item.get("type") in {"rectangle", "roundedRectangle", "ellipse"}
+                  and (item.get("style") or {}).get("fill")]
+    raised: list[str] = []
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        area = max(1, (x2 - x1) * (y2 - y1))
+        covering = [item for item in containers if _overlaps(item, box)]
+        if not covering:
+            continue
+        top_container = max(int(item.get("zIndex") or 0) for item in covering)
+        candidates = []
+        for item in active:
+            if item.get("type") != "image" or int(item.get("zIndex") or 0) > top_container:
+                continue
+            ix, iy = float(item.get("x") or 0), float(item.get("y") or 0)
+            iw, ih = float(item.get("width") or 0), float(item.get("height") or 0)
+            if iw <= 0 or ih <= 0 or iw * ih > area * 30 or not _overlaps(item, box):
+                continue
+            path = asset_path(asset_dir.parent, item.get("src"))
+            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
+            if image is None or image.ndim != 3:
+                continue
+            left, top = max(0, round(max(ix, x1))), max(0, round(max(iy, y1)))
+            right, bottom = min(width, round(min(ix + iw, x2))), min(height, round(min(iy + ih, y2)))
+            if right <= left or bottom <= top:
+                continue
+            scaled = cv2.resize(image, (max(1, round(iw)), max(1, round(ih))))
+            ax, ay = left - round(ix), top - round(iy)
+            patch = scaled[ay:ay + bottom - top, ax:ax + right - left]
+            if patch.shape[:2] != (bottom - top, right - left):
+                continue
+            close = np.max(np.abs(patch[:, :, :3].astype(np.int16)
+                                  - source[top:bottom, left:right].astype(np.int16)), axis=2) <= 12
+            if patch.shape[2] == 4:
+                close &= patch[:, :, 3] > 32
+            if np.count_nonzero(close) < max(24, round(area * 0.01)):
+                continue
+            candidates.append(item)
+        for item in sorted(candidates, key=lambda entry: int(entry.get("zIndex") or 0)):
+            top_container += 1
+            item["zIndex"] = top_container
+            item.setdefault("metadata", {})["sourceVisualZOrderRestored"] = True
+            raised.append(str(item["id"]))
+    return sorted(set(raised))
+
+
+def _overlaps(item: dict, box: list[float]) -> bool:
+    x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+    w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+    return x < box[2] and x + w > box[0] and y < box[3] and y + h > box[1]
+
+
 def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[dict],
                                  asset_dir: Path, project_id: str, revision_round: int) -> list[str]:
     """Replace only proven local asset color damage using copy-on-write files."""
