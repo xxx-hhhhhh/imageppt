@@ -76,3 +76,26 @@ def test_new_partition_never_overwrites_previous_valid_assets(tmp_path: Path) ->
     assert partition_sparse_residuals(second, asset_dir, "demo")["residualPartsCreated"] == 2
     assert previous.keys().isdisjoint(item["src"] for item in second["elements"])
     assert all((asset_dir / Path(src).name).read_bytes() == payload for src, payload in previous.items())
+
+
+def test_partitioned_pale_support_moves_with_its_editable_text(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    image = np.zeros((150, 230, 4), np.uint8)
+    cv2.rectangle(image, (0, 0), (229, 149), (150, 100, 50, 255), 1)
+    image[25:65, 22:105] = (246, 242, 242, 255)
+    image[85:125, 120:205] = (246, 242, 242, 255)
+    cv2.imwrite(str(asset_dir / "panel.png"), image)
+    layout = {"slide": {"width": 300, "height": 200}, "elements": [
+        {"id": "panel", "type": "image", "x": 30, "y": 20, "width": 230, "height": 150,
+         "src": "/media/assets/demo/panel.png", "metadata": {"layerRole": "residual"}},
+        {"id": "label", "type": "text", "x": 57, "y": 50, "width": 70, "height": 25,
+         "metadata": {"rawOCRBBox": [57, 50, 127, 75]}},
+    ]}
+
+    assert partition_sparse_residuals(layout, asset_dir, "demo")["residualPartsCreated"] == 2
+    support = next(item for item in layout["elements"] if item.get("type") == "image"
+                   and item.get("metadata", {}).get("moduleMemberIds") == ["label"])
+    assert support["metadata"]["layerRole"] == "container"
+    assert support["groupId"].startswith("module_")
+    assert support["id"] != "panel"

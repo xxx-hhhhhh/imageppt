@@ -81,6 +81,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
             child_metadata.pop("editableTextIds", None)
             child_metadata["partitionedFromResidual"] = item.get("id")
             child_metadata["sourcePixelArea"] = int(components[index, cv2.CC_STAT_AREA])
+            _bind_pale_text_support(child, part, elements)
             staged.append((path, child))
         if write_failed or len(staged) < 2:
             for path, _ in staged:
@@ -100,3 +101,35 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
         stats["partitionedResidualAssets"] += 1
         stats["residualPartsCreated"] += len(staged)
     return stats
+
+
+def _bind_pale_text_support(child: dict, part: np.ndarray, elements: list[dict]) -> None:
+    visible = part[:, :, 3] > 32
+    if float(np.mean(visible)) < 0.65:
+        return
+    hsv = cv2.cvtColor(part[:, :, :3], cv2.COLOR_BGR2HSV)
+    pale = visible & (hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 45)
+    if np.count_nonzero(pale) / max(1, np.count_nonzero(visible)) < 0.85:
+        return
+    x1, y1 = float(child["x"]), float(child["y"])
+    x2, y2 = x1 + float(child["width"]), y1 + float(child["height"])
+    members: list[dict] = []
+    for item in elements:
+        if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        box = (item.get("metadata") or {}).get("rawOCRBBox")
+        if not isinstance(box, list) or len(box) != 4:
+            box = [float(item.get("x") or 0), float(item.get("y") or 0),
+                   float(item.get("x") or 0) + float(item.get("width") or 0),
+                   float(item.get("y") or 0) + float(item.get("height") or 0)]
+        tx1, ty1, tx2, ty2 = (float(value) for value in box)
+        overlap = max(0.0, min(x2, tx2) - max(x1, tx1)) * max(0.0, min(y2, ty2) - max(y1, ty1))
+        if overlap / max(1.0, (tx2 - tx1) * (ty2 - ty1)) >= 0.30:
+            members.append(item)
+    if not members:
+        return
+    group_id = str(members[0].get("groupId") or (members[0].get("metadata") or {}).get("groupId")
+                   or f"module_{child['id']}")
+    child["groupId"] = group_id
+    child["metadata"].update({"groupId": group_id, "layerRole": "container",
+                              "moduleMemberIds": [item["id"] for item in members]})
