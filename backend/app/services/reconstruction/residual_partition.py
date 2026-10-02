@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -56,6 +57,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
         assigned = np.zeros((height, width), np.bool_)
         staged: list[tuple[Path, dict]] = []
         write_failed = False
+        revision_id = uuid4().hex[:10]
         for index in islands[:12]:
             island = cv2.dilate(np.uint8(labels == index), np.ones((3, 3), np.uint8)) != 0
             island &= (image[:, :, 3] > 0) & ~assigned
@@ -65,7 +67,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
             x1, y1, x2, y2 = max(0, int(xs.min()) - 1), max(0, int(ys.min()) - 1), min(width, int(xs.max()) + 2), min(height, int(ys.max()) + 2)
             part = image[y1:y2, x1:x2].copy()
             part[:, :, 3][~island[y1:y2, x1:x2]] = 0
-            path = asset_dir / f"{original_path.stem}_part_{len(staged) + 1:02d}.png"
+            path = asset_dir / f"{original_path.stem}_{revision_id}_part_{len(staged) + 1:02d}.png"
             if not cv2.imwrite(str(path), part):
                 write_failed = True
                 break
@@ -86,7 +88,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
             continue
         remainder = image.copy()
         remainder[:, :, 3][assigned] = 0
-        remainder_path = asset_dir / f"{original_path.stem}_remainder.png"
+        remainder_path = asset_dir / f"{original_path.stem}_{revision_id}_remainder.png"
         if not cv2.imwrite(str(remainder_path), remainder):
             for path, _ in staged:
                 path.unlink(missing_ok=True)

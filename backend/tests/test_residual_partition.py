@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 
 import cv2
 import numpy as np
@@ -53,3 +54,25 @@ def test_dense_ribbon_stays_one_complete_asset(tmp_path: Path) -> None:
 
     assert partition_sparse_residuals(layout, asset_dir, "demo")["residualPartsCreated"] == 0
     assert len(layout["elements"]) == 1
+
+
+def test_new_partition_never_overwrites_previous_valid_assets(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    image = np.zeros((150, 230, 4), np.uint8)
+    cv2.rectangle(image, (0, 0), (229, 149), (150, 100, 50, 255), 1)
+    image[25:58, 22:62] = (30, 100, 220, 255)
+    image[85:118, 145:190] = (50, 180, 40, 255)
+    cv2.imwrite(str(asset_dir / "panel.png"), image)
+    original = {"slide": {"width": 300, "height": 200}, "elements": [
+        {"id": "panel", "type": "image", "x": 30, "y": 20, "width": 230, "height": 150,
+         "src": "/media/assets/demo/panel.png", "metadata": {"layerRole": "residual"}},
+    ]}
+    first, second = copy.deepcopy(original), copy.deepcopy(original)
+    assert partition_sparse_residuals(first, asset_dir, "demo")["residualPartsCreated"] == 2
+    previous = {item["src"]: (asset_dir / Path(item["src"]).name).read_bytes()
+                for item in first["elements"]}
+
+    assert partition_sparse_residuals(second, asset_dir, "demo")["residualPartsCreated"] == 2
+    assert previous.keys().isdisjoint(item["src"] for item in second["elements"])
+    assert all((asset_dir / Path(src).name).read_bytes() == payload for src, payload in previous.items())
