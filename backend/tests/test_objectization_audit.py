@@ -39,6 +39,30 @@ def test_audit_reports_large_colored_visual_mismatch(tmp_path):
                for issue in report["issues"])
 
 
+def test_audit_detects_dark_residual_added_over_original_pale_gap(tmp_path):
+    source = np.full((160, 320, 3), 255, np.uint8)
+    source[35:70, 30:280] = (35, 55, 85)
+    preview = source.copy()
+    preview[70:82, 40:130] = (35, 55, 85)
+    residual = np.dstack((preview, np.full(source.shape[:2], 255, np.uint8)))
+    asset = tmp_path / "residual.png"
+    cv2.imwrite(str(asset), residual)
+    for name, image in (("source.png", source), ("background.png", np.full_like(source, 255)),
+                        ("preview.png", preview)):
+        cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [{"id": "residual", "type": "image", "x": 0, "y": 0, "width": 320,
+                            "height": 160, "src": str(asset), "metadata": {"layerRole": "residual"}},
+                           {"id": "label", "type": "text", "text": "K=5",
+                            "metadata": {"rawOCRBBox": [35, 68, 140, 90]}}]}
+
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+
+    assert report["falseVisualAdditionPixels"] >= 900
+    assert any(issue.get("reason") == "dark_residual_over_pale_source" and issue["bbox"][1] == 70
+               for issue in report["issues"])
+
+
 def test_audit_reports_large_visual_still_baked_into_background(tmp_path):
     source = np.full((200, 400, 3), 255, np.uint8)
     source[20:180, 20:380] = (40, 110, 190)

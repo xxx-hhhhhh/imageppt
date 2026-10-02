@@ -24,6 +24,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
+              "falseVisualAdditionPixels": 0,
               "missingVisualPixels": 0, "coveredMissingVisualPixels": 0, "largestMissingVisualRegion": 0, "retainedVisualCoverage": 1.0,
               "paleAssetGapPixels": 0, "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
               "monolithicPageImageCount": 0,
@@ -58,6 +59,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     report["whiteBackground"] = bool(np.mean(np.all(background >= 250, axis=2)) >= 0.995)
     active = [item for item in layout.get("elements", []) if item.get("type") != "background" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     owner_mask = np.zeros((height, width), np.uint8)
+    residual_owner_mask = np.zeros((height, width), np.uint8)
     for item in active:
         box = _box(item, width, height)
         if box is None:
@@ -72,7 +74,10 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         report["ownerRegions"].append({"elementId": item.get("id"), "owner": role, "bbox": list(box)})
         if item.get("type") in VISUAL_TYPES:
             x1, y1, x2, y2 = box
-            owner_mask[y1:y2, x1:x2] = cv2.max(owner_mask[y1:y2, x1:x2], _visual_mask(item, box, source_path))
+            visible = _visual_mask(item, box, source_path)
+            owner_mask[y1:y2, x1:x2] = cv2.max(owner_mask[y1:y2, x1:x2], visible)
+            if item.get("type") == "image" and (item.get("metadata") or {}).get("layerRole") == "residual":
+                residual_owner_mask[y1:y2, x1:x2] = cv2.max(residual_owner_mask[y1:y2, x1:x2], visible)
     local_asset_regions = np.zeros((height, width), np.bool_)
     for item in active:
         if item.get("type") != "image":
@@ -170,6 +175,25 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     for x, y, w, h, pixels in _bounded_components(np.uint8(mismatched) * 255, minimum, width, height):
         report["visualMismatchRegions"] += 1
         report["issues"].append({"problem": "visualContentMismatch", "elementId": f"mismatch_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
+    # A dark residual asset can spread into originally pale gaps during text
+    # inpainting. These source pixels are not salient, so the ordinary
+    # source-detail mismatch check above cannot see the added visual content.
+    false_addition = ((source_hsv[:, :, 2] >= 240) & (source_hsv[:, :, 1] <= 30)
+                      & (preview_hsv[:, :, 2] <= 150) & (residual_owner_mask > 32))
+    false_addition_pixels = 0
+    for x, y, w, h, pixels in _bounded_components(np.uint8(false_addition) * 255,
+                                                   max(300, round(width * height * 0.00018)), width, height):
+        # Shifted editable glyphs are usually narrow and separate. A broad,
+        # dense added band is evidence of asset bleed rather than font drift.
+        if w < max(36, round(width * 0.025)) or h < 5 or w / h < 2.5 or pixels / max(1, w * h) < 0.35:
+            continue
+        false_addition_pixels += pixels
+        report["visualMismatchRegions"] += 1
+        report["visualMismatchPixels"] += pixels
+        report["issues"].append({"problem": "visualContentMismatch", "elementId": f"false_addition_{x}_{y}",
+                                 "bbox": [x, y, x + w, y + h], "pixelArea": pixels,
+                                 "reason": "dark_residual_over_pale_source"})
+    report["falseVisualAdditionPixels"] = false_addition_pixels
     missing = _bounded_components(np.uint8(lost) * 255, 9, width, height)
     for x, y, w, h, pixels in missing:
         if pixels < max(40, round(width * height * 0.00003)) and not _small_solid_decoration(
