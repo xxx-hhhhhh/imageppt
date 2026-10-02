@@ -108,6 +108,21 @@ def test_page_sized_environment_is_not_repackaged_as_background_image(tmp_path):
     assert stats["residualObjectizationRate"] == 1
 
 
+def test_neutral_page_edge_margin_is_not_a_missing_local_plate(tmp_path):
+    image = np.full((400, 700, 3), 255, np.uint8)
+    image[0:400, 0:8] = (246, 246, 246)
+    image[50:350, 30:670] = (45, 65, 190)
+    image[0:28, 180:440] = (242, 242, 242)
+
+    candidate = visual_candidate_mask(image)
+    assets, _ = extract_residual_objects(image, np.zeros(image.shape[:2], np.uint8),
+                                         tmp_path / "demo" / "assets", "demo", 1)
+
+    assert not np.any(candidate[40:360, :8])
+    assert all(not (item["x"] < 8 and item["height"] > 40) for item in assets)
+    assert np.count_nonzero(candidate[2:26, 190:430]) > 4000
+
+
 def test_large_irregular_map_and_silk_remain_separate_movable_assets(tmp_path):
     image = np.full((400, 700, 3), 255, np.uint8)
     contour = np.array([[45, 55], [300, 18], [650, 48], [675, 170], [620, 270], [490, 300], [270, 320], [65, 275]], np.int32)

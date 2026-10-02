@@ -132,6 +132,13 @@ def _neutral_local_surfaces(hsv: np.ndarray, saturation_floor: int, *, min_contr
         area = w * h
         if pixels < minimum or w < 4 or h < 4 or area > width * height * 0.4:
             continue
+        # A narrow neutral strip that runs along most of a page edge is part
+        # of the page environment. Row-relative contrast can otherwise make
+        # an inset page margin look like a missing movable card. Short edge
+        # aligned title plates remain eligible below.
+        if ((x == 0 or x + w >= width) and w <= max(4, round(width * 0.012))
+                and h >= height * 0.10):
+            continue
         # A bounded title plate may touch a page edge. Reject only components
         # spanning the whole page; the area cap above excludes broad washes.
         margin_x, margin_y = max(2, round(width * 0.02)), max(2, round(height * 0.02))
