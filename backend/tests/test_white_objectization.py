@@ -40,6 +40,17 @@ def test_neutral_badge_survives_editable_symbol_erasure(tmp_path):
     assert layout["elements"][0]["type"] == "text"
 
 
+def test_neutral_closed_letter_is_not_mistaken_for_a_badge(tmp_path):
+    source = np.full((140, 240, 3), 255, np.uint8)
+    cv2.ellipse(source, (100, 70), (17, 20), 0, 0, 360, (90, 90, 90), 5, cv2.LINE_AA)
+    source_path = tmp_path / "source.png"
+    cv2.imwrite(str(source_path), source)
+    layout = {"elements": [{"id": "number", "type": "text", "text": "0", "x": 78, "y": 45,
+                            "width": 45, "height": 50, "metadata": {"rawOCRBBox": [78, 45, 123, 95]}}]}
+    objectize_on_white(source_path, tmp_path / "background.png", layout, tmp_path / "assets", "fixture", 1)
+    assert not [e for e in layout["elements"] if e.get("metadata", {}).get("reconstructionStrategySource") == "round_contour"]
+
+
 def test_dark_flat_page_is_a_movable_shape_over_white_base(tmp_path):
     source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
     cv2.putText(source, "Dark", (35, 75), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)

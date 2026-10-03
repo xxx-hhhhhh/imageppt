@@ -233,6 +233,20 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
     neutral_contours, _ = cv2.findContours(neutral, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for contour in neutral_contours:
         nx, ny, nw, nh = cv2.boundingRect(contour)
+        contour_box = (nx, ny, nx + nw, ny + nh)
+        glyph_owned = False
+        for text in active:
+            if text.get("type") != "text":
+                continue
+            raw = (text.get("metadata") or {}).get("rawOCRBBox")
+            text_box = _clip(raw, width, height) if isinstance(raw, list) and len(raw) == 4 else _box(text, width, height)
+            if text_box and _overlap_of_first(contour_box, text_box) >= .90:
+                text_area = (text_box[2] - text_box[0]) * (text_box[3] - text_box[1])
+                if nw * nh >= text_area * .45:
+                    glyph_owned = True
+                    break
+        if glyph_owned:
+            continue
         disk = np.zeros((nh, nw), np.uint8)
         cv2.ellipse(disk, (nw // 2, nh // 2), (nw // 2, nh // 2), 0, 0, 360, 255, -1)
         silhouette = np.zeros_like(disk)
