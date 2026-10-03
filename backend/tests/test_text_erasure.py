@@ -35,6 +35,39 @@ def test_dark_text_erasure_preserves_pale_gradient_inside_ocr_box(tmp_path: Path
     assert np.all(cleaned[:, :, 3] == 255)
 
 
+def test_transparent_glyph_rgb_does_not_trigger_destructive_reclean(tmp_path: Path) -> None:
+    source = np.full((100, 240, 3), 255, np.uint8)
+    cv2.putText(source, "LABEL", (40, 65), cv2.FONT_HERSHEY_SIMPLEX, .8, (0, 0, 0), 2)
+    alpha = np.full(source.shape[:2], 255, np.uint8)
+    alpha[np.any(source < 250, axis=2)] = 0
+    source_path, background_path, asset_path = tmp_path / "source.png", tmp_path / "background.png", tmp_path / "asset.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, alpha)))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "LABEL", "metadata": {"rawOCRBBox": [20, 30, 200, 80]}},
+        {"id": "asset", "type": "image", "x": 0, "y": 0, "width": 240, "height": 100, "src": str(asset_path)},
+    ]}
+    assert count_text_ghosting(source_path, background_path, layout) == 0
+    assert not layout["elements"][0]["metadata"].get("ghostingDetected")
+
+
+def test_sparse_visible_glyph_is_detected_despite_low_average_alpha(tmp_path: Path) -> None:
+    source = np.full((100, 240, 3), 255, np.uint8)
+    cv2.putText(source, "LABEL", (40, 65), cv2.FONT_HERSHEY_SIMPLEX, .8, (0, 0, 0), 2)
+    alpha = np.uint8(np.any(source < 250, axis=2)) * 255
+    source_path, background_path, asset_path = tmp_path / "source.png", tmp_path / "background.png", tmp_path / "asset.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    cv2.imwrite(str(asset_path), np.dstack((source, alpha)))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "LABEL", "metadata": {"rawOCRBBox": [20, 30, 200, 80]}},
+        {"id": "asset", "type": "image", "x": 0, "y": 0, "width": 240, "height": 100, "src": str(asset_path)},
+    ]}
+    assert alpha.mean() < 128
+    assert count_text_ghosting(source_path, background_path, layout) == 1
+
+
 def test_editable_line_erases_source_from_background_and_asset(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "backgrounds").mkdir(parents=True)

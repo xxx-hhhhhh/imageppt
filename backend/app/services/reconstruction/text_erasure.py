@@ -318,10 +318,12 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
             patch = image[by1:by2, bx1:bx2]
             if patch.size == 0:
                 continue
-            if patch.shape[2] == 4 and np.mean(patch[:, :, 3]) < 128:
-                continue
-            patch = cv2.resize(patch[:, :, :3], (original.shape[1], original.shape[0]))
-            if _source_edges_retained(original, patch):
+            rgb = cv2.resize(patch[:, :, :3], (original.shape[1], original.shape[0]))
+            if patch.shape[2] == 4:
+                alpha = cv2.resize(patch[:, :, 3], (original.shape[1], original.shape[0])).astype(np.float32)[:, :, None] / 255
+                underlay = background[box[1]:box[3], box[0]:box[2]]
+                rgb = np.uint8(np.round(rgb * alpha + underlay * (1 - alpha)))
+            if _source_edges_retained(original, rgb):
                 count += 1
                 meta["ghostingDetected"] = True
                 break
@@ -333,7 +335,8 @@ def _source_edges_retained(source: np.ndarray, candidate: np.ndarray) -> bool:
     if np.count_nonzero(edges) < 12:
         return False
     close_pixels = np.max(cv2.absdiff(source, candidate), axis=2) <= 8
-    return float(np.count_nonzero(edges & close_pixels)) / np.count_nonzero(edges) >= 0.65
+    candidate_edges = cv2.dilate(cv2.Canny(candidate, 60, 160), np.ones((3, 3), np.uint8)) > 0
+    return float(np.count_nonzero(edges & close_pixels & candidate_edges)) / np.count_nonzero(edges) >= 0.65
 
 
 def _mark(mask: np.ndarray, box: tuple[int, int, int, int], padding: int) -> None:
