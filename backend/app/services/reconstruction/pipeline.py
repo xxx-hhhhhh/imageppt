@@ -32,7 +32,7 @@ from app.services.reconstruction.residual_partition import partition_sparse_resi
 from app.services.reconstruction.white_objectization import layer_objectized_elements, objectize_on_white
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
-from app.services.reconstruction.asset_ownership import restore_image_owned_text
+from app.services.reconstruction.asset_ownership import mark_image_dominant_ocr, preserve_uncertain_text_as_visual, restore_image_owned_text
 from app.services.reconstruction.revision_integrity import localize_project_assets
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.refinement import TypographyLayoutRefiner
@@ -297,6 +297,19 @@ class ReconstructionPipeline:
                 reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
             reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
             if white_objectized:
+                visual_ocr_ids = set(mark_image_dominant_ocr(normalized_path, layout))
+                for item in layout.get("elements", []):
+                    if item.get("id") not in visual_ocr_ids:
+                        continue
+                    restored = preserve_uncertain_text_as_visual(
+                        normalized_path, layout, item, page_output / "assets", project_id,
+                        prefix=f"page_{page_index}_visual_ocr",
+                    )
+                    if restored is not None:
+                        reconstruction_stats["imageOwnedTextRestored"] += len(restored)
+                        for scene_item in scene_refined.get("elements", []):
+                            if scene_item.get("id") == item.get("id"):
+                                scene_item.setdefault("metadata", {}).update(item.get("metadata") or {})
                 pre_cleanup_path = page_output / ("pre_cleanup_preview.png" if page_index == 1 else f"pre_cleanup_preview_{page_index}.png")
                 render_preview(background_path, layout, pre_cleanup_path)
                 ghosting_before_cleanup = count_text_ghosting(normalized_path, background_path, layout)

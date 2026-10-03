@@ -10,6 +10,37 @@ from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_
 from app.services.pptx import renderer
 
 
+@pytest.mark.parametrize("kind", ["visual", "reliable_visual", "digits", "single_digit"])
+def test_image_dominant_ocr_requires_visual_mass_not_real_numeric_glyphs(tmp_path, kind):
+    from app.services.reconstruction.asset_ownership import mark_image_dominant_ocr
+
+    source = np.full((100, 200, 3), 255, np.uint8)
+    if kind in {"visual", "reliable_visual"}:
+        points = np.array([[48, 50], [98, 27], [113, 60], [63, 75]], np.int32)
+        cv2.fillPoly(source, [points], (80, 30, 10))
+    else:
+        cv2.putText(source, "100" if kind == "digits" else "0", (45, 69), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (80, 30, 10), 3)
+    path = tmp_path / "source.png"
+    cv2.imwrite(str(path), source)
+    box = [43, 27, 118, 77] if kind != "single_digit" else [46, 42, 72, 72]
+    item = {"id": "ocr", "type": "text", "text": "100", "confidence": .95 if kind == "reliable_visual" else .52,
+            "metadata": {"rawOCRBBox": box}}
+    layout = {"elements": [item, {"id": "visual", "type": "image", "x": 15, "y": 10,
+                                  "width": 170, "height": 80, "src": str(path),
+                                  "metadata": {"preserveWholeAsset": True}}]}
+    assert mark_image_dominant_ocr(path, layout) == (["ocr"] if kind == "visual" else [])
+    if kind == "visual":
+        before = path.read_bytes()
+        restored = preserve_uncertain_text_as_visual(path, layout, item, tmp_path / "assets", "demo", prefix="visual_ocr")
+        assert restored is not None
+        assert item["metadata"]["ownedBy"] == "visual"
+        assert is_uncertain_image_owned_text(item, layout)
+        assert path.read_bytes() == before
+    else:
+        assert not item.get("metadata", {}).get("suppressed")
+
+
 def test_hidden_badge_letters_restore_complete_movable_image(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     project_id = "a" * 32

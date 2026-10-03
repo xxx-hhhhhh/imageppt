@@ -11,6 +11,71 @@ import numpy as np
 from app.services.pptx.renderer import _path_from_src
 
 
+def mark_image_dominant_ocr(source_path: Path, layout: dict) -> list[str]:
+    """Identify uncertain OCR boxes dominated by a single visual mass.
+
+    Text such as chart numbers has separate strokes/glyphs. A solar panel,
+    photograph or icon can instead fill almost the whole OCR box with one
+    connected region. Require both source evidence and a larger movable owner;
+    recognition confidence alone never changes ownership in this path.
+    """
+    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    if source is None:
+        return []
+    marked = []
+    for item in layout.get("elements", []):
+        confidence = item.get("confidence", item.get("finalConfidence"))
+        if item.get("type") != "text" or _hidden(item) or confidence is None or not 0 <= float(confidence) < .75:
+            continue
+        x1, y1, x2, y2 = [round(v) for v in _text_box(item)]
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(source.shape[1], x2), min(source.shape[0], y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        area = (x2 - x1) * (y2 - y1)
+        owners = [asset for asset in layout.get("elements", []) if asset.get("type") == "image"
+                  and not _hidden(asset) and (asset.get("metadata") or {}).get("preserveWholeAsset")
+                  and _overlap_fraction((x1, y1, x2, y2), _image_box(asset)) >= .75
+                  and float(asset.get("width") or 0) * float(asset.get("height") or 0) >= area * 3]
+        if not owners:
+            continue
+        region = source[y1:y2, x1:x2]
+        surface = np.median(np.concatenate((region[0], region[-1], region[:, 0], region[:, -1])), axis=0)
+        ink = np.uint8(np.max(np.abs(region.astype(np.float32) - surface), axis=2) > 35)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+        dominant = max(stats[1:, cv2.CC_STAT_AREA], default=0)
+        if count <= 1 or dominant < area * .35:
+            continue
+        dominant_label = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        component = stats[dominant_label]
+        component_area = int(component[cv2.CC_STAT_WIDTH]) * int(component[cv2.CC_STAT_HEIGHT])
+        if component_area < area * .70 or dominant / component_area < .50:
+            continue
+        # Genuine single digits/letters may be one connected component too.
+        # Their enclosed counters distinguish them from a filled visual mass.
+        contours, hierarchy = cv2.findContours(np.uint8(labels == dominant_label), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        hole_area = sum(cv2.contourArea(contour) for index, contour in enumerate(contours)
+                        if hierarchy is not None and hierarchy[0, index, 3] >= 0)
+        if hole_area > max(4, component_area * .035):
+            continue
+        metadata = item.setdefault("metadata", {})
+        metadata["imageDominantOCREvidence"] = {"connectedPixelFraction": round(float(dominant / area), 4)}
+        marked.append(str(item["id"]))
+    return marked
+
+
+def _overlap_fraction(box: tuple, owner: tuple) -> float:
+    area = max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+    overlap = max(0, min(box[2], owner[2]) - max(box[0], owner[0])) * max(0, min(box[3], owner[3]) - max(box[1], owner[1]))
+    return overlap / area if area else 0
+
+
+def _uncertain_visual_candidate(item: dict) -> bool:
+    confidence = item.get("confidence", item.get("finalConfidence"))
+    if confidence is None or not 0 <= float(confidence) < .75:
+        return False
+    return float(confidence) < .5 or bool((item.get("metadata") or {}).get("imageDominantOCREvidence"))
+
+
 def is_badge_owned_text(item: dict, layout: dict) -> bool:
     """An OCR fragment inside a complete badge is visual content, not missing text."""
     if item.get("type") != "text" or not _hidden(item):
@@ -39,8 +104,7 @@ def is_uncertain_image_owned_text(item: dict, layout: dict) -> bool:
     """
     if item.get("type") != "text" or not _hidden(item):
         return False
-    confidence = item.get("confidence", item.get("finalConfidence"))
-    if confidence is None or not 0 <= float(confidence) < 0.5:
+    if not _uncertain_visual_candidate(item):
         return False
     owner_id = str((item.get("metadata") or {}).get("ownedBy") or "")
     owner = next((asset for asset in layout.get("elements", [])
@@ -60,8 +124,7 @@ def is_uncertain_image_owned_text(item: dict, layout: dict) -> bool:
 def preserve_uncertain_text_as_visual(source_path: Path, layout: dict, item: dict,
                                       asset_dir: Path, project_id: str, *, prefix: str) -> list[str] | None:
     """Keep a dubious OCR fragment in a movable visual instead of erasing it."""
-    confidence = item.get("confidence", item.get("finalConfidence"))
-    if item.get("type") != "text" or confidence is None or not 0 <= float(confidence) < 0.5:
+    if item.get("type") != "text" or not _uncertain_visual_candidate(item):
         return None
     box = _text_box(item)
     area = max(0, box[2] - box[0]) * max(0, box[3] - box[1])

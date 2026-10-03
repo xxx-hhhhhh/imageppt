@@ -14,7 +14,7 @@ from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
-from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, preserve_uncertain_text_as_visual, restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, mark_image_dominant_ocr, preserve_uncertain_text_as_visual, restore_image_owned_text
 from app.services.reconstruction.background_objects import objectize_background_regions
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
@@ -32,7 +32,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 11
+REVISION_STRATEGY_VERSION = 12
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -131,6 +131,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     carry_issues = [item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene)]
                     if item.get("problem") not in OBJECTIZATION_AUDIT_PROBLEMS]
     issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*carry_issues, *baseline_audit["issues"]]}.values())
+    visual_ocr_ids = mark_image_dominant_ocr(source, baseline)
+    issues_before.extend({"problem": "wrongOwnership", "elementId": item_id,
+                          "reason": "image_dominant_ocr"} for item_id in visual_ocr_ids)
     baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
     issues_before = [issue for issue in issues_before if issue.get("problem") != "ghosting"
                      or (baseline_by_id.get(str(issue.get("elementId")), {}).get("metadata") or {}).get("ghostingDetected")]
@@ -218,6 +221,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             continue
         problem = issue["problem"]
         metadata = item.setdefault("metadata", {})
+        if problem == "wrongOwnership" and metadata.get("imageDominantOCREvidence"):
+            restored = preserve_uncertain_text_as_visual(
+                source, candidate, item, root / "assets", project_id,
+                prefix=f"revision_{round_number}_visual_ocr",
+            )
+            if restored is not None:
+                changed_ids.update(restored)
+                changed_ids.add(item["id"])
+                continue
         if problem in {"missingEditableText", "wrongOwnership"} and item.get("type") == "text":
             metadata.pop("suppressed", None)
             metadata.pop("suppressRender", None)
