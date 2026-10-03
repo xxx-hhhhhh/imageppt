@@ -14,7 +14,7 @@ from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
-from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, preserve_uncertain_text_as_visual, restore_image_owned_text
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
@@ -31,7 +31,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 4
+REVISION_STRATEGY_VERSION = 5
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -220,6 +220,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 loser.setdefault("metadata", {})["suppressed"] = True
                 changed_ids.add(loser["id"])
         elif problem == "ghosting" and item.get("type") == "text":
+            preserved = preserve_uncertain_text_as_visual(
+                source, candidate, item, root / "assets", project_id,
+                prefix=f"revision_{round_number}_uncertain_text",
+            )
+            if preserved is not None:
+                changed_ids.update(preserved)
+                changed_ids.add(item["id"])
+                continue
             touched_text.add(item["id"])
             erase_text.add(item["id"])
             changed_ids.add(item["id"])

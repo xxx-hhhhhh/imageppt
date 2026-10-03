@@ -57,6 +57,37 @@ def is_uncertain_image_owned_text(item: dict, layout: dict) -> bool:
     return area > 0 and intersection / area >= 0.75
 
 
+def preserve_uncertain_text_as_visual(source_path: Path, layout: dict, item: dict,
+                                      asset_dir: Path, project_id: str, *, prefix: str) -> list[str] | None:
+    """Keep a dubious OCR fragment in a movable visual instead of erasing it."""
+    confidence = item.get("confidence", item.get("finalConfidence"))
+    if item.get("type") != "text" or confidence is None or not 0 <= float(confidence) < 0.5:
+        return None
+    box = _text_box(item)
+    area = max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+    if area <= 0:
+        return None
+    owners = []
+    for asset in layout.get("elements", []):
+        if asset.get("type") != "image" or _hidden(asset) or not (asset.get("metadata") or {}).get("preserveWholeAsset"):
+            continue
+        x1, y1, x2, y2 = _image_box(asset)
+        overlap = max(0, min(box[2], x2) - max(box[0], x1)) * max(0, min(box[3], y2) - max(box[1], y1))
+        path = _path_from_src(asset.get("src"))
+        if overlap / area >= .75 and path is not None and path.is_file():
+            owners.append(asset)
+    if not owners:
+        return None
+    owner = min(owners, key=lambda asset: float(asset.get("width") or 0) * float(asset.get("height") or 0))
+    metadata = item.setdefault("metadata", {})
+    metadata.update({"suppressed": True, "ownedBy": owner["id"], "reconstructionStrategy": "group",
+                     "sourceContentPreserved": True, "fallbackReason": "uncertain_ocr_preserved_in_visual"})
+    metadata.pop("textOwner", None)
+    metadata.pop("ghostingDetected", None)
+    return restore_image_owned_text(source_path, layout, asset_dir, project_id,
+                                   prefix=prefix, target_boxes=[list(box)])
+
+
 def restore_image_owned_text(source_path: Path, layout: dict, asset_dir: Path,
                              project_id: str, *, prefix: str = "owned_text",
                              target_boxes: list[list[float]] | None = None) -> list[str]:

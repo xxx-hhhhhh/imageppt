@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, preserve_uncertain_text_as_visual, restore_image_owned_text
 from app.services.pptx import renderer
 
 
@@ -146,3 +146,38 @@ def test_mixed_asset_restores_hidden_text_without_reintroducing_editable_glyphs(
     assert metadata["editableTextIds"] == ["editable"]
     assert metadata["restoredImageOwnedTextIds"] == ["hidden"]
     assert restore_image_owned_text(source_path, layout, assets, project_id) == []
+
+
+@pytest.mark.parametrize("confidence", [.3, .9, None])
+def test_uncertain_fragment_uses_staged_visual_fallback_only_when_unreliable(tmp_path: Path, confidence) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    source = np.full((100, 200, 3), 235, np.uint8)
+    cv2.circle(source, (50, 50), 25, (180, 60, 30), -1)
+    source_path, asset_path = tmp_path / "source.png", assets / "picture.png"
+    cv2.imwrite(str(source_path), source)
+    damaged = source.copy()
+    damaged[30:70, 30:70] = 255
+    cv2.imwrite(str(asset_path), damaged)
+    old_bytes = asset_path.read_bytes()
+    fragment = {"id": "fragment", "type": "text", "text": "noise", "confidence": confidence,
+                "metadata": {"rawOCRBBox": [30, 30, 70, 70], "textOwner": "fragment"}}
+    owner = {"id": "picture", "type": "image", "x": 0, "y": 0, "width": 200, "height": 100,
+             "src": str(asset_path), "metadata": {"preserveWholeAsset": True, "textCleaned": True,
+                                                  "editableTextIds": ["fragment", "label"]}}
+    layout = {"elements": [fragment, owner, {"id": "label", "type": "text", "text": "ordinary label",
+                                             "metadata": {"rawOCRBBox": [110, 40, 160, 70]}}]}
+    result = preserve_uncertain_text_as_visual(source_path, layout, fragment, assets, "fixture", prefix="revision")
+    assert asset_path.read_bytes() == old_bytes
+    if confidence == .3:
+        assert result == ["picture"]
+        assert fragment["metadata"]["ownedBy"] == "picture"
+        assert "textOwner" not in fragment["metadata"]
+        updated = cv2.imread(str(assets / Path(owner["src"]).name))
+        assert np.array_equal(updated[30:70, 30:70], source[30:70, 30:70])
+        assert np.array_equal(updated[40:70, 110:160], damaged[40:70, 110:160])
+        assert owner["metadata"]["editableTextIds"] == ["label"]
+    else:
+        assert result is None
+        assert not fragment["metadata"].get("suppressed")
+        assert owner["src"] == str(asset_path)
