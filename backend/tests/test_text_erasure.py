@@ -6,6 +6,35 @@ import numpy as np
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 
 
+def test_dark_text_erasure_preserves_pale_gradient_inside_ocr_box(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "assets").mkdir(parents=True)
+    (root / "backgrounds").mkdir()
+    asset_path = root / "assets" / "gradient.png"
+    background_path = root / "backgrounds" / "page_1.png"
+    surface = np.full((100, 240, 3), 255, np.uint8)
+    surface[:, :, 0] = np.linspace(225, 250, 240).astype(np.uint8)
+    surface[:, :, 1] = np.linspace(235, 252, 240).astype(np.uint8)
+    surface[:, :, 2] = np.linspace(240, 254, 240).astype(np.uint8)
+    source = surface.copy()
+    cv2.putText(source, "LABEL", (50, 65), cv2.FONT_HERSHEY_SIMPLEX, .8, (20, 20, 20), 2)
+    cv2.imwrite(str(asset_path), np.dstack((source, np.full((100, 240), 255, np.uint8))))
+    cv2.imwrite(str(background_path), np.full_like(surface, 255))
+    layout = {"elements": [
+        {"id": "label", "type": "text", "text": "LABEL", "style": {"color": "#141414"},
+         "metadata": {"rawOCRBBox": [20, 30, 205, 78]}},
+        {"id": "plate", "type": "image", "x": 0, "y": 0, "width": 240, "height": 100,
+         "src": str(asset_path), "metadata": {"layerRole": "residual"}},
+    ]}
+    erase_editable_text_sources(background_path, layout, clean_background=False)
+    cleaned = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
+    glyphs = np.max(np.abs(source.astype(int) - surface.astype(int)), axis=2) > 30
+    protected = cv2.dilate(np.uint8(glyphs), np.ones((3, 3), np.uint8)) == 0
+    assert np.array_equal(cleaned[:, :, :3][protected], source[protected])
+    assert cleaned[:, :, :3][glyphs].mean() > 220
+    assert np.all(cleaned[:, :, 3] == 255)
+
+
 def test_editable_line_erases_source_from_background_and_asset(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "backgrounds").mkdir(parents=True)

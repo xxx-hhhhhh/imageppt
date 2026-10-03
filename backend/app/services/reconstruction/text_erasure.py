@@ -131,7 +131,7 @@ def erase_editable_text_sources(
                 if eligible:
                     local_alpha[(line_mask > 0) & holes] = 255
                 cleaned_rgb = _clean_residual_surface(cleaned_rgb, local_alpha, line_mask, complex_cleaner,
-                                                      glyph_color=glyph_color if eligible else None)
+                                                      glyph_color=glyph_color)
             original[:, :, :3] = cleaned_rgb
             # Close glyph-sized holes inside the existing support without
             # expanding its outline into neighboring white space. Only pixels
