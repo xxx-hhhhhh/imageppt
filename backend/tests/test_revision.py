@@ -56,6 +56,29 @@ def test_revision_restores_missing_editable_text_without_full_analysis(tmp_path:
     assert store.get_slide(project_id, 1)["elements"][0]["metadata"].get("suppressRender") is None
 
 
+@pytest.mark.parametrize("strategy_version", [None, revision.REVISION_STRATEGY_VERSION])
+def test_failed_regions_retry_only_after_repair_strategy_changes(tmp_path: Path, strategy_version) -> None:
+    store, project_id, baseline = _project(tmp_path, suppressed=True)
+    attempt = {"revisionRound": 1, "accepted": False,
+               "targetedIssues": [{"problem": "missingEditableText", "elementId": "text_001"}]}
+    if strategy_version is not None:
+        attempt["strategyVersion"] = strategy_version
+    (tmp_path / project_id / "revision_history_1.json").write_text(json.dumps([attempt]), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["strategyVersion"] == revision.REVISION_STRATEGY_VERSION
+    assert result["revisionRound"] == 2
+    if strategy_version is None:
+        assert result["accepted"] is True
+        assert result["targetedIssues"][0]["elementId"] == "text_001"
+    else:
+        assert result["accepted"] is False
+        assert result["targetedIssues"] == []
+        assert result["stagnationReason"] == "no_targetable_issues"
+        assert store.get_slide(project_id, 1) == baseline
+
+
 def test_revision_rolls_back_when_new_text_ghosting_appears(tmp_path: Path, monkeypatch) -> None:
     store, project_id, baseline = _project(tmp_path, suppressed=True)
     original_preview = (tmp_path / project_id / "reconstructed_preview.png").read_bytes()

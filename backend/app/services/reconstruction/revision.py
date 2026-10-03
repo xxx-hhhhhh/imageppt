@@ -29,6 +29,10 @@ from app.services.visual_qa.analyzer import enrich_quality_score, render_preview
 
 OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
 
+# Bump when repair/acceptance algorithms change so obsolete failed attempts do
+# not permanently prevent a newer strategy from repairing the same region.
+REVISION_STRATEGY_VERSION = 1
+
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
     """Continue local revisions while a high-quality page measurably improves."""
@@ -119,7 +123,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
                 "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
                 "assetBakedIntoBackground": 8, "professionalInpaintingPending": 9, "backgroundResidual": 10}
-    tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
+    tried = {(item.get("problem"), item.get("elementId")) for attempt in history
+             if not attempt.get("accepted") and attempt.get("strategyVersion") == REVISION_STRATEGY_VERSION
+             for item in attempt.get("targetedIssues", [])}
     ranked = sorted(issues_before, key=lambda item: (
         0 if item.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
                                     "colored_residual_washed_out"}
@@ -428,7 +434,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                           "previewWhiteAfter": integrity["previewWhiteAfter"] if accepted else integrity["previewWhiteBefore"]}
     stagnation_reason = None if accepted else "integrity_check_failed" if integrity["integrityErrors"] else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
     report = {
-        "revisionRound": round_number, "accepted": accepted,
+        "revisionRound": round_number, "accepted": accepted, "strategyVersion": REVISION_STRATEGY_VERSION,
         "localizedAssetCount": localized,
         "targetedIssues": target_issues,
         "issuesBefore": issues_before, "issuesAfter": issues_after if accepted else issues_before,
