@@ -97,7 +97,8 @@ def erase_editable_text_sources(
             if right <= left or bottom <= top:
                 continue
             area = (x2 - x1) * (y2 - y1)
-            if (right - left) * (bottom - top) / max(1, area) < 0.25:
+            confirmed_assets = (item.get("metadata") or {}).get("ghostingAssetIds") or []
+            if (right - left) * (bottom - top) / max(1, area) < 0.25 and asset.get("id") not in confirmed_assets:
                 continue
             sx, sy = original.shape[1] / aw, original.shape[0] / ah
             local_box = (round((left - ax) * sx), round((top - ay) * sy),
@@ -289,6 +290,7 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
         meta.pop("ghostingDetected", None)
+        meta.pop("ghostingAssetIds", None)
         if not (isinstance(raw, list) and len(raw) == 4):
             x, y = float(item.get("x") or 0), float(item.get("y") or 0)
             raw = [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]
@@ -301,10 +303,15 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
             count += 1
             meta["ghostingDetected"] = True
             continue
+        matched_assets = []
         for asset in assets:
             ax, ay = float(asset.get("x") or 0), float(asset.get("y") or 0)
             aw, ah = float(asset.get("width") or 0), float(asset.get("height") or 0)
-            if aw <= 0 or ah <= 0 or ax > box[0] or ay > box[1] or ax + aw < box[2] or ay + ah < box[3]:
+            if aw <= 0 or ah <= 0:
+                continue
+            left, top = max(box[0], round(ax)), max(box[1], round(ay))
+            right, bottom = min(box[2], round(ax + aw)), min(box[3], round(ay + ah))
+            if right <= left or bottom <= top:
                 continue
             path = _path_from_src(asset.get("src"))
             if path is None or not path.is_file():
@@ -313,20 +320,23 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
             if image is None or image.ndim != 3:
                 continue
             sx, sy = image.shape[1] / aw, image.shape[0] / ah
-            bx1, by1 = int(round((box[0] - ax) * sx)), int(round((box[1] - ay) * sy))
-            bx2, by2 = int(round((box[2] - ax) * sx)), int(round((box[3] - ay) * sy))
+            bx1, by1 = max(0, round((left - ax) * sx)), max(0, round((top - ay) * sy))
+            bx2, by2 = min(image.shape[1], round((right - ax) * sx)), min(image.shape[0], round((bottom - ay) * sy))
             patch = image[by1:by2, bx1:bx2]
             if patch.size == 0:
                 continue
-            rgb = cv2.resize(patch[:, :, :3], (original.shape[1], original.shape[0]))
+            local_source = source[top:bottom, left:right]
+            rgb = cv2.resize(patch[:, :, :3], (right - left, bottom - top))
             if patch.shape[2] == 4:
-                alpha = cv2.resize(patch[:, :, 3], (original.shape[1], original.shape[0])).astype(np.float32)[:, :, None] / 255
-                underlay = background[box[1]:box[3], box[0]:box[2]]
+                alpha = cv2.resize(patch[:, :, 3], (right - left, bottom - top)).astype(np.float32)[:, :, None] / 255
+                underlay = background[top:bottom, left:right]
                 rgb = np.uint8(np.round(rgb * alpha + underlay * (1 - alpha)))
-            if _source_edges_retained(original, rgb):
-                count += 1
-                meta["ghostingDetected"] = True
-                break
+            if _source_edges_retained(local_source, rgb):
+                matched_assets.append(asset.get("id"))
+        if matched_assets:
+            count += 1
+            meta["ghostingDetected"] = True
+            meta["ghostingAssetIds"] = matched_assets
     return count
 
 

@@ -106,6 +106,35 @@ def test_failed_regions_retry_only_after_repair_strategy_changes(tmp_path: Path,
         assert store.get_slide(project_id, 1) == baseline
 
 
+def test_revision_rechecks_split_asset_ghosts_when_saved_score_says_clean(tmp_path: Path) -> None:
+    store, project_id, layout = _project(tmp_path, suppressed=False)
+    root = tmp_path / project_id
+    (root / "assets").mkdir(exist_ok=True)
+    source = cv2.imread(str(root / "source.png"))
+    originals = {}
+    for index, x in enumerate((0, 120)):
+        path = root / "assets" / f"part_{index}.png"
+        cv2.imwrite(str(path), source[:, x:x+120])
+        originals[path] = path.read_bytes()
+        layout["elements"].append({"id": f"part_{index}", "type": "image", "x": x, "y": 0,
+                                   "width": 120, "height": 100, "src": str(path), "zIndex": 1,
+                                   "metadata": {"textCleaned": True, "editableTextIds": ["text_001"]}})
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds/page_1.png", layout, root / "reconstructed_preview.png")
+    score_path = root / "visual_score.json"
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    score["ghostingCount"] = 0
+    score_path.write_text(json.dumps(score), encoding="utf-8")
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is True, result
+    assert any(issue["problem"] == "ghosting" for issue in result["targetedIssues"])
+    assert result["missingAssetCount"] == 0
+    assert all(path.read_bytes() == content for path, content in originals.items())
+    assert count_text_ghosting(root / "source.png", root / "backgrounds/page_1.png", store.get_slide(project_id, 1)) == 0
+
+
 def test_revision_rolls_back_when_new_text_ghosting_appears(tmp_path: Path, monkeypatch) -> None:
     store, project_id, baseline = _project(tmp_path, suppressed=True)
     original_preview = (tmp_path / project_id / "reconstructed_preview.png").read_bytes()

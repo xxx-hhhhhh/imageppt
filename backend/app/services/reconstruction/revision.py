@@ -31,7 +31,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 5
+REVISION_STRATEGY_VERSION = 6
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -104,6 +104,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     raw_scene = json.loads(scene_path.read_text(encoding="utf-8")) if scene_path.is_file() else {}
     problem_path = root / ("problem_report.json" if page == 1 else f"problem_report_{page}.json")
     previous_report = json.loads(problem_path.read_text(encoding="utf-8")) if problem_path.is_file() else {}
+    # Revalidate actual source layers; saved scores can predate detector fixes.
+    score_before["ghostingCount"] = count_text_ghosting(source, background, baseline)
     baseline_audit = audit_objectization(source, background, preview, baseline)
     score_before["objectizationAudit"] = baseline_audit
     saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
@@ -114,6 +116,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                     if item.get("problem") not in OBJECTIZATION_AUDIT_PROBLEMS]
     issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*carry_issues, *baseline_audit["issues"]]}.values())
     baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
+    issues_before = [issue for issue in issues_before if issue.get("problem") != "ghosting"
+                     or (baseline_by_id.get(str(issue.get("elementId")), {}).get("metadata") or {}).get("ghostingDetected")]
     issues_before = [issue for issue in issues_before if not (
         issue.get("problem") == "missingEditableText"
         and (is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
@@ -429,11 +433,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
+    # Editable font rasterization can lower whole-page similarity even after
+    # real duplicate glyphs disappear. Local visual safety remains mandatory.
+    ghosting_improved = (ghosting_after < ghosting_before and replacement_qa["safe"]
+                         and visual_delta >= -0.02 and coverage_delta >= -0.01)
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
     pale_repaired = (bool(pale_targets) and int(baseline_audit.get("unownedPaleSupportPixels") or 0)
                      - int(candidate_audit.get("unownedPaleSupportPixels") or 0) >= 120
                      and visual_delta >= -0.005 and coverage_delta >= -0.01)
-    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or ghosting_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
     reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
                           "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
                           "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],

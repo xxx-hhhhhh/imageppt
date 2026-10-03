@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 
@@ -66,6 +67,35 @@ def test_sparse_visible_glyph_is_detected_despite_low_average_alpha(tmp_path: Pa
     ]}
     assert alpha.mean() < 128
     assert count_text_ghosting(source_path, background_path, layout) == 1
+
+
+@pytest.mark.parametrize("transparent_glyphs", [False, True])
+@pytest.mark.parametrize("narrow_fragments", [False, True])
+def test_split_visual_assets_do_not_hide_partial_text_ghosts(tmp_path: Path, transparent_glyphs, narrow_fragments) -> None:
+    source = np.full((100, 240, 3), 255, np.uint8)
+    cv2.putText(source, "LEFT", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 0, 0), 2)
+    cv2.putText(source, "RIGHT", (130, 65), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 0, 0), 2)
+    source_path, background_path = tmp_path / "source.png", tmp_path / "background.png"
+    cv2.imwrite(str(source_path), source)
+    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    layout = {"elements": [{"id": "line", "type": "text", "text": "LEFT RIGHT",
+                             "metadata": {"rawOCRBBox": [10, 25, 230, 80]}}]}
+    width = 40 if narrow_fragments else 120
+    for index, x in enumerate((20, 130) if narrow_fragments else (0, 120)):
+        rgb = source[:, x:x+width]
+        alpha = np.full(rgb.shape[:2], 255, np.uint8)
+        if transparent_glyphs:
+            alpha[np.any(rgb < 250, axis=2)] = 0
+        asset = tmp_path / f"part_{index}.png"
+        cv2.imwrite(str(asset), np.dstack((rgb, alpha)))
+        layout["elements"].append({"id": f"part_{index}", "type": "image", "x": x, "y": 0,
+                                   "width": width, "height": 100, "src": str(asset)})
+    # Neither image contains the complete OCR box. Count the line only once.
+    assert count_text_ghosting(source_path, background_path, layout) == (0 if transparent_glyphs else 1)
+    if not transparent_glyphs:
+        assert layout["elements"][0]["metadata"]["ghostingAssetIds"] == ["part_0", "part_1"]
+        erase_editable_text_sources(background_path, layout, clean_background=False)
+        assert count_text_ghosting(source_path, background_path, layout) == 0
 
 
 def test_editable_line_erases_source_from_background_and_asset(tmp_path: Path) -> None:
