@@ -638,18 +638,27 @@ def _contains_distinct_filled_regions(source: np.ndarray, parent: tuple[int, int
 
 
 def _is_text_glyph_candidate(box: tuple[int, int, int, int], active: list[dict], width: int, height: int) -> bool:
-    """Keep small contour fragments of a long OCR line owned by its textbox."""
+    """Keep glyph contours inside source OCR bounds owned by editable text.
+
+    Editor textboxes may expand to accommodate a substitute font. Their aspect
+    ratio is not evidence about the source glyphs, especially in short labels.
+    A plate must extend beyond its text; an enclosed stroke within a line is
+    not a separate visual container.
+    """
     area = (box[2] - box[0]) * (box[3] - box[1])
     for item in active:
         if item.get("type") != "text":
             continue
-        text_box = _box(item, width, height)
+        raw_box = (item.get("metadata") or {}).get("rawOCRBBox")
+        text_box = _clip(raw_box, width, height) if isinstance(raw_box, list) and len(raw_box) == 4 else _box(item, width, height)
         if text_box is None:
             continue
         text_area = (text_box[2] - text_box[0]) * (text_box[3] - text_box[1])
-        if text_area <= 0 or (text_box[2] - text_box[0]) < 3 * (text_box[3] - text_box[1]):
+        if text_area <= 0:
             continue
-        if area <= text_area * 0.18 and _overlap_of_first(box, text_box) >= 0.82:
+        line_height = text_box[3] - text_box[1]
+        glyph_sized = max(box[2] - box[0], box[3] - box[1]) <= line_height * 1.15
+        if glyph_sized and area <= text_area * 0.45 and _overlap_of_first(box, text_box) >= 0.90:
             return True
     return False
 

@@ -570,6 +570,38 @@ def test_small_contour_within_long_ocr_line_stays_owned_by_editable_text():
     assert not _is_text_glyph_candidate((55, 10, 455, 110), [line], 500, 160)
 
 
+def test_glyph_contours_in_short_labels_use_raw_ocr_geometry():
+    from app.services.reconstruction.white_objectization import _is_text_glyph_candidate
+
+    line = {"id": "label", "type": "text", "x": 35, "y": 15, "width": 70, "height": 45,
+            "metadata": {"rawOCRBBox": [40, 20, 100, 50]}}
+    assert _is_text_glyph_candidate((44, 24, 66, 46), [line], 200, 100)
+    # A real backing plate and nearby decoration are not glyphs.
+    assert not _is_text_glyph_candidate((36, 16, 104, 54), [line], 200, 100)
+    assert not _is_text_glyph_candidate((106, 24, 128, 46), [line], 200, 100)
+
+
+def test_bordered_container_detection_does_not_extract_enclosed_text_strokes(tmp_path):
+    from app.services.reconstruction.white_objectization import _extract_bordered_containers
+
+    source = np.full((120, 240, 3), 255, np.uint8)
+    # Closed glyph outlines resemble border-only containers at small scale.
+    for x in (60, 88, 116):
+        cv2.rectangle(source, (x, 48), (x + 18, 68), (20, 20, 20), 2)
+        cv2.line(source, (x, 58), (x + 18, 58), (20, 20, 20), 2)
+    cv2.rectangle(source, (38, 30), (162, 88), (120, 120, 120), 2)
+    text = {"id": "label", "type": "text", "x": 56, "y": 40, "width": 85, "height": 40,
+            "metadata": {"rawOCRBBox": [57, 45, 139, 72]}}
+    elements = [text]
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _extract_bordered_containers(source, [text], elements, np.zeros(source.shape[:2], np.uint8), assets, "demo", 1)
+    containers = elements[1:]
+    assert containers
+    assert all(item["width"] > 100 for item in containers)
+    assert any("label" in item["metadata"]["moduleMemberIds"] for item in containers)
+
+
 def test_container_cleanup_uses_raw_ocr_bounds_instead_of_expanded_textbox(tmp_path):
     source = np.full((210, 390, 3), 255, np.uint8)
     cv2.rectangle(source, (35, 25), (350, 180), (85, 55, 35), 3)
