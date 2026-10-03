@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 
-def _bounds(item: dict, width: int, height: int, *, source_text: bool = False) -> tuple[int, int, int, int]:
+def _bounds(item: dict, width: int, height: int, *, source_text: bool = False, padding: int = 0) -> tuple[int, int, int, int]:
     raw = (item.get("metadata") or {}).get("rawOCRBBox") if source_text else None
     try:
         if isinstance(raw, (list, tuple)) and len(raw) == 4:
@@ -19,7 +19,7 @@ def _bounds(item: dict, width: int, height: int, *, source_text: bool = False) -
             right, bottom = x + float(item.get("width") or 0), y + float(item.get("height") or 0)
     except (TypeError, ValueError):
         return _bounds({**item, "metadata": {}}, width, height) if source_text else (0, 0, 0, 0)
-    return max(0, round(x)), max(0, round(y)), min(width, round(right)), min(height, round(bottom))
+    return max(0, round(x) - padding), max(0, round(y) - padding), min(width, round(right) + padding), min(height, round(bottom) + padding)
 
 
 def check_replacement_regions(source_path: Path, before_path: Path, after_path: Path, layout: dict, report_path: Path, comparison_path: Path, ghosting_before: int, ghosting_after: int) -> dict:
@@ -42,7 +42,9 @@ def check_replacement_regions(source_path: Path, before_path: Path, after_path: 
         for text in layout.get("elements", []):
             if text.get("type") != "text" or any((text.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
                 continue
-            tx1, ty1, tx2, ty2 = _bounds(text, width, height, source_text=True)
+            # Match the two-pixel source erasure margin. Glyph antialiasing just
+            # outside OCR bounds is text, while the wider editor box is not.
+            tx1, ty1, tx2, ty2 = _bounds(text, width, height, source_text=True, padding=2)
             left, top, right, bottom = max(x1, tx1), max(y1, ty1), min(x2, tx2), min(y2, ty2)
             if right > left and bottom > top:
                 mask[top - y1:bottom - y1, left - x1:right - x1] = False

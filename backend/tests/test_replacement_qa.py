@@ -2,6 +2,7 @@ import json
 
 import cv2
 import numpy as np
+import pytest
 
 from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
@@ -58,7 +59,7 @@ def test_expanded_editor_textbox_does_not_hide_erased_pale_plate(tmp_path):
     report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 0, 0)
     assert report["checkedRegions"] == 1
     assert report["safe"] is False
-    assert report["worsenedRegions"][0]["lostVisualPixels"] == 6200
+    assert report["worsenedRegions"][0]["lostVisualPixels"] == 5904
     assert report["worsenedRegions"][0]["errorAfter"] == 10
 
 
@@ -87,6 +88,28 @@ def test_unchanged_existing_pale_gap_does_not_reject_revision(tmp_path):
     report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 0, 0)
     assert report["safe"] is True
     assert report["worsenedRegions"] == []
+
+
+@pytest.mark.parametrize("erase_decoration", [False, True])
+def test_qa_allows_glyph_margin_but_protects_neighboring_decoration(tmp_path, erase_decoration):
+    source = np.full((100, 140, 3), 255, np.uint8)
+    source[40:80, 40:90] = 245
+    source[50:65, 50:70] = 15
+    source[50:65, 44:47] = (40, 70, 150)
+    after = source.copy()
+    after[50:65, 50:70] = 245
+    if erase_decoration:
+        after[50:65, 44:47] = 255
+    for name, pixels in (("source", source), ("before", source), ("after", after)):
+        cv2.imwrite(str(tmp_path / f"{name}.png"), pixels)
+    layout = {"elements": [
+        {"id": "module", "type": "image", "x": 40, "y": 40, "width": 50, "height": 40},
+        {"id": "label", "type": "text", "metadata": {"rawOCRBBox": [52, 52, 68, 63]}},
+    ]}
+    report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 1, 0)
+    assert report["safe"] is (not erase_decoration)
+    if erase_decoration:
+        assert report["worsenedRegions"][0]["lostVisualPixels"] == 45
 
 
 def test_source_glyph_changes_are_excluded_without_hiding_support(tmp_path):

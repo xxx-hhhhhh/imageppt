@@ -31,7 +31,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 6
+REVISION_STRATEGY_VERSION = 8
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -108,6 +108,21 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     score_before["ghostingCount"] = count_text_ghosting(source, background, baseline)
     baseline_audit = audit_objectization(source, background, preview, baseline)
     score_before["objectizationAudit"] = baseline_audit
+    baseline_detected_ids = {str(source_id) for item in baseline.get("elements", []) if item.get("type") == "text"
+                             for source_id in ((item.get("metadata") or {}).get("sourceOcrIds") or [item.get("id")]) if source_id}
+    baseline_detected = max(int(score_before.get("detectedTextCount") or 0), len(baseline_detected_ids))
+    baseline_coverage = measure_text_coverage(baseline, baseline_detected)["editableTextCoverage"]
+    baseline_metrics = measure_movable_assets(source, background, baseline,
+                                              (baseline.get("metadata") or {}).get("reconstructionPlan") or {})
+    # Reapply today's ownership gates to the raw visual score, not to an
+    # already enriched score or to stale ghosting/editability statistics.
+    score_before["overall"] = score_before.get("visualSceneScore", score_before.get("overall", 0))
+    score_before.update(baseline_metrics)
+    enrich_quality_score(score_before, editable_coverage=baseline_coverage,
+                         movable_coverage=float(baseline_metrics["movableVisualCoverage"]),
+                         ghosting_count=int(score_before["ghostingCount"]),
+                         background_residual_count=int(baseline_metrics["backgroundResidualCount"]),
+                         professional_pending=int(score_before.get("professionalRepairPending") or 0))
     saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
     # Saved reports and scores describe the previous render. Pixel-derived
     # objectization issues must be revalidated against the current assets and
@@ -433,15 +448,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
-    # Editable font rasterization can lower whole-page similarity even after
-    # real duplicate glyphs disappear. Local visual safety remains mandatory.
-    ghosting_improved = (ghosting_after < ghosting_before and replacement_qa["safe"]
-                         and visual_delta >= -0.02 and coverage_delta >= -0.01)
     restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
     pale_repaired = (bool(pale_targets) and int(baseline_audit.get("unownedPaleSupportPixels") or 0)
                      - int(candidate_audit.get("unownedPaleSupportPixels") or 0) >= 120
                      and visual_delta >= -0.005 and coverage_delta >= -0.01)
-    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or ghosting_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
     reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
                           "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
                           "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],

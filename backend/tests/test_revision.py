@@ -135,6 +135,15 @@ def test_revision_rechecks_split_asset_ghosts_when_saved_score_says_clean(tmp_pa
     assert count_text_ghosting(root / "source.png", root / "backgrounds/page_1.png", store.get_slide(project_id, 1)) == 0
 
 
+def test_unchanged_revision_baseline_is_not_enriched_twice(tmp_path: Path) -> None:
+    store, project_id, _ = _project(tmp_path, suppressed=False)
+    first = revise_problem_regions(store, project_id, 1)
+    second = revise_problem_regions(store, project_id, 1)
+    assert first["accepted"] is False and second["accepted"] is False
+    assert first["visualBefore"] == second["visualBefore"]
+    assert first["visualAfter"] == second["visualAfter"]
+
+
 def test_revision_rolls_back_when_new_text_ghosting_appears(tmp_path: Path, monkeypatch) -> None:
     store, project_id, baseline = _project(tmp_path, suppressed=True)
     original_preview = (tmp_path / project_id / "reconstructed_preview.png").read_bytes()
