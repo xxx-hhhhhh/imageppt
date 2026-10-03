@@ -37,6 +37,84 @@ def test_text_bound_pale_gap_counts_local_support_without_page_noise(tmp_path):
     assert report["textBoundPaleGapPixels"] == 60 * 100
 
 
+def test_text_bound_pale_gap_ignores_glyph_antialiasing_but_keeps_plate(tmp_path):
+    source = np.full((140, 360, 3), 255, np.uint8)
+    cv2.putText(source, "TITLE", (25, 65), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
+                (25, 35, 90), 5, cv2.LINE_AA)
+    source[88:128, 60:270] = (246, 247, 250)
+    cv2.putText(source, "CARD", (100, 117), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                (25, 35, 90), 2, cv2.LINE_AA)
+    preview = np.full_like(source, 255)
+    for name, image in (("source.png", source), ("background.png", preview),
+                        ("preview.png", preview)):
+        assert cv2.imwrite(str(tmp_path / name), image)
+    layout = {"elements": [
+        {"id": "title", "type": "text", "text": "TITLE", "x": 20, "y": 20,
+         "width": 220, "height": 55, "metadata": {"rawOCRBBox": [20, 20, 240, 75]}},
+        {"id": "card", "type": "text", "text": "CARD", "x": 60, "y": 88,
+         "width": 210, "height": 40, "metadata": {"rawOCRBBox": [60, 88, 270, 128]}},
+    ]}
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", layout)
+    assert report["textBoundPaleGapPixels"] > 5000
+    title_only = {"elements": [layout["elements"][0]]}
+    title_report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                       tmp_path / "preview.png", title_only)
+    assert title_report["textBoundPaleGapPixels"] < 50
+
+
+def test_bounded_faded_support_becomes_movable_image(tmp_path):
+    from app.services.reconstruction.objectization_audit import _recover_faded_local_supports, _pale_gap_pixels
+
+    project_id = "faded-card"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    source = np.full((200, 400, 3), 255, np.uint8)
+    source[30:150, 25:315] = (246, 247, 251)
+    preview = source.copy()
+    preview[82:104, 110:170] = 255
+    alpha = np.full((120, 290), 255, np.uint8)
+    alpha[52:74, 85:145] = 0
+    assert cv2.imwrite(str(asset_dir / "card.png"), np.dstack((source[30:150, 25:315], alpha)))
+    source_path = tmp_path / "source.png"
+    assert cv2.imwrite(str(source_path), source)
+    layout = {"elements": [
+        {"id": "card", "type": "image", "x": 25, "y": 30, "width": 290, "height": 120,
+         "src": f"/media/assets/{project_id}/card.png", "groupId": "card-module",
+         "metadata": {"layerRole": "residual"}},
+        {"id": "label", "type": "text", "x": 115, "y": 84, "width": 90, "height": 25,
+         "text": "Editable", "groupId": "card-module"},
+    ]}
+    background_path = tmp_path / "background.png"
+    preview_path = tmp_path / "preview.png"
+    assert cv2.imwrite(str(background_path), np.full_like(source, 255))
+    assert cv2.imwrite(str(preview_path), preview)
+    before = audit_objectization(source_path, background_path, preview_path, layout)
+    assert any(issue.get("reason") == "unowned_local_pale_support" for issue in before["issues"])
+    created = _recover_faded_local_supports(source_path, source, preview, layout,
+                                            asset_dir, project_id, 1, None)
+    assert len(created) == 1
+    assert created[0]["type"] == "image"
+    assert created[0]["groupId"] == "card-module"
+    assert created[0]["id"] == "card"
+    assert created[0]["metadata"]["fadedSupportMergedPixels"] >= 1000
+    assert cv2.imread(str(asset_dir / "card.png"), cv2.IMREAD_UNCHANGED)[60, 100, 3] == 0
+    repaired = cv2.imread(str(asset_dir / Path(created[0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert repaired is not None and repaired.shape[2] == 4
+    assert np.count_nonzero(repaired[:, :, 3]) >= 1000
+    assert all(item["type"] == "text" for item in layout["elements"] if item["id"] == "label")
+    restored = preview.copy()
+    x, y = int(created[0]["x"]), int(created[0]["y"])
+    h, w = repaired.shape[:2]
+    restored[y:y + h, x:x + w][repaired[:, :, 3] > 0] = repaired[:, :, :3][repaired[:, :, 3] > 0]
+    assert np.count_nonzero(_pale_gap_pixels(source, restored)) < np.count_nonzero(_pale_gap_pixels(source, preview))
+    assert cv2.imwrite(str(preview_path), restored)
+    after = audit_objectization(source_path, background_path, preview_path, layout)
+    assert not any(issue.get("reason") == "unowned_local_pale_support" for issue in after["issues"])
+    assert _recover_faded_local_supports(source_path, source, restored, layout,
+                                         asset_dir, project_id, 1, None) == []
+
+
 def test_audit_reports_large_colored_visual_mismatch(tmp_path):
     source = np.full((200, 400, 3), 255, np.uint8)
     preview = source.copy()

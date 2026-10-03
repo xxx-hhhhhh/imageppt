@@ -105,12 +105,13 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
     for item in active:
         if item.get("type") != "text":
             continue
-        box = _box(item, width, height)
+        box = _text_source_box(item, width, height, padding=2)
         if box is None:
             continue
         x1, y1, x2, y2 = box
-        text_bound_pale[y1:y2, x1:x2] |= (pale_missing[y1:y2, x1:x2]
-                                         & visible_pale_support[y1:y2, x1:x2])
+        local_gap = pale_missing[y1:y2, x1:x2] & visible_pale_support[y1:y2, x1:x2]
+        text_bound_pale[y1:y2, x1:x2] |= _coherent_text_support(
+            source[y1:y2, x1:x2], local_gap)
         pale_missing[y1:y2, x1:x2] = False
     report["textBoundPaleGapPixels"] = int(np.count_nonzero(text_bound_pale))
     unowned_pale = np.zeros((height, width), np.bool_)
@@ -133,6 +134,29 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         unowned_pale[y1:y2, x1:x2] |= stable != 0
         report["issues"].append({"problem": "paleAssetGap", "elementId": item.get("id"),
                                  "bbox": list(box), "pixelArea": pixels})
+    local_faded = _faded_local_support_mask(source, preview)
+    local_faded[(owner_mask > 32) | ~local_asset_regions] = 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(local_faded, 8)
+    faded_parents: dict[str, dict] = {}
+    for index in range(1, count):
+        x, y, w, h, pixels = [int(value) for value in stats[index]]
+        if pixels < max(120, round(width * height * 0.00006)) or w < 8 or h < 5 or w * h > width * height * 0.12:
+            continue
+        box = (x, y, x + w, y + h)
+        eligible = [item for item in active if item.get("type") == "image"
+                    and (parent_box := _box(item, width, height)) is not None
+                    and _box_area(parent_box) <= width * height * 0.55
+                    and _overlap_of_first(box, parent_box) >= 0.75]
+        if not eligible:
+            continue
+        parent = min(eligible, key=lambda item: _box_area(_box(item, width, height)))
+        key = str(parent.get("id"))
+        issue = faded_parents.setdefault(key, {"problem": "paleAssetGap", "elementId": key,
+                                              "bbox": list(_box(parent, width, height)), "pixelArea": 0,
+                                              "reason": "unowned_local_pale_support"})
+        issue["pixelArea"] += pixels
+        unowned_pale[labels == index] = True
+    report["issues"].extend(faded_parents.values())
     report["unownedPaleSupportPixels"] = int(np.count_nonzero(unowned_pale))
     page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0).astype(np.int16)
     salient = visual_candidate_mask(source)
@@ -503,6 +527,24 @@ def _pale_gap_pixels(source: np.ndarray, preview: np.ndarray) -> np.ndarray:
             & np.all(preview >= 253, axis=2) & (difference >= 3))
 
 
+def _coherent_text_support(source_crop: np.ndarray, gap: np.ndarray) -> np.ndarray:
+    """Separate a missing plate from pale antialiasing around editable glyphs."""
+    if not np.any(gap) or min(gap.shape) < 10:
+        return np.zeros(gap.shape, np.bool_)
+    hsv = cv2.cvtColor(source_crop, cv2.COLOR_BGR2HSV)
+    dark_ink = np.uint8((hsv[:, :, 2] < 225) | (hsv[:, :, 1] > 32))
+    glyph_halo = cv2.dilate(dark_ink, np.ones((5, 5), np.uint8)) != 0
+    candidate = np.uint8(gap & ~glyph_halo) * 255
+    opened = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, 8)
+    coherent = np.zeros(gap.shape, np.uint8)
+    for index in range(1, count):
+        _, _, width, height, pixels = [int(value) for value in stats[index]]
+        if width >= 10 and height >= 10 and pixels >= 80:
+            coherent[labels == index] = 255
+    return (cv2.dilate(coherent, np.ones((5, 5), np.uint8)) != 0) & gap
+
+
 def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict,
                              asset_dir: Path, project_id: str, page_index: int,
                              *, target_ids: set[str] | None = None,
@@ -575,9 +617,115 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         layout.setdefault("elements", []).append(item)
         created.append(item)
         missing[y1:y2, x1:x2][gap != 0] = False
+    created.extend(_recover_faded_local_supports(source_path, source, preview, layout,
+                                                 asset_dir, project_id, page_index, target_ids))
     if target_ids is None:
         created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index))
     return created
+
+
+def _recover_faded_local_supports(source_path: Path, source: np.ndarray, preview: np.ndarray,
+                                  layout: dict, asset_dir: Path, project_id: str, page_index: int,
+                                  target_ids: set[str] | None) -> list[dict]:
+    """Restore bounded pale card surfaces missed by per-asset alpha repair."""
+    height, width = source.shape[:2]
+    candidate = _faded_local_support_mask(source, preview)
+    parents = [item for item in layout.get("elements", []) if item.get("type") == "image"
+               and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
+               and (target_ids is None or str(item.get("id")) in target_ids)
+               and (box := _box(item, width, height)) is not None
+               and (box[2] - box[0]) * (box[3] - box[1]) <= width * height * 0.55]
+    if not parents:
+        return []
+    # Existing visible pixels already have an owner. Only add support into
+    # actual transparent holes, never another copy over a valid image.
+    owned = np.zeros((height, width), np.bool_)
+    for item in layout.get("elements", []):
+        if item.get("type") not in VISUAL_TYPES or any((item.get("metadata") or {}).get(key)
+                for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        box = _box(item, width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        owned[y1:y2, x1:x2] |= _visual_mask(item, box, source_path) > 32
+    candidate[owned] = 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    created: list[dict] = []
+    merged_assets: dict[str, tuple[dict, np.ndarray, int]] = {}
+    minimum = max(120, round(width * height * 0.00006))
+    for index in range(1, count):
+        x, y, w, h, pixels = [int(value) for value in stats[index]]
+        if pixels < minimum or w < 8 or h < 5 or w * h > width * height * 0.12:
+            continue
+        component = np.uint8(labels[y:y + h, x:x + w] == index) * 255
+        box = (x, y, x + w, y + h)
+        eligible = [item for item in parents if (parent_box := _box(item, width, height))
+                    and _overlap_of_first(box, parent_box) >= 0.75]
+        if not eligible:
+            continue
+        parent = min(eligible, key=lambda item: _box_area(_box(item, width, height)))
+        parent_box = _box(parent, width, height)
+        px1, py1, px2, py2 = parent_box
+        key = str(parent.get("id"))
+        prior_path = asset_dir / Path(str(parent.get("src") or "")).name
+        prior = (merged_assets[key][1] if key in merged_assets else
+                 cv2.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None)
+        if (prior is not None and prior.ndim == 3 and prior.shape[2] == 4
+                and prior.shape[:2] == (py2 - py1, px2 - px1)
+                and _overlap_of_first(box, parent_box) == 1):
+            merged = prior.copy()
+            selected = component != 0
+            region = merged[y - py1:y + h - py1, x - px1:x + w - px1]
+            region[selected, :3] = source[y:y + h, x:x + w][selected]
+            region[selected, 3] = 255
+            total = pixels + (merged_assets[key][2] if key in merged_assets else 0)
+            merged_assets[key] = (parent, merged, total)
+            continue
+        identifier = f"initial_page_{page_index}_faded_support_{uuid4().hex[:10]}"
+        path = asset_dir / f"{identifier}.png"
+        if not cv2.imwrite(str(path), np.dstack((source[y:y + h, x:x + w], component))):
+            continue
+        item = {"id": identifier, "type": "image", "x": x, "y": y, "width": w, "height": h,
+                "rotation": 0, "zIndex": int(parent.get("zIndex") or 0) + 1,
+                "groupId": parent.get("groupId"),
+                "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1},
+                "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "objectization_audit",
+                             "layerRole": "container_detail", "qaIssue": "paleAssetGap", "parentId": parent.get("id"),
+                             "sourceMaskPixels": pixels}}
+        layout.setdefault("elements", []).append(item)
+        created.append(item)
+    for parent, merged, pixels in merged_assets.values():
+        path = asset_dir / f"faded_support_merged_{uuid4().hex[:12]}.png"
+        if not cv2.imwrite(str(path), merged):
+            continue
+        parent["src"] = f"/media/assets/{project_id}/{path.name}"
+        parent.setdefault("metadata", {}).update({"qaIssue": "paleAssetGap",
+                                                 "fadedSupportMergedPixels": pixels})
+        created.append(parent)
+    return created
+
+
+def _faded_local_support_mask(source: np.ndarray, preview: np.ndarray) -> np.ndarray:
+    border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+    page_color = np.median(border, axis=0).astype(np.int16)
+    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
+    difference = np.max(np.abs(source.astype(np.int16) - preview.astype(np.int16)), axis=2)
+    page_difference = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
+    candidate = np.uint8((hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 32)
+                           & np.all(preview >= 253, axis=2) & (difference >= 5)
+                           & (page_difference >= 6)) * 255
+    return cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+
+def _box_area(box: tuple[int, int, int, int]) -> int:
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def _overlap_of_first(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
+    intersection = max(0, min(first[2], second[2]) - max(first[0], second[0])) * max(
+        0, min(first[3], second[3]) - max(first[1], second[1]))
+    return intersection / max(1, _box_area(first))
 
 
 def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: dict,
@@ -605,7 +753,7 @@ def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: 
         crop = source[y1:y2, x1:x2].copy()
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         pale = (hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 32)
-        gap = missing[y1:y2, x1:x2]
+        gap = _coherent_text_support(crop, missing[y1:y2, x1:x2])
         if np.count_nonzero(gap) < max(80, round(area * 0.12)) or np.mean(pale) < 0.40:
             continue
         support = np.median(crop[pale], axis=0).astype(np.int16)
