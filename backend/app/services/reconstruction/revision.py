@@ -31,7 +31,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 2
+REVISION_STRATEGY_VERSION = 3
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:

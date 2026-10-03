@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, restore_image_owned_text
 from app.services.pptx import renderer
@@ -101,3 +102,47 @@ def test_uncertain_ocr_requires_complete_visible_image_owner() -> None:
     assert not is_uncertain_image_owned_text(text, layout)
     layout["elements"].remove(asset)
     assert not is_uncertain_image_owned_text(text, layout)
+
+
+@pytest.mark.parametrize("scale", [1, .5])
+def test_mixed_asset_restores_hidden_text_without_reintroducing_editable_glyphs(tmp_path: Path, monkeypatch, scale) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    project_id = "mixed-owner"
+    root = tmp_path / project_id
+    assets = root / "assets"
+    assets.mkdir(parents=True)
+    source = np.full((100, 200, 3), (210, 220, 235), np.uint8)
+    source[20:35, 15:65] = (15, 25, 35)
+    source[60:75, 115:165] = (15, 25, 35)
+    source_path = root / "source.png"
+    cv2.imwrite(str(source_path), source)
+    clean = np.full_like(source, (210, 220, 235))
+    rgb = cv2.resize(clean, (round(200*scale), round(100*scale)))
+    alpha = np.full(rgb.shape[:2], 255, np.uint8)
+    alpha[:3] = 0
+    old_path = assets / "module.png"
+    cv2.imwrite(str(old_path), np.dstack((rgb, alpha)))
+    old_bytes = old_path.read_bytes()
+    layout = {"elements": [
+        {"id": "module", "type": "image", "x": 0, "y": 0, "width": 200, "height": 100,
+         "src": f"/media/assets/{project_id}/module.png",
+         "metadata": {"textCleaned": True, "editableTextIds": ["hidden", "editable"]}},
+        {"id": "hidden", "type": "text", "text": "HIDDEN",
+         "metadata": {"suppressed": True, "ownedBy": "module", "rawOCRBBox": [10, 15, 180, 80]}},
+        {"id": "editable", "type": "text", "text": "EDITABLE",
+         "metadata": {"rawOCRBBox": [110, 55, 170, 80]}},
+    ]}
+
+    assert restore_image_owned_text(source_path, layout, assets, project_id) == ["module"]
+    updated = cv2.imread(str(assets / Path(layout["elements"][0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    source_scaled = cv2.resize(source, (rgb.shape[1], rgb.shape[0]))
+    assert np.array_equal(updated[round(20*scale):round(35*scale), round(15*scale):round(65*scale), :3],
+                          source_scaled[round(20*scale):round(35*scale), round(15*scale):round(65*scale)])
+    assert np.array_equal(updated[round(55*scale):round(80*scale), :, :3], rgb[round(55*scale):round(80*scale)])
+    assert np.array_equal(updated[:, :, 3], alpha)
+    assert old_path.read_bytes() == old_bytes
+    metadata = layout["elements"][0]["metadata"]
+    assert metadata["textCleaned"] is True
+    assert metadata["editableTextIds"] == ["editable"]
+    assert metadata["restoredImageOwnedTextIds"] == ["hidden"]
+    assert restore_image_owned_text(source_path, layout, assets, project_id) == []
