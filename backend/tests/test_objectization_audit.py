@@ -172,6 +172,29 @@ def test_audit_reports_large_visual_still_baked_into_background(tmp_path):
                for issue in report["issues"])
 
 
+def test_sparse_page_spanning_decoration_cannot_hide_in_background(tmp_path):
+    source = np.full((200, 400, 3), 255, np.uint8)
+    cv2.rectangle(source, (5, 5), (394, 194), (80, 120, 210), 3)
+    for name in ("source.png", "background.png", "preview.png"):
+        cv2.imwrite(str(tmp_path / name), source)
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+    assert report["backgroundResidualRegions"] == 1
+    assert 1000 < report["backgroundResidualPixels"] < source.shape[0] * source.shape[1] * 0.2
+    assert any(issue["problem"] == "assetBakedIntoBackground" for issue in report["issues"])
+
+
+def test_flat_page_surface_uses_surface_issue_not_baked_decoration(tmp_path):
+    source = np.full((200, 400, 3), (225, 230, 240), np.uint8)
+    for name in ("source.png", "background.png", "preview.png"):
+        cv2.imwrite(str(tmp_path / name), source)
+    report = audit_objectization(tmp_path / "source.png", tmp_path / "background.png",
+                                 tmp_path / "preview.png", {"elements": []})
+    assert report["backgroundResidualRegions"] == 0
+    assert report["backgroundResidualPixels"] == 0
+    assert any(issue["problem"] == "pageSurfaceBakedIntoBackground" for issue in report["issues"])
+
+
 def test_audit_does_not_call_visible_stripes_blank_assets(tmp_path):
     height, width = 240, 420
     source = np.full((height, width, 3), 255, np.uint8)

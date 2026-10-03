@@ -29,7 +29,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
               "paleAssetGapPixels": 0, "unownedPaleSupportPixels": 0, "textBoundPaleGapPixels": 0,
               "duplicatePlannedVisualPixels": 0, "pageSurfaceMismatchPixels": 0,
               "monolithicPageImageCount": 0,
-              "backgroundResidualRegions": 0, "ownerRegions": [], "issues": []}
+              "backgroundResidualRegions": 0, "backgroundResidualPixels": 0, "ownerRegions": [], "issues": []}
     if source is None or background is None or preview is None or source.shape != background.shape or source.shape != preview.shape:
         report["issues"].append({"problem": "objectizationAuditUnavailable"})
         return report
@@ -344,13 +344,22 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             report["blankVisualOwners"] += 1
             report["issues"].append({"problem": "blankVisualOwner", "elementId": item.get("id"), "bbox": list(box), "blankFraction": round(blank_fraction, 3)})
     background_foreground = np.uint8(np.max(np.abs(background.astype(np.int16) - 255), axis=2) >= 6) * 255
-    residual = _bounded_components(background_foreground, minimum, width, height)
+    # Page-spanning ribbons/frames can have a huge bounding box but very few
+    # painted pixels. The box-area limit used for missing local objects must
+    # not hide them from the baked-background audit. A truly flat page surface
+    # has its own owner/issue; exclude only pixels matching that surface.
+    if page_surface is not None:
+        matches_surface = np.max(np.abs(background.astype(np.int16) - page_surface.astype(np.int16)), axis=2) <= 3
+        background_foreground[matches_surface] = 0
+    residual = []
     background_count, _, background_stats, _ = cv2.connectedComponentsWithStats(background_foreground, 8)
     for index in range(1, background_count):
         x, y, w, h, pixels = [int(value) for value in background_stats[index]]
-        if pixels >= width * height * 0.62 and w * h < width * height * 0.95:
-            residual.append((x, y, w, h, pixels))
+        if pixels < minimum or ((w < 3 or h < 3) and not is_meaningful_stroke(w, h, pixels, width, height)):
+            continue
+        residual.append((x, y, w, h, pixels))
     report["backgroundResidualRegions"] = len(residual)
+    report["backgroundResidualPixels"] = sum(region[4] for region in residual)
     for x, y, w, h, pixels in residual:
         report["issues"].append({"problem": "assetBakedIntoBackground", "elementId": f"background_{x}_{y}", "bbox": [x, y, x + w, y + h], "pixelArea": pixels})
     if debug_path is not None:
