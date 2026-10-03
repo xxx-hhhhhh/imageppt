@@ -78,6 +78,17 @@ def test_nonoverlapping_text_does_not_mask_module_with_negative_slice(tmp_path):
     assert report["worsenedRegions"][0]["lostVisualPixels"] == 1200
 
 
+def test_unchanged_existing_pale_gap_does_not_reject_revision(tmp_path):
+    source = np.full((80, 120, 3), 249, np.uint8)
+    previous = np.full_like(source, 255)
+    for name, image in (("source", source), ("before", previous), ("after", previous)):
+        cv2.imwrite(str(tmp_path / f"{name}.png"), image)
+    layout = {"elements": [{"id": "plate", "type": "image", "x": 0, "y": 0, "width": 120, "height": 80}]}
+    report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 0, 0)
+    assert report["safe"] is True
+    assert report["worsenedRegions"] == []
+
+
 def test_source_glyph_changes_are_excluded_without_hiding_support(tmp_path):
     source = np.full((100, 160, 3), 255, np.uint8)
     source[20:80, 20:140] = 245

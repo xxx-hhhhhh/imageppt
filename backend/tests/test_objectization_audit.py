@@ -828,6 +828,47 @@ def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path,
     assert _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1) == []
 
 
+@pytest.mark.parametrize("scale", [1, 2, 4])
+def test_small_label_retains_its_pale_support_as_part_of_movable_asset(tmp_path, monkeypatch, scale):
+    from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
+
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    project_id = "small-support"
+    root = tmp_path / project_id
+    assets = root / "assets"
+    assets.mkdir(parents=True)
+    source = np.full((100 * scale, 200 * scale, 3), 255, np.uint8)
+    x, y, w, h = 30 * scale, 30 * scale, 16 * scale, 10 * scale
+    source[y:y+h, x:x+w] = (245, 247, 250)
+    source[y:y+6*scale, x:x+w] = (20, 80, 190)
+    source_path = root / "source.png"
+    cv2.imwrite(str(source_path), source)
+    alpha = np.zeros((h, w), np.uint8)
+    alpha[:6*scale] = 255
+    original = assets / "label.png"
+    cv2.imwrite(str(original), np.dstack((source[y:y+h, x:x+w], alpha)))
+    original_bytes = original.read_bytes()
+    layout = {"slide": {"width": 200*scale, "height": 100*scale}, "elements": [
+        {"id": "label", "type": "image", "x": x, "y": y, "width": w, "height": h,
+         "src": f"/media/assets/{project_id}/label.png", "zIndex": 1,
+         "metadata": {"layerRole": "residual", "reconstructionStrategySource": "residual_detection"}},
+    ]}
+    background, preview = root / "background.png", root / "preview.png"
+    cv2.imwrite(str(background), np.full_like(source, 255))
+    render_preview(background, layout, preview)
+    before = audit_objectization(source_path, background, preview, layout)
+    assert any(issue["problem"] == "paleAssetGap" for issue in before["issues"])
+    created = _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1)
+    assert len(created) == 1 and created[0]["id"] == "label"
+    assert len(layout["elements"]) == 1
+    assert original.read_bytes() == original_bytes
+    render_preview(background, layout, preview)
+    assert np.array_equal(cv2.imread(str(preview)), source)
+    after = audit_objectization(source_path, background, preview, layout)
+    assert not any(issue["problem"] == "paleAssetGap" for issue in after["issues"])
+    assert _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1) == []
+
+
 def test_expanded_textbox_does_not_hide_missing_support(tmp_path):
     from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
 

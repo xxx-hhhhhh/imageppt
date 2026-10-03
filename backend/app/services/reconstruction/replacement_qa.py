@@ -54,7 +54,7 @@ def check_replacement_regions(source_path: Path, before_path: Path, after_path: 
         old_pixels = before[y1:y2, x1:x2].astype(np.int16)
         new_pixels = after[y1:y2, x1:x2].astype(np.int16)
         # A pale plate can disappear without exceeding the average color-error gate.
-        lost = mask & (np.max(255 - original, axis=2) >= 6) & (np.max(np.abs(original - old_pixels), axis=2) <= 6) & (np.max(255 - new_pixels, axis=2) <= 3)
+        lost = mask & (np.max(255 - original, axis=2) >= 6) & (np.max(np.abs(original - old_pixels), axis=2) <= 6) & (np.max(255 - old_pixels, axis=2) > 3) & (np.max(255 - new_pixels, axis=2) <= 3)
         lost_pixels = int(np.count_nonzero(lost))
         checked += 1
         if (new_error > old_error + 8 and new_error > 25) or lost_pixels > max(20, np.count_nonzero(mask) * .02):

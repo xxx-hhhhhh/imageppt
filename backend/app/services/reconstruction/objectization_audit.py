@@ -129,7 +129,9 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
         gap = np.uint8(pale_missing[y1:y2, x1:x2] & (alpha <= 32)) * 255
         stable = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         pixels = int(np.count_nonzero(stable))
-        if pixels < max(250, round(area * 0.01)):
+        # Judge a local support relative to its owner. A fixed page-scale floor
+        # discards complete backplates of small labels and corner decorations.
+        if pixels < max(16, round(area * 0.01)):
             continue
         unowned_pale[y1:y2, x1:x2] |= stable != 0
         report["issues"].append({"problem": "paleAssetGap", "elementId": item.get("id"),
@@ -582,7 +584,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         owner_alpha = _visual_mask(owner, box, source_path)
         gap = np.uint8(missing[y1:y2, x1:x2] & (owner_alpha == 0)) * 255
         stable_gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-        if np.count_nonzero(stable_gap) < max(120, round(area * 0.004)):
+        if np.count_nonzero(stable_gap) < max(16, round(area * 0.004)):
             continue
         # A residual crop and its missing pale support are one visual module.
         # Fold the support into a staged copy of that same transparent asset so
@@ -595,7 +597,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                 selected = (gap != 0) & (merged[:, :, 3] <= 32)
                 merged[selected, :3] = source[y1:y2, x1:x2][selected]
                 merged[selected, 3] = 255
-                if np.count_nonzero(selected) >= max(120, round(area * 0.004)):
+                if np.count_nonzero(selected) >= max(16, round(area * 0.004)):
                     identifier = f"{asset_prefix or f'initial_page_{page_index}'}_pale_merged_{uuid4().hex[:10]}"
                     path = asset_dir / f"{identifier}.png"
                     if cv2.imwrite(str(path), merged):
