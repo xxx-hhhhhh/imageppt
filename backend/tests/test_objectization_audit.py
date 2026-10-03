@@ -744,7 +744,8 @@ def test_transparent_image_bbox_does_not_hide_missing_visual_content(tmp_path):
     assert any(issue["bbox"][0] <= 175 <= issue["bbox"][2] for issue in report["issues"] if issue["problem"] == "missingVisualObject")
 
 
-def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monkeypatch):
+@pytest.mark.parametrize("localized", [False, True])
+def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monkeypatch, localized):
     monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
     project_id = "a" * 32
     root = tmp_path / project_id
@@ -774,7 +775,15 @@ def test_initial_recovery_restores_pale_gaps_inside_movable_card(tmp_path, monke
     assert any(issue["problem"] == "paleAssetGap" and issue["elementId"] == "card"
                for issue in before_audit["issues"])
 
-    recovered = recover_initial_missing_regions(source_path, background, preview, layout, root / "assets", project_id, 1)
+    if localized:
+        from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
+        original_asset = (root / "assets" / "card.png").read_bytes()
+        recovered = len(_recover_pale_asset_gaps(source_path, preview, layout, root / "assets", project_id, 1,
+                                                target_ids={"card"}, asset_prefix="revision_2"))
+        render_preview(background, layout, preview)
+        assert (root / "assets" / "card.png").read_bytes() == original_asset
+    else:
+        recovered = recover_initial_missing_regions(source_path, background, preview, layout, root / "assets", project_id, 1)
 
     assert recovered >= 1
     after = cv2.imread(str(preview))
@@ -951,9 +960,11 @@ def test_expanded_textbox_does_not_hide_missing_support(tmp_path):
     assert cv2.imwrite(str(preview_path), preview)
     created = _recover_pale_asset_gaps(source_path, preview_path, layout, assets, "fixture", 1,
                                       target_ids={"plate"}, asset_prefix="revision_1")
-    assert len(created) == 1
+    assert len(created) == 2
     assert created[0]["id"] == "plate"
-    assert len(layout["elements"]) == 2
+    assert created[1]["metadata"]["editableTextIds"] == ["label"]
+    assert created[1]["src"].startswith("/media/assets/fixture/revision_1_text_support_")
+    assert len(layout["elements"]) == 3
     assert original.read_bytes() == original_bytes
     repaired = cv2.imread(str(assets / Path(created[0]["src"]).name), cv2.IMREAD_UNCHANGED)
     assert repaired[10, 10, 3] == 255
@@ -978,10 +989,53 @@ def test_text_support_asset_erases_original_glyphs(tmp_path):
     created = _recover_text_support_gaps(source, missing, layout, asset_dir, "fixture", 1)
 
     assert len(created) == 1
-    repaired = cv2.imread(str(asset_dir / "initial_page_1_text_support_001.png"), cv2.IMREAD_UNCHANGED)
+    repaired = cv2.imread(str(asset_dir / Path(created[0]["src"]).name), cv2.IMREAD_UNCHANGED)
     assert repaired is not None and repaired.shape[2] == 4
     assert np.min(repaired[:, :, :3]) > 200
     assert created[0]["metadata"]["editableTextIds"] == ["label"]
+
+
+def test_text_bound_support_is_reported_and_repaired_without_surviving_image(tmp_path):
+    from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
+
+    source = np.full((160, 360, 3), 255, np.uint8)
+    source[35:85, 20:140] = (243, 246, 249)
+    source[35:85, 210:330] = (244, 247, 250)
+    src, bg, preview = [tmp_path / name for name in ("source.png", "background.png", "preview.png")]
+    cv2.imwrite(str(src), source)
+    cv2.imwrite(str(bg), np.full_like(source, 255))
+    cv2.imwrite(str(preview), np.full_like(source, 255))
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    layout = {"elements": [{"id": key, "type": "text", "text": "Label", "x": x, "y": 35,
+                            "width": 120, "height": 50, "zIndex": 20,
+                            "metadata": {"rawOCRBBox": [x, 35, x + 120, 85]}}
+                           for key, x in (("left", 20), ("right", 210))]}
+    report = audit_objectization(src, bg, preview, layout)
+    assert {i["elementId"] for i in report["issues"] if i.get("supportRole") == "text_backplate"} == {"left", "right"}
+    created = _recover_pale_asset_gaps(src, preview, layout, assets, "fixture", 1,
+                                     target_ids={"left"}, asset_prefix="revision_1")
+    assert len(created) == 1
+    assert created[0]["metadata"]["editableTextIds"] == ["left"]
+    first_path = assets / Path(created[0]["src"]).name
+    first_bytes = first_path.read_bytes()
+    # A second attempt may stage a new candidate, but cannot overwrite the
+    # first candidate or another module's file while the scene is uncommitted.
+    again = _recover_pale_asset_gaps(src, preview, layout, assets, "fixture", 1,
+                                   target_ids={"left"}, asset_prefix="revision_2")
+    assert len(again) == 1 and again[0]["src"] != created[0]["src"]
+    assert first_path.read_bytes() == first_bytes
+    assert all(i["type"] == "text" for i in layout["elements"][:2])
+
+
+def test_diffuse_page_tint_is_not_recovered_as_text_backplate(tmp_path):
+    from app.services.reconstruction.objectization_audit import _recover_text_support_gaps
+
+    source = np.full((120, 240, 3), 248, np.uint8)
+    layout = {"elements": [{"id": "title", "type": "text", "x": 40, "y": 30,
+                            "width": 130, "height": 50}]}
+    assert _recover_text_support_gaps(source, np.ones(source.shape[:2], bool), layout,
+                                     tmp_path, "fixture", 1) == []
 
 
 def test_revision_repairs_only_missing_local_plate(tmp_path):

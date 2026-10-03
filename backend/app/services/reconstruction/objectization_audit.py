@@ -110,8 +110,13 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
             continue
         x1, y1, x2, y2 = box
         local_gap = pale_missing[y1:y2, x1:x2] & visible_pale_support[y1:y2, x1:x2]
-        text_bound_pale[y1:y2, x1:x2] |= _coherent_text_support(
-            source[y1:y2, x1:x2], local_gap)
+        support_gap = _coherent_text_support(source[y1:y2, x1:x2], local_gap)
+        text_bound_pale[y1:y2, x1:x2] |= support_gap
+        support_pixels = int(np.count_nonzero(support_gap))
+        if support_pixels >= 80:
+            report["issues"].append({"problem": "paleAssetGap", "elementId": item.get("id"),
+                                     "supportRole": "text_backplate", "bbox": list(box),
+                                     "pixelArea": support_pixels})
         pale_missing[y1:y2, x1:x2] = False
     report["textBoundPaleGapPixels"] = int(np.count_nonzero(text_bound_pale))
     unowned_pale = np.zeros((height, width), np.bool_)
@@ -655,8 +660,8 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         missing[y1:y2, x1:x2][gap != 0] = False
     created.extend(_recover_faded_local_supports(source_path, source, preview, layout,
                                                  asset_dir, project_id, page_index, target_ids))
-    if target_ids is None:
-        created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index))
+    created.extend(_recover_text_support_gaps(source, text_support_gaps, layout, asset_dir, project_id, page_index,
+                                               target_ids=target_ids, asset_prefix=asset_prefix))
     return created
 
 
@@ -765,9 +770,13 @@ def _overlap_of_first(first: tuple[int, int, int, int], second: tuple[int, int, 
 
 
 def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: dict,
-                               asset_dir: Path, project_id: str, page_index: int) -> list[dict]:
+                               asset_dir: Path, project_id: str, page_index: int,
+                               *, target_ids: set[str] | None = None,
+                               asset_prefix: str | None = None) -> list[dict]:
     """Restore pale support beneath editable text without duplicating source glyphs."""
     height, width = source.shape[:2]
+    page_color = np.median(np.concatenate((source[0], source[-1], source[:, 0], source[:, -1])), axis=0)
+    local_support = np.max(np.abs(source.astype(np.float32) - page_color), axis=2) >= 3
     images = [item for item in layout.get("elements", []) if item.get("type") == "image" and
               not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
     created: list[dict] = []
@@ -784,12 +793,19 @@ def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: 
         if area < 100 or area > width * height * 0.15:
             continue
         parents = [item for item in images if _box(item, width, height) and _overlaps(box, _box(item, width, height))]
+        if target_ids is not None and str(text.get("id")) not in target_ids:
+            parents = [item for item in parents if str(item.get("id")) in target_ids]
+            if not parents:
+                continue
         if not parents:
-            continue
+            # A whole local backplate may have disappeared. The text owner
+            # still binds the new support to the module without requiring
+            # an already surviving image as a prerequisite for recovery.
+            parents = [text]
         crop = source[y1:y2, x1:x2].copy()
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         pale = (hsv[:, :, 2] >= 225) & (hsv[:, :, 1] <= 32)
-        gap = _coherent_text_support(crop, missing[y1:y2, x1:x2])
+        gap = _coherent_text_support(crop, missing[y1:y2, x1:x2] & local_support[y1:y2, x1:x2])
         if np.count_nonzero(gap) < max(80, round(area * 0.12)) or np.mean(pale) < 0.40:
             continue
         support = np.median(crop[pale], axis=0).astype(np.int16)
@@ -804,7 +820,7 @@ def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: 
         cleaned = cv2.inpaint(crop, ink, 3, cv2.INPAINT_TELEA) if np.any(ink) else crop
         alpha = np.uint8(pale | (ink != 0)) * 255
         alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-        identifier = f"initial_page_{page_index}_text_support_{len(created) + 1:03d}"
+        identifier = f"{asset_prefix or f'initial_page_{page_index}'}_text_support_{uuid4().hex[:10]}"
         path = asset_dir / f"{identifier}.png"
         if not cv2.imwrite(str(path), np.dstack((cleaned, alpha))):
             continue

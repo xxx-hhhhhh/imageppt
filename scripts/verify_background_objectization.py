@@ -16,6 +16,7 @@ from playwright.sync_api import expect, sync_playwright
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("project_id")
+    parser.add_argument("--asset-id", help="Verify a specific movable image, such as a recovered badge")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / "outputs" / args.project_id
     layout = json.loads((root / "slides/page_1.json").read_text(encoding="utf-8"))
@@ -23,9 +24,9 @@ def main():
     source = root / "source.png"
     source_url = "data:image/png;base64," + base64.b64encode(source.read_bytes()).decode()
     assets = [item for item in layout["elements"] if item.get("type") == "image"
-              and item.get("metadata", {}).get("reconstructionStrategySource") == "background_objectization"
+              and (item.get("id") == args.asset_id if args.asset_id else item.get("metadata", {}).get("reconstructionStrategySource") == "background_objectization")
               and not any(item.get("metadata", {}).get(k) for k in ("suppressed", "suppressRender", "ownedBy"))]
-    assert assets, "Project has no extracted background objects"
+    assert assets, "Requested movable image was not found"
     target = max(assets, key=lambda item: item["width"] * item["height"])
 
     def api(route):
@@ -59,8 +60,8 @@ def main():
         before = node.bounding_box()
         assert before
         # The lower edge of the recovered ribbon avoids overlaid text labels.
-        x = before["x"] + before["width"] * .4
-        y = before["y"] + before["height"] * .9
+        x = before["x"] + before["width"] * (.85 if args.asset_id else .4)
+        y = before["y"] + before["height"] * (.5 if args.asset_id else .9)
         page.mouse.move(x, y)
         page.mouse.down()
         page.mouse.move(x + 18, y - 20, steps=8)

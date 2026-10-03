@@ -15,6 +15,31 @@ from app.services.visual_qa.analyzer import render_preview
 from backend.tests.fixtures.generate_fixtures import generate
 
 
+def test_neutral_badge_survives_editable_symbol_erasure(tmp_path):
+    source = np.full((140, 240, 3), 255, np.uint8)
+    cv2.circle(source, (100, 70), 22, (110, 110, 110), -1, cv2.LINE_AA)
+    cv2.line(source, (90, 60), (110, 80), (255, 255, 255), 3, cv2.LINE_AA)
+    cv2.line(source, (110, 60), (90, 80), (255, 255, 255), 3, cv2.LINE_AA)
+    source_path, background = tmp_path / "source.png", tmp_path / "background.png"
+    assets = tmp_path / "assets"
+    cv2.imwrite(str(source_path), source)
+    layout = {"slide": {"width": 240, "height": 140}, "elements": [
+        {"id": "symbol", "type": "text", "text": "x", "x": 88, "y": 58, "width": 24, "height": 24,
+         "zIndex": 20, "style": {"color": "#FFFFFF", "fontSize": 24},
+         "metadata": {"rawOCRBBox": [88, 58, 112, 82]}}]}
+    objectize_on_white(source_path, background, layout, assets, "fixture", 1)
+    badges = [e for e in layout["elements"] if e.get("metadata", {}).get("reconstructionStrategySource") == "round_contour"]
+    assert len(badges) == 1
+    for item in layout["elements"]:
+        if item.get("type") == "image":
+            item["src"] = str(assets / Path(item["src"]).name)
+    erase_editable_text_sources(background, layout, project_root=tmp_path)
+    badge = cv2.imread(badges[0]["src"], cv2.IMREAD_UNCHANGED)
+    assert badge[0, 0, 3] == 0
+    assert np.max(np.abs(badge[badge.shape[0] // 2, badge.shape[1] // 2, :3].astype(int) - 110)) < 25
+    assert layout["elements"][0]["type"] == "text"
+
+
 def test_dark_flat_page_is_a_movable_shape_over_white_base(tmp_path):
     source = np.full((180, 300, 3), (52, 31, 21), np.uint8)
     cv2.putText(source, "Dark", (35, 75), cv2.FONT_HERSHEY_SIMPLEX, 1, (245, 245, 245), 2)

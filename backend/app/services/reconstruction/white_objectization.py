@@ -223,6 +223,23 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
     saturated = np.uint8((hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 35)) * 255
     found, _ = cv2.findContours(saturated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = list(found)
+    # Neutral badges are just as meaningful as colored badges. Claim their
+    # complete contour before OCR erasure can remove most of a small backing
+    # disk along with its white symbol. Closed letter contours are rejected
+    # by the same OCR geometry check below.
+    page_color = _border_color(source)
+    contrast = np.max(np.abs(source.astype(np.int16) - page_color), axis=2)
+    neutral = np.uint8((hsv[:, :, 1] < 55) & (hsv[:, :, 2] < 220) & (contrast >= 30)) * 255
+    neutral_contours, _ = cv2.findContours(neutral, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in neutral_contours:
+        nx, ny, nw, nh = cv2.boundingRect(contour)
+        disk = np.zeros((nh, nw), np.uint8)
+        cv2.ellipse(disk, (nw // 2, nh // 2), (nw // 2, nh // 2), 0, 0, 360, 255, -1)
+        silhouette = np.zeros_like(disk)
+        cv2.drawContours(silhouette, [contour - (nx, ny)], -1, 255, -1)
+        union = np.count_nonzero((disk > 0) | (silhouette > 0))
+        if union and np.count_nonzero((disk > 0) & (silhouette > 0)) / union >= .86:
+            contours.append(contour)
     if dense_visual_artwork(source):
         contours.extend(_round_contours_on_texture(source))
     created = 0

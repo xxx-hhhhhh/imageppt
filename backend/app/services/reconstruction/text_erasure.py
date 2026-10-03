@@ -132,7 +132,8 @@ def erase_editable_text_sources(
                 if eligible:
                     local_alpha[(line_mask > 0) & holes] = 255
                 cleaned_rgb = _clean_residual_surface(cleaned_rgb, local_alpha, line_mask, complex_cleaner,
-                                                      glyph_color=glyph_color)
+                                                      glyph_color=glyph_color,
+                                                      bounded_support=meta.get("reconstructionStrategySource") == "round_contour")
             original[:, :, :3] = cleaned_rgb
             # Close glyph-sized holes inside the existing support without
             # expanding its outline into neighboring white space. Only pixels
@@ -168,7 +169,7 @@ def erase_editable_text_sources(
 
 def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray,
                             complex_cleaner: ComplexTextCleaner | None,
-                            *, glyph_color: str | None = None) -> np.ndarray:
+                            *, glyph_color: str | None = None, bounded_support: bool = False) -> np.ndarray:
     """Prefer a flat local plate color when nearby artwork would bleed inward."""
     local = (mask > 0) & (alpha > 32)
     color = str(glyph_color or "").lstrip("#")
@@ -185,12 +186,12 @@ def _clean_residual_surface(rgb: np.ndarray, alpha: np.ndarray, mask: np.ndarray
             glyphs = np.zeros(candidate.shape, np.uint8)
             _, _, box_width, box_height = cv2.boundingRect(mask)
             max_component = max(20, min(round(box_height * box_height * 2),
-                                        round(box_width * box_height * 0.12)))
+                                        round(box_width * box_height * (0.45 if bounded_support else 0.12))))
             for index in range(1, count):
                 if 2 <= int(stats[index, cv2.CC_STAT_AREA]) <= max_component:
                     glyphs[labels == index] = 255
             background_pixels = source[local & (glyphs == 0)]
-            if (np.count_nonzero(glyphs) >= 8 and np.count_nonzero(glyphs) <= np.count_nonzero(local) * 0.38
+            if (np.count_nonzero(glyphs) >= 8 and np.count_nonzero(glyphs) <= np.count_nonzero(local) * (0.48 if bounded_support else 0.38)
                     and len(background_pixels) >= 30
                     and np.max(np.abs(np.median(background_pixels, axis=0) - glyph_bgr)) >= 45):
                 glyphs = cv2.dilate(glyphs, np.ones((3, 3), np.uint8), iterations=1)
