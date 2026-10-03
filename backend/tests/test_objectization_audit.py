@@ -585,6 +585,39 @@ def test_missing_visual_repair_masks_only_lost_pixels_not_neighboring_text(tmp_p
     assert np.count_nonzero(cutout[:, :, 3]) == item["metadata"]["sourceMaskPixels"]
 
 
+def test_visual_recovery_does_not_restore_antialiased_editable_text(tmp_path):
+    source = np.full((100, 240, 3), 255, np.uint8)
+    ink = (90, 30, 10)
+    cv2.putText(source, "LABEL", (25, 59), cv2.FONT_HERSHEY_SIMPLEX, 0.9, ink, 2, cv2.LINE_AA)
+    # A separate visual inside the OCR rectangle must still be recovered.
+    cv2.rectangle(source, (175, 42), (194, 60), (35, 170, 65), -1)
+    cv2.imwrite(str(tmp_path / "source.png"), source)
+    cv2.imwrite(str(tmp_path / "preview.png"), np.full_like(source, 255))
+    layout = {"elements": [{"id": "label", "type": "text", "text": "LABEL",
+                            "x": 20, "y": 30, "width": 185, "height": 35,
+                            "style": {"color": "#0A1E5A"},
+                            "metadata": {"rawOCRBBox": [20, 30, 205, 65]}}]}
+    created = repair_missing_regions(tmp_path / "source.png", layout,
+                                     [{"problem": "missingVisualObject", "bbox": [10, 20, 215, 75]}],
+                                     tmp_path / "assets", "test", 0, preview_path=tmp_path / "preview.png")
+    assert len(created) == 1
+    assert created[0]["x"] == 175 and created[0]["width"] == 20
+    assert created[0]["metadata"]["sourceMaskPixels"] == 380
+
+
+def test_glyph_blend_mask_preserves_disconnected_same_hue_decoration_and_plate():
+    from app.services.reconstruction.objectization_audit import _connected_glyph_blends
+
+    patch = np.full((60, 180, 3), (250, 245, 240), np.uint8)
+    ink = np.array([90, 30, 10], np.int16)
+    cv2.putText(patch, "ABC", (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, tuple(int(v) for v in ink), 2, cv2.LINE_AA)
+    patch[20:35, 140:155] = (170, 137, 125)  # Similar hue, separate decoration.
+    mask = _connected_glyph_blends(patch, ink)
+    assert np.count_nonzero(mask) > 100
+    assert not np.any(mask[20:35, 140:155])
+    assert not np.any(mask[:10, 100:])
+
+
 def test_small_font_baseline_shift_is_not_a_missing_visual(tmp_path):
     source = np.full((90, 180, 3), 255, np.uint8)
     preview = source.copy()

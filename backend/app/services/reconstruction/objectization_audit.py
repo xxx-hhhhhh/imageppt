@@ -441,6 +441,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                         try:
                             bgr = np.frombuffer(bytes.fromhex(text_color)[::-1], dtype=np.uint8).astype(np.int16)
                             distinct_visual &= np.max(np.abs(patch.astype(np.int16) - bgr), axis=2) > 90
+                            distinct_visual &= ~_connected_glyph_blends(patch, bgr)
                         except ValueError:
                             pass
                     mask[top:bottom, left:right][~distinct_visual] = 0
@@ -459,6 +460,30 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
         layout.setdefault("elements", []).append(common)
         created.append(common)
     return created
+
+
+def _connected_glyph_blends(patch: np.ndarray, ink: np.ndarray) -> np.ndarray:
+    """Exclude antialiased ink connected to text, without removing its plate.
+
+    Source glyph edges blend with the local support color and can be far from
+    the estimated ink color. A color corridor alone could also erase a pale
+    blue plate, so only components connected to an actual ink seed qualify.
+    """
+    pixels = patch.astype(np.float32)
+    surface = np.median(pixels.reshape(-1, 3), axis=0)
+    direction = ink.astype(np.float32) - surface
+    length_squared = float(np.dot(direction, direction))
+    if length_squared < 1600:
+        return np.zeros(patch.shape[:2], np.bool_)
+    fraction = np.sum((pixels - surface) * direction, axis=2) / length_squared
+    blended = surface + fraction[:, :, None] * direction
+    corridor = ((fraction >= 0.08) & (fraction <= 1.15)
+                & (np.max(np.abs(pixels - blended), axis=2) <= 18))
+    seeds = np.max(np.abs(pixels - ink), axis=2) <= 38
+    count, labels = cv2.connectedComponents(np.uint8(corridor), 8)
+    seeded_labels = np.unique(labels[seeds & corridor])
+    seeded_labels = seeded_labels[seeded_labels != 0]
+    return np.isin(labels, seeded_labels) if count > 1 else np.zeros(patch.shape[:2], np.bool_)
 
 
 def recover_initial_missing_regions(source_path: Path, background_path: Path, preview_path: Path,
