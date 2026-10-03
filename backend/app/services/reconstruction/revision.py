@@ -15,6 +15,7 @@ from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
 from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, preserve_uncertain_text_as_visual, restore_image_owned_text
+from app.services.reconstruction.background_objects import objectize_background_regions
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
@@ -31,7 +32,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 8
+REVISION_STRATEGY_VERSION = 11
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -284,7 +285,13 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id and not (by_id[str(issue["elementId"])].get("metadata") or {}).get("backgroundSeparated") and _background_contains_original(source, candidate_bg, by_id[str(issue["elementId"])])]
     if residual_assets:
         inpainted_regions += separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
-    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list) and not any(item.get("type") == "image" and _item_overlaps_box(item, issue["bbox"]) for item in protected_visuals(baseline))][:4]
+    background_objects = objectize_background_regions(
+        source, candidate_bg, candidate,
+        [issue for issue in target_issues if issue["problem"] == "assetBakedIntoBackground"],
+        root / "assets", project_id, page, round_number,
+    )
+    changed_ids.update(item["id"] for item in background_objects)
+    baked = [issue for issue in target_issues if issue["problem"] in {"brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list) and not any(item.get("type") == "image" and _item_overlaps_box(item, issue["bbox"]) for item in protected_visuals(baseline))][:4]
     if baked:
         modules = []
         width, height = float(candidate["slide"]["width"]), float(candidate["slide"]["height"])
@@ -400,7 +407,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                                 target_boxes, source_path=source)
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
-    if _visual_retention_regressed(baseline_audit, candidate_audit):
+    previous_pixels = cv2.imread(str(preview), cv2.IMREAD_COLOR)
+    candidate_pixels = cv2.imread(str(candidate_preview), cv2.IMREAD_COLOR)
+    identical_preview = (previous_pixels is not None and candidate_pixels is not None
+                         and np.array_equal(previous_pixels, candidate_pixels))
+    # Objectization changes which local boxes QA samples. A larger sample can
+    # expose pre-existing gaps even when every rendered pixel is unchanged;
+    # that is not new visual loss. All other integrity gates still apply.
+    if not identical_preview and _visual_retention_regressed(baseline_audit, candidate_audit):
         integrity["integrityErrors"].append("source_visual_loss")
     ghosting_before = count_text_ghosting(source, background, baseline)
     ghosting_after = count_text_ghosting(source, candidate_bg, candidate)
@@ -473,6 +487,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
         **reported_integrity, "inpaintedRegions": inpainted_regions if accepted else 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": not accepted,
         "discardedCandidateAssets": 0,
+        "backgroundObjectizedRegions": len(background_objects) if accepted else 0,
     }
     if accepted:
         needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)

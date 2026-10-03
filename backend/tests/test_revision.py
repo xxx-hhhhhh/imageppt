@@ -56,6 +56,50 @@ def test_revision_restores_missing_editable_text_without_full_analysis(tmp_path:
     assert store.get_slide(project_id, 1)["elements"][0]["metadata"].get("suppressRender") is None
 
 
+@pytest.mark.parametrize("expanded_audit_scope", [False, True])
+def test_revision_objectizes_sparse_background_without_reanalyzing_page(tmp_path: Path, monkeypatch, expanded_audit_scope) -> None:
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", tmp_path)
+    store, project_id, layout = _project(tmp_path, suppressed=False)
+    root = tmp_path / project_id
+    source = cv2.imread(str(root / "source.png"))
+    background = np.full_like(source, 255)
+    for image in (source, background):
+        cv2.rectangle(image, (4, 4), (235, 95), (60, 110, 190), 3)
+    cv2.imwrite(str(root / "source.png"), source)
+    cv2.imwrite(str(root / "backgrounds/page_1.png"), background)
+    render_preview(root / "backgrounds/page_1.png", layout, root / "reconstructed_preview.png")
+    before = cv2.imread(str(root / "reconstructed_preview.png"))
+    score = run_visual_qa(root / "source.png", root / "reconstructed_preview.png", root, layout)
+    score.update({"detectedTextCount": 1, "editableTextCoverage": 1})
+    (root / "visual_score.json").write_text(json.dumps(score), encoding="utf-8")
+    monkeypatch.setattr(revision.AIReconstructionPlanner, "apply", lambda *a, **k: pytest.fail("Must use local residual extraction"))
+    if expanded_audit_scope:
+        original_audit = revision.audit_objectization
+
+        def audit_with_expanded_scope(source, background, *args, **kwargs):
+            report = original_audit(source, background, *args, **kwargs)
+            if background.name == "background.png":
+                report["paleAssetGapPixels"] += 1000
+            return report
+
+        monkeypatch.setattr(revision, "audit_objectization", audit_with_expanded_scope)
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"]
+    assert result["backgroundObjectizedRegions"] > 0
+    assert result["missingAssetCount"] == 0
+    assert np.array_equal(cv2.imread(str(root / "reconstructed_preview.png")), before)
+    assert np.all(cv2.imread(str(root / "backgrounds/page_1.png")) == 255)
+    saved = store.get_slide(project_id, 1)
+    assert saved["elements"][0] == layout["elements"][0]
+    audit = audit_objectization(root / "source.png", root / "backgrounds/page_1.png", root / "reconstructed_preview.png", saved)
+    assert audit["backgroundResidualRegions"] == 0
+    second = revise_problem_regions(store, project_id, 1)
+    assert second["rollbackTriggered"]
+    assert np.array_equal(cv2.imread(str(root / "reconstructed_preview.png")), before)
+
+
 def test_revision_preserves_low_confidence_ocr_inside_whole_visual_asset(tmp_path: Path) -> None:
     store, project_id, layout = _project(tmp_path, suppressed=True)
     root = tmp_path / project_id
