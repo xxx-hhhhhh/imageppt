@@ -14,7 +14,7 @@ from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
 from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
-from app.services.reconstruction.asset_ownership import is_badge_owned_text, restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, restore_image_owned_text
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
@@ -31,7 +31,7 @@ OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "larg
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 1
+REVISION_STRATEGY_VERSION = 2
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -116,7 +116,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
     issues_before = [issue for issue in issues_before if not (
         issue.get("problem") == "missingEditableText"
-        and is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
+        and (is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
+             or is_uncertain_image_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline))
     )]
     priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1, "unsupportedNativeShape": 1, "paleAssetGap": 1,
                 "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
@@ -436,6 +437,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     report = {
         "revisionRound": round_number, "accepted": accepted, "strategyVersion": REVISION_STRATEGY_VERSION,
         "localizedAssetCount": localized,
+        "imageOwnedUncertainTextIds": [item["id"] for item in candidate.get("elements", []) if is_uncertain_image_owned_text(item, candidate)],
         "targetedIssues": target_issues,
         "issuesBefore": issues_before, "issuesAfter": issues_after if accepted else issues_before,
         "improvedRegions": improved if accepted else [], "visualBefore": float(score_before.get("overall") or 0),
@@ -595,7 +597,7 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
         if item.get("type") != "text" or not str(item.get("text") or "").strip() or item.get("role") in {"logo", "decorative_text"}:
             continue
         item_id = item["id"]
-        if is_badge_owned_text(item, layout):
+        if is_badge_owned_text(item, layout) or is_uncertain_image_owned_text(item, layout):
             continue
         if meta.get("duplicateSuppressed") or str(meta.get("ownedBy") or "").startswith("text_"):
             continue

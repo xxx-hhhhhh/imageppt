@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.services.reconstruction.asset_ownership import is_badge_owned_text, restore_image_owned_text
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, restore_image_owned_text
 from app.services.pptx import renderer
 
 
@@ -77,3 +77,27 @@ def test_generic_image_does_not_claim_suppressed_normal_text_as_badge() -> None:
     assert not is_badge_owned_text(text, layout)
     layout["elements"][0]["metadata"]["wholeBadgeAsset"] = True
     assert is_badge_owned_text(text, layout)
+
+
+def test_uncertain_ocr_requires_complete_visible_image_owner() -> None:
+    text = {"id": "ocr", "type": "text", "text": "noise", "confidence": .3,
+            "metadata": {"suppressed": True, "ownedBy": "photo", "rawOCRBBox": [10, 10, 40, 30]}}
+    asset = {"id": "photo", "type": "image", "x": 0, "y": 0, "width": 80, "height": 60,
+             "metadata": {"preserveWholeAsset": True}}
+    layout = {"elements": [text, asset]}
+    assert is_uncertain_image_owned_text(text, layout)
+    text["confidence"] = .9
+    assert not is_uncertain_image_owned_text(text, layout)
+    text.pop("confidence")
+    assert not is_uncertain_image_owned_text(text, layout)
+    text["confidence"] = .3
+    asset["metadata"]["editableTextIds"] = ["ocr"]
+    assert not is_uncertain_image_owned_text(text, layout)
+    asset["metadata"].pop("editableTextIds")
+    asset["metadata"]["suppressed"] = True
+    assert not is_uncertain_image_owned_text(text, layout)
+    asset["metadata"].pop("suppressed")
+    text["metadata"]["rawOCRBBox"] = [70, 50, 100, 80]
+    assert not is_uncertain_image_owned_text(text, layout)
+    layout["elements"].remove(asset)
+    assert not is_uncertain_image_owned_text(text, layout)

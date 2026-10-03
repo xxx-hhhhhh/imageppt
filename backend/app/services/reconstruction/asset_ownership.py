@@ -31,6 +31,32 @@ def is_badge_owned_text(item: dict, layout: dict) -> bool:
     return False
 
 
+def is_uncertain_image_owned_text(item: dict, layout: dict) -> bool:
+    """Honor the planner's image fallback for OCR below its text confidence gate.
+
+    This never claims unowned/missing text or text already erased from an asset.
+    Reliable ordinary labels continue to require an editable owner.
+    """
+    if item.get("type") != "text" or not _hidden(item):
+        return False
+    confidence = item.get("confidence", item.get("finalConfidence"))
+    if confidence is None or not 0 <= float(confidence) < 0.5:
+        return False
+    owner_id = str((item.get("metadata") or {}).get("ownedBy") or "")
+    owner = next((asset for asset in layout.get("elements", [])
+                  if str(asset.get("id")) == owner_id and asset.get("type") == "image" and not _hidden(asset)), None)
+    if owner is None:
+        return False
+    metadata = owner.get("metadata") or {}
+    if not metadata.get("preserveWholeAsset") or str(item.get("id")) in {str(value) for value in metadata.get("editableTextIds") or []}:
+        return False
+    x1, y1, x2, y2 = _text_box(item)
+    left, top, right, bottom = _image_box(owner)
+    area = max(0, x2 - x1) * max(0, y2 - y1)
+    intersection = max(0, min(x2, right) - max(x1, left)) * max(0, min(y2, bottom) - max(y1, top))
+    return area > 0 and intersection / area >= 0.75
+
+
 def restore_image_owned_text(source_path: Path, layout: dict, asset_dir: Path,
                              project_id: str, *, prefix: str = "owned_text",
                              target_boxes: list[list[float]] | None = None) -> list[str]:

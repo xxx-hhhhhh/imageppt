@@ -56,6 +56,33 @@ def test_revision_restores_missing_editable_text_without_full_analysis(tmp_path:
     assert store.get_slide(project_id, 1)["elements"][0]["metadata"].get("suppressRender") is None
 
 
+def test_revision_preserves_low_confidence_ocr_inside_whole_visual_asset(tmp_path: Path) -> None:
+    store, project_id, layout = _project(tmp_path, suppressed=True)
+    root = tmp_path / project_id
+    assets = root / "assets"
+    assets.mkdir(exist_ok=True)
+    asset = assets / "visual.png"
+    asset.write_bytes((root / "source.png").read_bytes())
+    layout["elements"][0]["confidence"] = .3
+    layout["elements"][0]["metadata"]["ownedBy"] = "visual"
+    layout["elements"].append({"id": "visual", "type": "image", "x": 0, "y": 0,
+                               "width": 240, "height": 100, "src": str(asset), "zIndex": 1,
+                               "metadata": {"preserveWholeAsset": True}})
+    store.save_slide(project_id, 1, layout)
+    render_preview(root / "backgrounds/page_1.png", layout, root / "reconstructed_preview.png")
+    original_preview = (root / "reconstructed_preview.png").read_bytes()
+    original_asset = asset.read_bytes()
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["imageOwnedUncertainTextIds"] == ["text_001"]
+    assert not any(issue["problem"] == "missingEditableText" for issue in result["issuesBefore"])
+    assert result["missingAssetCount"] == 0
+    assert store.get_slide(project_id, 1)["elements"][0]["metadata"]["ownedBy"] == "visual"
+    assert asset.read_bytes() == original_asset
+    assert (root / "reconstructed_preview.png").read_bytes() == original_preview
+
+
 @pytest.mark.parametrize("strategy_version", [None, revision.REVISION_STRATEGY_VERSION])
 def test_failed_regions_retry_only_after_repair_strategy_changes(tmp_path: Path, strategy_version) -> None:
     store, project_id, baseline = _project(tmp_path, suppressed=True)
