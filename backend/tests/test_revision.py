@@ -70,6 +70,22 @@ def test_revision_rolls_back_when_new_text_ghosting_appears(tmp_path: Path, monk
     assert (tmp_path / project_id / "reconstructed_preview.png").read_bytes() == original_preview
 
 
+def test_revision_rolls_back_local_visual_loss_even_if_text_coverage_improves(tmp_path: Path, monkeypatch) -> None:
+    store, project_id, baseline = _project(tmp_path, suppressed=True)
+    original_preview = (tmp_path / project_id / "reconstructed_preview.png").read_bytes()
+    monkeypatch.setattr(revision, "check_replacement_regions", lambda *args, **kwargs: {
+        "safe": False, "worsenedRegions": [{"elementId": "plate", "lostVisualPixels": 100}],
+    })
+
+    result = revise_problem_regions(store, project_id, 1)
+
+    assert result["accepted"] is False
+    assert result["rollbackTriggered"] is True
+    assert "local_visual_replacement_regressed" in result["integrityErrors"]
+    assert store.get_slide(project_id, 1) == baseline
+    assert (tmp_path / project_id / "reconstructed_preview.png").read_bytes() == original_preview
+
+
 def test_revision_keeps_previous_page_when_metrics_do_not_improve(tmp_path: Path) -> None:
     store, project_id, original = _project(tmp_path, suppressed=False, duplicate=True)
     result = revise_problem_regions(store, project_id, 1)

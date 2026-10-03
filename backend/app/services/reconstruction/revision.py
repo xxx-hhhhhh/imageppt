@@ -19,6 +19,7 @@ from app.services.reconstruction.objectization_qa import repair_objectized_modul
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
 from app.services.reconstruction.residual_objects import extract_residual_objects
+from app.services.reconstruction.replacement_qa import check_replacement_regions
 from app.services.reconstruction.residual_bleed import repair_residual_color_damage, restore_hidden_source_assets
 from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
@@ -369,6 +370,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         integrity["integrityErrors"].append("source_visual_loss")
     ghosting_before = count_text_ghosting(source, background, baseline)
     ghosting_after = count_text_ghosting(source, candidate_bg, candidate)
+    replacement_qa = check_replacement_regions(
+        source, preview, candidate_preview, baseline,
+        candidate_dir / "replacement_qa.json", candidate_dir / "replacement_compare.png",
+        ghosting_before, ghosting_after,
+    )
+    score_after["replacementQA"] = replacement_qa
+    if replacement_qa["worsenedRegions"]:
+        integrity["integrityErrors"].append("local_visual_replacement_regressed")
     if ghosting_after > ghosting_before:
         integrity["integrityErrors"].append("text_ghosting_regressed")
     before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")

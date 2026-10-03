@@ -44,6 +44,58 @@ def test_local_replacement_report_flags_worsened_module(tmp_path):
     assert report["worsenedRegions"][0]["elementId"] == "bad_card"
 
 
+def test_expanded_editor_textbox_does_not_hide_erased_pale_plate(tmp_path):
+    source = np.full((100, 160, 3), 255, np.uint8)
+    source[20:80, 20:140] = 245
+    after = np.full_like(source, 255)
+    for name, image in (("source", source), ("before", source), ("after", after)):
+        cv2.imwrite(str(tmp_path / f"{name}.png"), image)
+    layout = {"elements": [
+        {"id": "plate", "type": "image", "x": 20, "y": 20, "width": 120, "height": 60},
+        {"id": "text", "type": "text", "x": 20, "y": 20, "width": 120, "height": 60,
+         "metadata": {"rawOCRBBox": [55, 40, 105, 60]}},
+    ]}
+    report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 0, 0)
+    assert report["checkedRegions"] == 1
+    assert report["safe"] is False
+    assert report["worsenedRegions"][0]["lostVisualPixels"] == 6200
+    assert report["worsenedRegions"][0]["errorAfter"] == 10
+
+
+def test_nonoverlapping_text_does_not_mask_module_with_negative_slice(tmp_path):
+    source = np.full((100, 160, 3), 255, np.uint8)
+    source[50:90, 50:140] = 230
+    after = source.copy()
+    after[50:70, 50:110] = 255
+    for name, image in (("source", source), ("before", source), ("after", after)):
+        cv2.imwrite(str(tmp_path / f"{name}.png"), image)
+    layout = {"elements": [
+        {"id": "plate", "type": "image", "x": 50, "y": 50, "width": 90, "height": 40},
+        {"id": "outside", "type": "text", "x": 0, "y": 0, "width": 20, "height": 30},
+    ]}
+    report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 0, 0)
+    assert report["safe"] is False
+    assert report["worsenedRegions"][0]["lostVisualPixels"] == 1200
+
+
+def test_source_glyph_changes_are_excluded_without_hiding_support(tmp_path):
+    source = np.full((100, 160, 3), 255, np.uint8)
+    source[20:80, 20:140] = 245
+    source[40:60, 55:105] = 20
+    after = source.copy()
+    after[40:60, 55:105] = 245
+    for name, image in (("source", source), ("before", source), ("after", after)):
+        cv2.imwrite(str(tmp_path / f"{name}.png"), image)
+    layout = {"elements": [
+        {"id": "plate", "type": "image", "x": 20, "y": 20, "width": 120, "height": 60},
+        {"id": "text", "type": "text", "x": 20, "y": 20, "width": 120, "height": 60,
+         "metadata": {"rawOCRBBox": [55, 40, 105, 60]}},
+    ]}
+    report = check_replacement_regions(tmp_path / "source.png", tmp_path / "before.png", tmp_path / "after.png", layout, tmp_path / "qa.json", tmp_path / "compare.png", 1, 0)
+    assert report["safe"] is True
+    assert report["improved"] is True
+
+
 def test_white_replacement_removes_old_glyph_from_image_below_text(tmp_path):
     project = tmp_path / "project"
     (project / "assets").mkdir(parents=True)
