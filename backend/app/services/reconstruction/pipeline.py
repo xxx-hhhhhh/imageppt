@@ -442,7 +442,8 @@ class ReconstructionPipeline:
             reconstruction_stats["ghostingCount"] += ghosting_count
             score["ghostingCount"] = ghosting_count
             score["editableTextMismatchCount"] = sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and (item.get("metadata") or {}).get("visualTextMismatch") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
-            asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
+            asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {},
+                                                   debug_path=page_output / ("movable_coverage_debug.png" if page_index == 1 else f"movable_coverage_debug_{page_index}.png"))
             reconstruction_stats.update(asset_metrics)
             score.update(asset_metrics)
             score.update({key: reconstruction_stats[key] for key in ("residualObjectsCount", "residualCoverageArea", "residualCandidateArea", "residualObjectizationRate", "splitMonolithicImages", "partitionedResidualAssets", "residualPartsCreated") if key in reconstruction_stats})

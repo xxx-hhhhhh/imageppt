@@ -458,7 +458,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     detected = max(int(score_before.get("detectedTextCount") or 0), len(detected_ids))
     coverage_before = float(score_before["editableTextCoverage"]) if "detectedTextCount" in score_before and "editableTextCoverage" in score_before else float(measure_text_coverage(baseline, detected)["editableTextCoverage"])
     coverage_after = float(measure_text_coverage(candidate, detected)["editableTextCoverage"])
-    asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {})
+    asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {},
+                                          debug_path=candidate_dir / "movable_coverage_debug.png")
     score_after.update(asset_metrics)
     enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=ghosting_after, background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
     issues_after = collect_revision_issues(candidate, score_after, raw_scene)
