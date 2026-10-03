@@ -828,6 +828,41 @@ def test_residual_ribbon_absorbs_its_pale_support_as_one_movable_asset(tmp_path,
     assert _recover_pale_asset_gaps(source_path, preview, layout, assets, project_id, 1) == []
 
 
+def test_expanded_textbox_does_not_hide_missing_support(tmp_path):
+    from app.services.reconstruction.objectization_audit import _recover_pale_asset_gaps
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    source = np.full((160, 300, 3), 255, np.uint8)
+    source[35:105, 25:235] = 250
+    source_path = tmp_path / "source.png"
+    assert cv2.imwrite(str(source_path), source)
+    alpha = np.zeros((70, 210), np.uint8)
+    alpha[55:] = 255
+    original = assets / "plate.png"
+    assert cv2.imwrite(str(original), np.dstack((source[35:105, 25:235], alpha)))
+    original_bytes = original.read_bytes()
+    layout = {"elements": [
+        {"id": "plate", "type": "image", "x": 25, "y": 35, "width": 210, "height": 70,
+         "src": str(original), "metadata": {"reconstructionStrategySource": "residual_detection"}},
+        {"id": "label", "type": "text", "text": "Label", "x": 25, "y": 35,
+         "width": 210, "height": 70, "metadata": {"rawOCRBBox": [100, 60, 120, 75]}},
+    ]}
+    preview = source.copy()
+    preview[35:90, 25:235] = 255
+    preview_path = tmp_path / "preview.png"
+    assert cv2.imwrite(str(preview_path), preview)
+    created = _recover_pale_asset_gaps(source_path, preview_path, layout, assets, "fixture", 1,
+                                      target_ids={"plate"}, asset_prefix="revision_1")
+    assert len(created) == 1
+    assert created[0]["id"] == "plate"
+    assert len(layout["elements"]) == 2
+    assert original.read_bytes() == original_bytes
+    repaired = cv2.imread(str(assets / Path(created[0]["src"]).name), cv2.IMREAD_UNCHANGED)
+    assert repaired[10, 10, 3] == 255
+    assert repaired[30, 80, 3] == 0  # Original glyph region remains protected.
+
+
 def test_text_support_asset_erases_original_glyphs(tmp_path):
     from app.services.reconstruction.objectization_audit import _recover_text_support_gaps
 

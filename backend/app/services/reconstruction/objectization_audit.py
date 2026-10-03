@@ -562,7 +562,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
     for item in layout.get("elements", []):
         if item.get("type") != "text" or any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
             continue
-        box = _box(item, width, height)
+        box = _text_source_box(item, width, height, padding=2)
         if box:
             x1, y1, x2, y2 = box
             missing[y1:y2, x1:x2] = False
