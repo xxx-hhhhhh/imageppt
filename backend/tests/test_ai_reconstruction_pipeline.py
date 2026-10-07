@@ -1,319 +1,206 @@
-from __future__ import annotations
-
-import json
-import shutil
+"""Production acceptance: exclusive ownership replaces erase/critic expectations."""
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
-from PIL import Image
-
-from app.services.reconstruction import pipeline as pipeline_module
-from app.services.reconstruction.pipeline import ReconstructionPipeline
-from app.services.reconstruction.router import ReconstructionRouter
-
-
-class FakeStore:
-    def __init__(self, image_path: Path) -> None:
-        self.image_path = image_path
-        self.saved: list[dict] = []
-
-    def get(self, project_id: str) -> dict:
-        return {"id": project_id, "images": [{"path": str(self.image_path)}]}
-
-    def save_slide(self, project_id: str, page: int, layout: dict) -> None:
-        self.saved.append(layout)
+from app.models.project_store import ProjectStore
+from app.services.pptx import renderer
+from app.services.reconstruction import pipeline as module
+from app.services.reconstruction.exclusive_ownership import (
+    audit_raster_text,
+    build_exclusive_scene,
+)
+from app.services.reconstruction.pipeline import (
+    AIUnavailableError,
+    ReconstructionPipeline,
+)
+from app.services.visual_qa.analyzer import render_preview
+from app.utils import image_io
+from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw, ImageFont
 
 
-class FakeOCR:
-    provider_name = "rapidocr"
-    warnings: list[str] = []
-
-    def recognize(self, image_path: Path) -> list:
-        return []
-
-
-class FakeInpainting:
-    warnings: list[str] = []
-    last_strategies: list[dict] = []
-    last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
-
-    def restore_background(self, image_path: Path, regions: list, output_path: Path, preserve_regions=None) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(image_path, output_path)
-
-    def reclean_background(self, background_path: Path, bboxes: list) -> int:
-        return len(bboxes)
-
-
-class FakeLayoutService:
-    def build_layout(self, image_path: Path, width: int, height: int, regions: list, background_url: str, asset_dir: Path) -> tuple[dict, list]:
-        return {
-            "version": "1.1",
-            "slide": {"width": width, "height": height},
-            "elements": [{
-                "id": "text_001",
-                "type": "text",
-                "x": 10,
-                "y": 12,
-                "width": 160,
-                "height": 30,
-                "zIndex": 1,
-                "text": "OCR original text",
-                "confidence": 0.95,
-                "style": {"fontSize": 24, "fontWeight": 400},
-                "metadata": {},
-            }],
-        }, []
-
-
-class FakeVisionProvider:
-    warnings: list[str] = []
-
-    def __init__(self, ai_enabled: bool) -> None:
-        self.ai_enabled = ai_enabled
-
-    def vision_debug(self) -> dict:
-        return {
-            "provider": "qwen" if self.ai_enabled else "local",
-            "model": "qwen3-vl-flash" if self.ai_enabled else None,
-            "rawResponseAvailable": self.ai_enabled,
-            "repairUsed": False,
-            "normalizationApplied": self.ai_enabled,
-            "validationErrors": [],
-            "droppedElements": 0,
-            "normalizationWarnings": [
-                "elements[0].fontWeight: 'bold' -> 700",
-                "api_key=sk-secret-value-123456",
-            ] if self.ai_enabled else [],
-        }
-
-    def critique_reconstruction(self, original_path: Path, reconstructed_path: Path, scene: dict) -> dict:
-        return {"issues": [{"elementId": "text_001", "adjustment": {"moveX": 2, "fontSizeScale": 1.05}}]}
-
-
-class FakeSceneAnalyzer:
-    def __init__(self, ai_enabled: bool) -> None:
-        self.ai_enabled = ai_enabled
-        self.layout_provider = SimpleNamespace(name="fake-layout")
-        self.layout_warnings: list[str] = []
-        self.vlm_warnings: list[str] = []
-        self.vision_provider = FakeVisionProvider(ai_enabled)
-        self.vision_routing: dict = {}
-
-    def analyze(self, image_path: Path, layout: dict, regions: list, segmentation: list, enable_vision: bool = True, mode: str = "standard") -> tuple[dict, list[str]]:
-        ai_used = self.ai_enabled and enable_vision
-        self.vision_routing = {
-            "requestedProvider": "qwen" if self.ai_enabled else "local",
-            "usedProvider": "qwen" if ai_used else "local",
-            "usedModel": "qwen3-vl-flash" if ai_used else None,
-            "aiUsed": ai_used,
-            "fallbackCount": 0,
-        }
-        metadata = {
-            "visionSemanticType": "text" if ai_used else "unknown",
-            "visionMatched": ai_used,
-        }
-        if ai_used:
-            metadata.update({"reconstructionStrategy": "editable_text", "reconstructionStrategySource": "vision"})
-        return {
-            "version": "2.0",
-            "canvas": {"width": layout["slide"]["width"], "height": layout["slide"]["height"]},
-            "elements": [{
-                "id": "text_001",
-                "type": "text",
-                "role": "main_title" if ai_used else "body_text",
-                "componentType": "text",
-                "groupId": "hero" if ai_used else None,
-                "bbox": {"left": 10, "top": 12, "width": 160, "height": 30},
-                "zIndex": 1,
-                "visionConfidence": 0.92 if ai_used else 0.0,
-                "finalConfidence": 0.94,
-                "text": "AI must not replace OCR text",
-                "style": {"fontSize": 24, "fontClass": "display" if ai_used else "sans", "fontWeight": 700 if ai_used else 400},
-                "metadata": metadata,
-            }],
-            "groups": [],
-        }, []
-
-    def refine(self, scene: dict) -> dict:
-        scene["refined"] = True
-        return scene
-
-
-class FakeSegmentationProvider:
-    name = "fake-segmentation"
-
-    def segment(self, image_path: Path, asset_dir: Path, project_id: str) -> list:
-        return []
-
-
-class FakePPTXRenderer:
-    def __init__(self, output_root: Path) -> None:
-        self.output_root = output_root
-
-    def render_project(self, project_id: str, layouts: list[dict]) -> tuple[Path, dict]:
-        output = self.output_root / project_id / "editable.pptx"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"fake-pptx")
-        return output, {"valid": True}
-
-
-def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool = False, mode: str = "standard", inpainting_factory=None) -> tuple[list[dict], dict, dict]:
-    image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
-    fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
-    shutil.copy2(fixture_path, image_path)
-    output_root = tmp_path / "outputs"
-
-    def fake_preprocess(source: Path, destination: Path) -> tuple[int, int]:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        with Image.open(source) as image:
-            return image.size
-
-    def fake_render_preview(background: Path, layout: dict, destination: Path) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(background, destination)
-        return destination
-
-    monkeypatch.setattr(pipeline_module, "OUTPUTS_DIR", output_root)
-    monkeypatch.setattr(pipeline_module, "OCRService", lambda provider: FakeOCR())
-    monkeypatch.setattr(pipeline_module, "InpaintingService", lambda provider: inpainting_factory() if inpainting_factory else FakeInpainting())
-    monkeypatch.setattr(pipeline_module, "preprocess_image", fake_preprocess)
-    monkeypatch.setattr(pipeline_module, "render_preview", fake_render_preview)
-    monkeypatch.setattr(pipeline_module, "run_visual_qa", lambda *args, **kwargs: {"overall": 1.0})
-    monkeypatch.setattr(pipeline_module, "PPTXRenderer", lambda: FakePPTXRenderer(output_root))
-
+def fixture_pipeline(monkeypatch, tmp_path, *, ai=True):
+    store = ProjectStore(tmp_path / "outputs")
+    record = store.create("exclusive-test")
+    source = tmp_path / "中文原图.png"
+    image = Image.new("RGB", (400, 220), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 45, 380, 170), fill="#EDF4FD")
+    draw.ellipse((295, 10, 340, 40), fill="#17365D")
+    image.save(source)
+    store.add_image(record["id"], {"path": str(source)})
+    monkeypatch.setattr(module, "OCRService", lambda _: SimpleNamespace(warnings=[], provider_name="test-ocr", recognize=lambda _: []))
+    monkeypatch.setattr(renderer, "OUTPUTS_DIR", store.root)
     pipeline = object.__new__(ReconstructionPipeline)
-    pipeline.store = FakeStore(image_path)
-    pipeline.layout_service = FakeLayoutService()
-    pipeline.scene_analyzer = FakeSceneAnalyzer(ai_enabled)
-    if with_plan:
-        original_build = pipeline.layout_service.build_layout
-        original_analyze = pipeline.scene_analyzer.analyze
-
-        def build_with_fragment(*args):
-            layout, warnings = original_build(*args)
-            layout["elements"].append({"id": "chart_fragment", "type": "rectangle", "x": 12, "y": 50, "width": 40, "height": 30, "zIndex": 2, "style": {"fillColor": "#123456"}, "metadata": {}})
-            return layout, warnings
-
-        def analyze_with_plan(*args, **kwargs):
-            scene, warnings = original_analyze(*args, **kwargs)
-            scene["elements"].append({"id": "chart_fragment", "type": "rectangle", "bbox": {"left": 12, "top": 50, "width": 40, "height": 30}, "zIndex": 2, "style": {}, "metadata": {}})
-            scene["vision"] = {"aiUsed": True, "reconstructionPlan": {"modules": [{"id": "chart_panel", "role": "chart", "strategy": "whole_image", "bbox": {"left": 0.1, "top": 0.5, "width": 0.5, "height": 0.42}, "confidence": 0.95}]}}
-            return scene, warnings
-
-        pipeline.layout_service.build_layout = build_with_fragment
-        pipeline.scene_analyzer.analyze = analyze_with_plan
-    pipeline.segmentation_provider = FakeSegmentationProvider()
-    pipeline.segmentation_warnings = []
-    pipeline.reconstruction_router = ReconstructionRouter()
-    slides, _, _ = pipeline.analyze_project("ai-standard" if ai_enabled else "local-standard", mode)
-    report_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "conversion_report.json"
-    debug_path = output_root / ("ai-standard" if ai_enabled else "local-standard") / "vision_debug.json"
-    return slides, json.loads(report_path.read_text(encoding="utf-8")), json.loads(debug_path.read_text(encoding="utf-8"))
+    pipeline.store = store
+    pipeline.segmentation_provider = SimpleNamespace(name="test-seg", warnings=[], segment=lambda *args: [])
+    pipeline.scene_analyzer = SimpleNamespace(vision_provider=SimpleNamespace(provider_name="qwen", model_name="test-model"),
+        vision_routing={"aiUsed": ai, "usedProvider": "qwen" if ai else "local", "usedModel": "test-model"},
+        analyze=lambda *args, **kw: ({"elements": [], "vision": {"reconstructionPlan": {"modules": [
+            {"moduleId": "pale-carrier", "role": "module_plate", "bboxPixels": [20,45,381,171]}]}}}, []))
+    return pipeline, record["id"], source
 
 
-def test_standard_mode_applies_qwen_strategy_and_one_critic_round(monkeypatch, tmp_path: Path) -> None:
-    slides, report, debug = _run_pipeline(monkeypatch, tmp_path, True)
-    element = slides[0]["elements"][0]
-    assert element["text"] == "OCR original text"
-    assert element["role"] == "main_title"
-    assert element["groupId"] == "hero"
-    assert element["visionConfidence"] == 0.92
-    assert element["metadata"]["reconstructionStrategy"] == "editable_text"
-    assert element["style"]["fontClass"] == "serif"
-    assert element["style"]["fontRole"] == "main_title"
-    assert element["style"]["fontWeight"] == 700
-    assert 0 <= element["x"] <= slides[0]["slide"]["width"] - element["width"]
-    assert element["style"]["refinedFontSize"] == element["style"]["fontSize"]
-    assert abs(element["style"]["fontSizeAdjustment"]) <= element["style"]["estimatedFontSize"] * 0.15
-    assert report["aiUsed"] is True
-    assert report["visionMatchedElements"] == 1
-    assert report["aiStrategiesApplied"] == 1
-    assert report["criticRounds"] == 1
-    assert report["criticAdjustmentsApplied"] == 1
-    assert report["typographyRefined"] is True
-    assert report["fontRoleAssignments"] == 1
-    assert debug == {
-        "provider": "qwen",
-        "model": "qwen3-vl-flash",
-        "rawResponseAvailable": True,
-        "repairUsed": False,
-        "normalizationApplied": True,
-        "validationErrors": [],
-        "droppedElements": 0,
-        "normalizationWarnings": ["elements[0].fontWeight: 'bold' -> 700", "api_key=[redacted]"],
-    }
-    assert "sk-secret-value-123456" not in json.dumps(debug).lower()
-    assert "authorization" not in json.dumps(debug).lower()
+def test_pipeline_preserves_pale_plate_and_decoration_without_any_revision(monkeypatch, tmp_path):
+    pipeline, project_id, source = fixture_pipeline(monkeypatch, tmp_path)
+    slides, _, _ = pipeline.analyze_project(project_id, "maximum")
+    layout = slides[0]
+    assert layout["metadata"]["automaticRevisionsPaused"]
+    assert layout["metadata"]["ownershipAudit"]["unownedPixelCount"] == 0
+    assert any(e.get("owner") == "movable_image" for e in layout["elements"])
+    assert {e["owner"] for e in layout["elements"]} <= {"movable_image", "native_shape", "editable_text", "intentional_background"}
+    root = pipeline.store.root / project_id
+    assert np.array_equal(image_io.imread(source), image_io.imread(root / "reconstructed_preview.png"))
+    assert (root / "editable.pptx").is_file()
 
 
-def test_local_mode_reports_no_ai_strategy_or_critic_round(monkeypatch, tmp_path: Path) -> None:
-    _, report, debug = _run_pipeline(monkeypatch, tmp_path, False)
-    assert report["aiUsed"] is False
-    assert report["visionProvider"] == "local"
-    assert report["visionMatchedElements"] == 0
-    assert report["aiStrategiesApplied"] == 0
-    assert report["criticRounds"] == 0
-    assert report["criticAdjustmentsApplied"] == 0
-    assert debug["provider"] == "local"
-    assert debug["rawResponseAvailable"] is False
+def test_api_failure_never_overwrites_previous_scene_or_assets(monkeypatch, tmp_path):
+    pipeline, project_id, _ = fixture_pipeline(monkeypatch, tmp_path)
+    pipeline.analyze_project(project_id, "maximum")
+    root = pipeline.store.root / project_id
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.glob("assets/*.png")}
+    slide_before = (root / "slides/page_1.json").read_bytes()
+    pipeline.scene_analyzer.vision_routing["aiUsed"] = False
+    with pytest.raises(AIUnavailableError):
+        pipeline.analyze_project(project_id, "maximum")
+    assert (root / "slides/page_1.json").read_bytes() == slide_before
+    assert all((root / name).read_bytes() == value for name, value in before.items())
 
 
-def test_high_quality_pauses_when_qwen_critic_fails(monkeypatch, tmp_path: Path) -> None:
-    def fail_critic(*_args):
-        raise RuntimeError("simulated provider failure")
-
-    monkeypatch.setattr(FakeVisionProvider, "critique_reconstruction", fail_critic)
-    with pytest.raises(pipeline_module.AIUnavailableError, match="视觉复核失败"):
-        _run_pipeline(monkeypatch, tmp_path, True, with_plan=True, mode="high_quality")
-
-
-def test_high_quality_does_not_mark_pending_professional_repair_complete(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(FakeInpainting, "professional_pending", 1, raising=False)
-    _, report, _ = _run_pipeline(monkeypatch, tmp_path, True, with_plan=True, mode="high_quality")
-    score_path = tmp_path / "outputs" / "ai-standard" / "visual_score.json"
-    score = json.loads(score_path.read_text(encoding="utf-8"))
-    assert score["professionalRepairPending"] >= 1
-    assert score["revisionStatus"] == "stagnated"
-    assert score["structuralGate"] == "review_required"
-    assert report["aiUsed"] is True
+def test_missing_replacement_asset_prevents_background_write(monkeypatch, tmp_path):
+    from app.services.reconstruction import exclusive_ownership as owner
+    source = tmp_path / "source.png"
+    Image.new("RGB", (120,80), "navy").save(source)
+    # Add real content; a flat navy page is legitimate intentional background.
+    image = Image.open(source)
+    ImageDraw.Draw(image).ellipse((20,20,70,65), fill="red")
+    image.save(source)
+    original = owner.image_io.imwrite
+    monkeypatch.setattr(owner.image_io, "imwrite", lambda path, img, *args: False if "visual" in str(path) else original(path,img,*args))
+    with pytest.raises(OSError, match="Replacement asset"):
+        build_exclusive_scene(source, {"elements": []}, {}, [], tmp_path / "candidate", "test", 1)
+    assert not (tmp_path / "candidate/backgrounds/page_1.png").exists()
 
 
-def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, tmp_path: Path) -> None:
-    slides, report, _ = _run_pipeline(monkeypatch, tmp_path, True, with_plan=True)
-    elements = {item["id"]: item for item in slides[0]["elements"]}
-    assert report["plannedModules"] == 1
-    assert report["wholeImageRegions"] == 1
-    assert report["plannerSuppressedElements"] >= 1
-    assert elements["chart_fragment"]["metadata"]["suppressed"] is True
-    asset = next(item for item in elements.values() if item["id"].startswith("planner_page_1_region_"))
-    assert asset["metadata"]["reconstructionStrategy"] == "cutout_image"
-    assert asset["groupId"] == "chart_panel"
-    assert elements["text_001"]["text"] == "OCR original text"
+def test_publication_failure_restores_existing_scene_ppt_background_and_preview(monkeypatch, tmp_path):
+    pipeline, project_id, _ = fixture_pipeline(monkeypatch,tmp_path)
+    pipeline.analyze_project(project_id,"maximum")
+    root = pipeline.store.root / project_id
+    names = ("slides/page_1.json","editable.pptx","backgrounds/page_1.png","reconstructed_preview.png","visual_score.json")
+    baseline = {name:(root / name).read_bytes() for name in names}
+    original = module.shutil.copy2
+    def fail_ppt_publication(source,destination,*args,**kwargs):
+        if Path(destination) == root / "editable.pptx":
+            raise OSError("simulated publication failure")
+        return original(source,destination,*args,**kwargs)
+    monkeypatch.setattr(module.shutil,"copy2",fail_ppt_publication)
+    with pytest.raises(OSError,match="publication failure"):
+        pipeline.analyze_project(project_id,"maximum")
+    assert all((root / name).read_bytes() == data for name,data in baseline.items())
 
 
-def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkeypatch, tmp_path: Path) -> None:
+def test_measured_native_text_has_no_raster_glyph_duplicate(tmp_path):
+    path = Path("C:/Windows/Fonts/arial.ttf")
+    if not path.is_file():
+        pytest.skip("Font fixture requires Windows Arial")
+    source = tmp_path / "plain.png"
+    image = Image.new("RGB", (320,100), "white")
+    font = ImageFont.truetype(str(path), 28)
+    draw = ImageDraw.Draw(image)
+    draw.text((25,20), "HELLO", font=font, fill="black")
+    image.save(source)
+    box = draw.textbbox((25,20), "HELLO", font=font)
+    ocr = {"id": "text_001", "type": "text", "text": "HELLO", "confidence": 1,
+           "x": box[0], "y": box[1], "width": box[2]-box[0], "height": box[3]-box[1], "style": {}}
+    output = tmp_path / "out"
+    layout = build_exclusive_scene(source, {"elements": [ocr]}, {}, [], output, "abc", 1)
+    assert any(e.get("owner") == "editable_text" for e in layout["elements"])
+    assert audit_raster_text(source, layout, output)["rasterNativeDuplicateTextCount"] == 0
+    local = deepcopy(layout)
+    for e in local["elements"]:
+        if e.get("src"):
+            e["src"] = str(output / ("backgrounds" if e["type"] == "background" else "assets") / e["src"].split("/")[-1])
+    render_preview(output / "backgrounds/page_1.png", local, output / "preview.png")
+    assert np.array_equal(image_io.imread(source), image_io.imread(output / "preview.png"))
+
+
+def test_revision_stop_is_enforced_at_api_and_service(monkeypatch, tmp_path):
+    import app.main as api
+    from app.services.reconstruction.revision import (
+        revise_problem_regions,
+        run_revision_loop,
+    )
+    store = ProjectStore(tmp_path / "outputs")
+    record = store.create("pause")
+    store.add_image(record["id"], {"path": "not-needed"})
+    monkeypatch.setattr(api, "store", store)
+    response = TestClient(api.app).post(f"/api/projects/{record['id']}/pages/1/revise")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "AUTOMATIC_REVISIONS_PAUSED"
+    downgrade = TestClient(api.app).post(f"/api/projects/{record['id']}/pages/1/downgrade")
+    assert downgrade.status_code == 409
+    for call in (revise_problem_regions, run_revision_loop):
+        with pytest.raises(ValueError, match="paused"):
+            call(store, record["id"], 1)
+    assert not (store.root / record["id"] / "slides").exists()
+
+
+def test_verified_uniform_rectangle_is_a_real_native_shape(tmp_path):
+    image = Image.new("RGB", (240,120), "white")
+    ImageDraw.Draw(image).rectangle((30,25,169,84),fill="#EDF4FD")
+    source = tmp_path / "source.png"
+    image.save(source)
+    shape = {"id":"shape_001","type":"rectangle","x":30,"y":25,"width":140,"height":60}
+    layout = build_exclusive_scene(source,{"elements":[shape]}, {}, [],tmp_path / "out","abc",1)
+    assert any(e.get("owner") == "native_shape" for e in layout["elements"])
+    # Renderer uses the canonical scene; no raster background-only substitution.
+    local = deepcopy(layout)
+    for e in local["elements"]:
+        if e.get("src"):
+            e["src"] = str(tmp_path / "out/backgrounds/page_1.png")
+    pptx,_ = renderer.PPTXRenderer().render_project("abc",[local],output_dir=tmp_path / "ppt")
+    from pptx import Presentation
+    assert any(s.shape_type == 1 for s in Presentation(pptx).slides[0].shapes)
+
+
+def test_alpha_substrate_cannot_override_a_verified_child_or_claim_its_pixels(tmp_path):
+    source = tmp_path / "source.png"
+    image = Image.new("RGB",(200,120),"white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20,20,179,99),fill="#EDF4FD")
+    draw.ellipse((60,35,104,79),fill="#17365D")
+    image.save(source)
+    output = tmp_path / "out"
+    (output / "assets").mkdir(parents=True)
+    rgb = image_io.imread(source)
+    child_mask = np.zeros((45,45),np.uint8)
     import cv2
-    import numpy as np
-    from app.services.inpainting.local_client import LocalIOPaintClient
-    from app.services.inpainting.service import InpaintingService
+    cv2.ellipse(child_mask,(22,22),(22,22),0,0,360,255,-1)
+    image_io.imwrite(output / "assets/child.png", np.dstack((rgb[35:80,60:105],child_mask)))
+    image_io.imwrite(output / "assets/card.png", np.dstack((rgb[20:100,20:180],np.full((80,160),255,np.uint8))))
+    segments = [{"id":"child","bbox":{"left":60,"top":35,"width":45,"height":45},"alphaCrop":"/media/assets/abc/child.png"},
+                {"id":"card","bbox":{"left":20,"top":20,"width":160,"height":80},"alphaCrop":"/media/assets/abc/card.png"}]
+    layout = build_exclusive_scene(source,{"elements":[]},{},segments,output,"abc",1)
+    assert any(e.get("metadata",{}).get("edgeSubstratePixels",0)>0 for e in layout["elements"])
+    local = deepcopy(layout)
+    for e in local["elements"]:
+        if e.get("src"):
+            e["src"] = str(output / ("backgrounds" if e["type"] == "background" else "assets") / e["src"].split("/")[-1])
+    render_preview(output / "backgrounds/page_1.png",local,output / "preview.png")
+    assert np.array_equal(rgb,image_io.imread(output / "preview.png"))
+    count = np.zeros((120,200),np.uint8)
+    for node in layout["metadata"]["ownershipAudit"]["nodes"]:
+        x1,y1,x2,y2 = node["sourceBBox"]
+        count[y1:y2,x1:x2] += image_io.imread(output / node["mask"],-1)[:,:,3]>0
+    assert np.all(count == 1)
 
-    provider = LocalIOPaintClient("http://127.0.0.1:8080")
 
-    def fake_local_call(source: Path, mask: np.ndarray, output: Path) -> Path:
-        provider.attempts += 1
-        image = cv2.imread(str(source))
-        image[mask > 0] = 255
-        cv2.imwrite(str(output), image)
-        provider.successes += 1
-        return output
-
-    provider.inpaint = fake_local_call
-    monkeypatch.setattr("app.services.inpainting.service.create_inpainting_provider", lambda preferred: (provider, []))
-    slides, report, debug = _run_pipeline(monkeypatch, tmp_path, False, with_plan=True, inpainting_factory=InpaintingService)
-    score = json.loads((tmp_path / "outputs" / "local-standard" / "visual_score.json").read_text(encoding="utf-8"))
-    assert slides and report["wholeImageRegions"] >= 1
-    assert score["localInpaintSuccesses"] >= 1
-    assert debug["provider"] == "local"
+@pytest.mark.parametrize("surface", ["legacy", "white_objectized"])
+def test_pipeline_rejects_erase_first_and_white_objectized_options(monkeypatch, tmp_path, surface):
+    pipeline, project_id, _ = fixture_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "RECONSTRUCTION_SURFACE_MODE", surface)
+    with pytest.raises(ValueError, match="disabled"):
+        pipeline.analyze_project(project_id, "maximum")

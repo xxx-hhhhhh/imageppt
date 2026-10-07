@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ def _hex(color: np.ndarray) -> str:
 
 
 def analyze_colors(image_path: Path, max_samples: int = 12000) -> dict[str, Any]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         return {"primary": "#FFFFFF", "secondary": "#D9E2EC", "accent": "#2563A6", "textPrimary": "#111827", "textSecondary": "#64748B", "background": "#FFFFFF"}
     pixels = image.reshape(-1, 3)

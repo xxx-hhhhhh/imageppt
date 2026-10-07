@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import math
 from pathlib import Path
@@ -56,7 +57,8 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
             fill = style.get("fill", "#DCE6F1")
             outline = style.get("stroke", fill)
             alpha = int(float(style.get("opacity", 1)) * 255)
-            draw.rounded_rectangle((x, y, x + w, y + h), radius=min(w, h) * 0.16 if kind == "roundedRectangle" else 0, fill=fill + f"{alpha:02X}" if isinstance(fill, str) and len(fill) == 7 else fill, outline=outline, width=max(1, int(float(style.get("strokeWidth", 1)))))
+            edge = 1 if metadata.get("exclusiveGeometryVerified") else 0
+            draw.rounded_rectangle((x, y, x + w - edge, y + h - edge), radius=min(w, h) * 0.16 if kind == "roundedRectangle" else 0, fill=fill + f"{alpha:02X}" if isinstance(fill, str) and len(fill) == 7 else fill, outline=outline, width=max(1, int(float(style.get("strokeWidth", 1)))))
         elif strategy == "native_shape" and kind in {"ellipse", "circle"}:
             draw.ellipse((x, y, x + w, y + h), fill=style.get("fill", "#DCE6F1"), outline=style.get("stroke", style.get("fill", "#DCE6F1")), width=max(1, int(float(style.get("strokeWidth", 1)))))
         elif strategy == "native_shape" and kind in {"line", "arrow"}:
@@ -81,8 +83,8 @@ def _similarity(original: np.ndarray, preview: np.ndarray) -> tuple[float, float
 
 
 def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:
-    original = cv2.imread(str(original_path), cv2.IMREAD_COLOR)
-    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    original = image_io.imread(str(original_path), cv2.IMREAD_COLOR)
+    preview = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     if original is None or preview is None:
         score = {"overall": 0.0, "textRegionScore": 0.0, "layoutScore": 0.0, "componentScore": 0.0, "colorSimilarity": 0.0, "backgroundScore": 0.0, "ghostingPenalty": 0.0, "duplicatePenalty": 0.0, "regions": []}
         return score
@@ -144,7 +146,7 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     difference = cv2.absdiff(cv2.resize(original, (preview.shape[1], preview.shape[0])), preview)
-    cv2.imwrite(str(output_dir / "difference.png"), difference)
+    image_io.imwrite(str(output_dir / "difference.png"), difference)
     return score
 
 

@@ -14,7 +14,7 @@ ElementType = Literal[
 
 
 class ElementStyle(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
     fontClass: str = "unknown"
     fontFamily: str = "Microsoft YaHei"
     fontSize: float = 24
@@ -32,7 +32,7 @@ class ElementStyle(BaseModel):
 
 
 class LayoutElement(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
     id: str
     type: ElementType
     x: float
@@ -53,6 +53,7 @@ class LayoutElement(BaseModel):
 
 
 class SlideSize(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     width: float = Field(gt=0)
     height: float = Field(gt=0)
 
@@ -101,3 +102,13 @@ class RevisionResponse(BaseModel):
     editableCoverageAfter: float
     stagnationReason: str | None = None
     regionalAnalysis: list[dict[str, Any]] = Field(default_factory=list)
+    assetsBefore: int = 0
+    assetsAfter: int = 0
+    missingAssetCount: int = 0
+    preservedAssetCount: int = 0
+    replacedAssetCount: int = 0
+    inpaintedRegions: int = 0
+    protectedRegions: int = 0
+    newlyLostVisualPixels: int = 0
+    largestNewVisualLoss: int = 0
+    rollbackTriggered: bool = False

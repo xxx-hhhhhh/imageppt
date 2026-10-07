@@ -56,6 +56,12 @@ class ProjectStore:
         self.get(project_id)
         if page < 1:
             raise ValueError("Page must be positive")
+        # bbox is a derived AST view, never a second coordinate authority.
+        if str(layout.get("sceneVersion", "")).endswith("owner-evidence"):
+            for element in layout.get("elements", []):
+                element["bbox"] = {"left": element.get("x", 0), "top": element.get("y", 0),
+                                   "width": element.get("width", 0), "height": element.get("height", 0)}
+                element["assetPath"] = element.get("src")
         path = self.root / project_id / "slides" / f"page_{page}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")

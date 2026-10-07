@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 
@@ -36,12 +37,12 @@ class LayoutService:
         if asset_dir and images:
             asset_dir.mkdir(parents=True, exist_ok=True)
             import cv2
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
             for item in images:
                 x, y, w, h = [int(item[key]) for key in ("x", "y", "width", "height")]
                 crop = image[max(0, y):min(height, y + h), max(0, x):min(width, x + w)]
                 asset_path = asset_dir / f"{item['id']}.png"
-                cv2.imwrite(str(asset_path), crop)
+                image_io.imwrite(str(asset_path), crop)
                 project_id = asset_dir.parent.name
                 item["src"] = f"/media/assets/{project_id}/{asset_path.name}"
         elements = apply_badge_ownership(elements + images)

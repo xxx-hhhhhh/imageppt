@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +9,7 @@ import cv2
 import numpy as np
 
 from app.services.pptx.renderer import _path_from_src
+from app.services.reconstruction.owner_gate import ownership_evidence
 if TYPE_CHECKING:
     from app.services.inpainting.provider import InpaintingProvider
 
@@ -18,7 +20,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
     The visual asset is left unchanged. Its position therefore renders exactly
     as before, while moving it no longer reveals a second copy underneath.
     """
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if background is None:
         raise FileNotFoundError(background_path)
     height, width = background.shape[:2]
@@ -38,15 +40,17 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
         box = (max(0, x1), max(0, y1), min(width, x2), min(height, y2))
         if box[2] <= box[0] or box[3] <= box[1]:
             continue
-        if (box[2] - box[0]) * (box[3] - box[1]) > width * height * 0.65:
+        if (box[2] - box[0]) * (box[3] - box[1]) > width * height * 0.90:
             continue
-        owned = np.full((box[3] - box[1], box[2] - box[0]), 255, dtype=np.uint8)
+        proof_item = dict(element)
         if independent_image:
-            path = _path_from_src(element.get("src"))
-            asset = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
-            if asset is not None and asset.ndim == 3 and asset.shape[2] == 4:
-                owned = cv2.resize(asset[:, :, 3], (owned.shape[1], owned.shape[0]), interpolation=cv2.INTER_LINEAR)
-                owned = np.where(owned >= 128, 255, 0).astype(np.uint8)
+            actual_path = _path_from_src(element.get("src"))
+            if actual_path is None or not actual_path.is_file():
+                continue
+            proof_item["src"] = str(actual_path)
+        evidence, _ = ownership_evidence(background, {"elements": [proof_item]},
+                                        background_path.parent.parent / "assets", include_background=False)
+        owned = np.uint8(evidence[box[1]:box[3], box[0]:box[2]]) * 255
         if not np.any(owned):
             continue
         regions.append((box, owned))
@@ -69,11 +73,11 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
                 try:
                     with TemporaryDirectory(prefix="imageppt-asset-inpaint-") as workspace:
                         source_file, result_file = Path(workspace) / "source.png", Path(workspace) / "result.png"
-                        cv2.imwrite(str(source_file), background)
+                        image_io.imwrite(str(source_file), background)
                         region_mask = np.zeros((height, width), dtype=np.uint8)
                         region_mask[y1:y2, x1:x2] = owned
                         professional_provider.inpaint(source_file, region_mask, result_file)
-                        edited = cv2.imread(str(result_file), cv2.IMREAD_COLOR)
+                        edited = image_io.imread(str(result_file), cv2.IMREAD_COLOR)
                         if edited is not None and edited.shape == background.shape:
                             patch = background[y1:y2, x1:x2]
                             patch[owned > 0] = edited[y1:y2, x1:x2][owned > 0]
@@ -92,7 +96,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
             patch[owned > 0] = np.median(ring, axis=0).astype(np.uint8)
     if np.any(small):
         background = cv2.inpaint(background, small, 4, cv2.INPAINT_TELEA)
-    cv2.imwrite(str(background_path), background)
+    image_io.imwrite(str(background_path), background)
     return len(regions)
 
 

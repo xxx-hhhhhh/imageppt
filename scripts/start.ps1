@@ -78,13 +78,17 @@ function FindIopaint {
 
 try {
     Write-Host "Image2EditablePPT one-click startup: $root"
+    $samWeights = Join-Path $env:LOCALAPPDATA 'Image2EditablePPT\models\sam2.1_t.pt'
+    if (-not $env:SAM_MODEL_PATH -and (Test-Path -LiteralPath $samWeights)) { $env:SAM_MODEL_PATH = $samWeights }
     if (PortOwner 8080) {
-        if (-not (IsLama)) { throw 'LaMa port 8080 is occupied, but the service is not a healthy IOPaint lama model.' }
-        Write-Host '[SKIP] LaMa is already running on 8080.'
+        if (-not (IsLama)) { Write-Warning 'Optional LaMa port 8080 is occupied by another service; continuing with OpenCV fallback.' }
+        else { Write-Host '[SKIP] LaMa is already running on 8080.' }
     } else {
-        $iopaint = FindIopaint
-        $p = Launch 'lama' $iopaint @('start','--model=lama','--device=cpu','--port=8080') $root
-        WaitHealthy 'LaMa' ${function:IsLama} 180 $p
+        try {
+            $iopaint = FindIopaint
+            $p = Launch 'lama' $iopaint @('start','--model=lama','--device=cpu','--port=8080') $root
+            WaitHealthy 'LaMa' ${function:IsLama} 30 $p
+        } catch { Write-Warning 'LaMa is unavailable; continue with protected local OpenCV fallback.' }
     }
     if (PortOwner 8000) {
         if (-not (IsBackend)) { throw 'Backend port 8000 is occupied, but /api/health is not healthy.' }
@@ -105,13 +109,18 @@ try {
         if (PortOwner 5173) { throw 'Frontend port 5173 is occupied by another service.' }
         $frontend = Join-Path $root 'frontend'
         $vite = Join-Path $frontend 'node_modules\vite\bin\vite.js'
+        if (-not (Test-Path $vite)) {
+            . (Join-Path $PSScriptRoot 'frontend-runtime.ps1')
+            $frontend = Sync-FrontendRuntime $root
+            $vite = Join-Path $frontend 'node_modules\vite\bin\vite.js'
+        }
         if (-not (Test-Path $vite)) { throw 'Frontend dependencies are missing. Run scripts\setup.ps1 first.' }
         $node = FindNode
         $frontendPort = 5173
         $p = Launch 'frontend' $node @($vite,'--host','127.0.0.1','--port','5173','--strictPort') $frontend
         WaitHealthy 'Frontend' { IsFrontend 5173 } 60 $p
     }
-    if (-not (IsLama) -or -not (IsBackend) -or -not (IsFrontend $frontendPort)) { throw 'A service failed the final health check.' }
+    if (-not (IsBackend) -or -not (IsFrontend $frontendPort)) { throw 'A required service failed the final health check.' }
     $url = "http://127.0.0.1:$frontendPort/"
     Write-Host "[READY] $url"
     if (-not $NoBrowser) { Start-Process $url }

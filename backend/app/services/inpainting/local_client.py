@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import base64
 from io import BytesIO
@@ -104,9 +105,9 @@ class LocalIOPaintClient:
             raise ValueError("Inpainting mask size does not match source image")
         with TemporaryDirectory(prefix="imageppt-local-lama-") as directory:
             source, target = Path(directory) / "source.png", Path(directory) / "result.png"
-            cv2.imwrite(str(source), image)
+            image_io.imwrite(str(source), image)
             self.inpaint(source, mask, target)
-            result = cv2.imread(str(target), cv2.IMREAD_COLOR)
+            result = image_io.imread(str(target), cv2.IMREAD_COLOR)
             if result is None or result.shape != image.shape:
                 raise ValueError("IOPaint output is invalid")
             return result

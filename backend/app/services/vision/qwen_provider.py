@@ -32,30 +32,26 @@ from .schemas import extract_json, validate_json
 logger = logging.getLogger(__name__)
 
 
-def _plan_covers_text(plan: dict[str, Any] | None, context: dict | None) -> bool:
+def _plan_text_coverage(plan: dict[str, Any] | None, context: dict | None) -> dict[str, Any]:
     modules = (plan or {}).get("modules") or []
-    if not modules:
-        return False
     width, height = float((context or {}).get("width") or 0), float((context or {}).get("height") or 0)
-    if width <= 0 or height <= 0:
-        return True
-    centers = []
+    centers: list[tuple[str, float, float]] = []
     for item in (context or {}).get("candidate_elements", []):
         if item.get("type") != "text" or not str(item.get("text") or "").strip():
             continue
         box = item.get("bbox") or {}
         try:
-            centers.append(((float(box["left"]) + float(box["width"]) / 2) / width,
-                            (float(box["top"]) + float(box["height"]) / 2) / height))
+            if width > 0 and height > 0:
+                centers.append((str(item.get("id")), (float(box["left"]) + float(box["width"]) / 2) / width,
+                                (float(box["top"]) + float(box["height"]) / 2) / height))
         except (KeyError, TypeError, ValueError):
             continue
-    if len(centers) < 3:
-        return True
-    covered = 0
-    for x, y in centers:
-        if any(_point_inside_plan_box(x, y, module.get("bbox") or {}) for module in modules):
-            covered += 1
-    return covered / len(centers) >= 0.65
+    uncovered = [item_id for item_id, x, y in centers if not any(
+        item_id in (module.get("memberIds") or []) or item_id in (module.get("editableIds") or [])
+        or _point_inside_plan_box(x, y, module.get("bbox") or {}) for module in modules
+    )]
+    return {"textCoverage": round((len(centers) - len(uncovered)) / len(centers), 4) if centers else 1.0,
+            "uncoveredTextIds": uncovered, "detectedTextCount": len(centers)}
 
 
 def _point_inside_plan_box(x: float, y: float, box: dict[str, Any]) -> bool:
@@ -69,12 +65,12 @@ def _point_inside_plan_box(x: float, y: float, box: dict[str, Any]) -> bool:
 class QwenProvider(OpenAICompatibleVisionProvider):
     name = "qwen"
 
-    def plan_reconstruction(self, image_path: Path, context: dict | None = None) -> dict[str, Any]:
+    def plan_reconstruction(self, image_path: Path, context: dict | None = None, uncovered_text_ids: list[str] | None = None) -> dict[str, Any]:
         messages = [
             {"role": "system", "content": RECONSTRUCTION_PLAN_PROMPT},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
-                {"type": "text", "text": reconstruction_plan_user_prompt(context)},
+                {"type": "text", "text": reconstruction_plan_user_prompt(context, uncovered_text_ids)},
             ]},
         ]
         raw = self._request(messages)
@@ -101,15 +97,26 @@ class QwenProvider(OpenAICompatibleVisionProvider):
                 raise
             logger.warning("qwen_scene_analysis_failed_using_page_plan")
             scene = {"provider": self.name, "model": self.model, "aiUsed": True, "page": {}, "regions": [], "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.5, "reconstructionPlan": plan}
-        if not _plan_covers_text(scene.get("reconstructionPlan"), context) and (context or {}).get("candidate_elements"):
+        if mode == "high" and not (scene.get("reconstructionPlan") or {}).get("modules"):
+            scene["reconstructionPlan"] = self.plan_reconstruction(image_path, context)
+        if mode == "high" and not (scene.get("reconstructionPlan") or {}).get("modules"):
+            raise VisionProviderError("Qwen reconstruction plan contains no usable modules")
+        coverage = _plan_text_coverage(scene.get("reconstructionPlan"), context)
+        if scene.get("reconstructionPlan", {}).get("modules") and coverage["uncoveredTextIds"]:
             try:
-                replacement = self.plan_reconstruction(image_path, context)
-                if _plan_covers_text(replacement, context):
-                    scene["reconstructionPlan"] = replacement
+                replacement = self.plan_reconstruction(image_path, context, coverage["uncoveredTextIds"])
+                replacement_coverage = _plan_text_coverage(replacement, context)
+                if replacement.get("modules") and replacement_coverage["textCoverage"] > coverage["textCoverage"]:
+                    existing = scene["reconstructionPlan"]["modules"]
+                    existing_ids = {str(item.get("id") or item.get("moduleId")) for item in existing}
+                    added = [item for item in replacement["modules"] if str(item.get("id") or item.get("moduleId")) not in existing_ids]
+                    scene["reconstructionPlan"] = {**scene["reconstructionPlan"], "modules": [*existing, *added]}
+                    coverage = _plan_text_coverage(scene["reconstructionPlan"], context)
             except Exception as exc:
                 logger.warning("qwen_reconstruction_plan_failed error_type=%s", type(exc).__name__)
-        if mode == "high" and not _plan_covers_text(scene.get("reconstructionPlan"), context):
-            raise VisionProviderError("Qwen reconstruction plan does not cover the page text")
+        scene["planCoverage"] = {**coverage, "ocrFallbackTextIds": coverage["uncoveredTextIds"], "status": "partial" if coverage["uncoveredTextIds"] else "complete"}
+        if coverage["uncoveredTextIds"]:
+            logger.warning("qwen_plan_partial_text_coverage coverage=%s missing=%s", coverage["textCoverage"], len(coverage["uncoveredTextIds"]))
         return scene
 
 

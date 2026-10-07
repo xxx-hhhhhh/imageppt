@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -6,6 +7,10 @@ from typing import Any
 import cv2
 import numpy as np
 from PIL import Image
+
+from app.services.reconstruction.surface_classification import is_page_environment
+from app.services.reconstruction.owner_gate import tight_text_mask
+from app.services.pptx.renderer import _path_from_src
 
 
 class AIReconstructionPlanner:
@@ -25,6 +30,7 @@ class AIReconstructionPlanner:
         *,
         include_detected_visuals: bool = True,
         asset_prefix: str = "planner",
+        white_surface: bool = False,
     ) -> dict[str, int]:
         stats = {"plannedModules": 0, "wholeImageRegions": 0, "cutoutImages": 0, "nativeShapesPlanned": 0, "plannerSuppressedElements": 0, "plannerDuplicateTexts": 0, "plannerSnappedRegions": 0, "plannerCvVisualRegions": 0}
         vision = scene.get("vision") or {}
@@ -57,9 +63,14 @@ class AIReconstructionPlanner:
                 strategy = {"editable": "editable_text", "whole_image": "cutout_image", "movable_image": "cutout_image", "hybrid": "mixed_component"}.get(requested, requested)
                 if strategy not in {"editable_text", "native_shape", "cutout_image", "mixed_component", "background", "ignore"}:
                     continue
-                module_box = _pixel_box(module.get("bbox"), width, height, max_area=1.0 if strategy == "background" else 0.80)
+                module_box = _pixel_box(module.get("bbox"), width, height,
+                                        max_area=1.0 if strategy == "background" else 0.90 if requested == "whole_image" else 0.80)
                 if module_box is None:
                     continue
+                page_environment = strategy == "background" and is_page_environment(module, module_box, width, height)
+                local_surface = strategy == "background" and not page_environment and white_surface
+                if local_surface:
+                    strategy = "cutout_image"
                 module_id = str(module.get("id") or f"module_{stats['plannedModules'] + 1}")[:80]
                 member_ids = {str(value) for value in module.get("memberIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
                 editable_ids = {str(value) for value in module.get("editableIds", []) if str(value) in by_id and _coverage(by_id[str(value)], module_box) >= 0.35}
@@ -69,7 +80,7 @@ class AIReconstructionPlanner:
                 if strategy == "native_shape" and _is_flow_module(module) and _flow_needs_image(elements, module_box):
                     strategy = "mixed_component"
                 stats["plannedModules"] += 1
-                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "requestedStrategy": requested, "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
+                normalized_modules.append({"moduleId": module_id, "bbox": module.get("bbox"), "role": module.get("role"), "requestedStrategy": requested, "reconstructionStrategy": strategy, "resolvedStrategy": strategy, "surfaceRole": "local_object" if local_surface else "page_environment" if page_environment else None, "visualComplexity": module.get("visualComplexity"), "editablePriority": module.get("editablePriority"), "confidence": module.get("confidence"), "bboxPixels": list(module_box), "children": module.get("children", []), "ownership": module.get("ownership", {}), "preserveWhole": bool(module.get("preserveWhole", requested == "whole_image"))})
 
                 for item_id in member_ids | editable_ids:
                     item = by_id[item_id]
@@ -94,8 +105,14 @@ class AIReconstructionPlanner:
                         item = by_id[item_id]
                         if item.get("type") in {"text", "background", "group"}:
                             continue
+                        item_box = item.get("bbox") or {}
+                        item_area = float(item_box.get("width") or item.get("width") or 0) * float(item_box.get("height") or item.get("height") or 0)
+                        if white_surface and item_area < width * height * 0.60:
+                            # A page environment may contain bounded visual
+                            # children; those still need independent owners.
+                            continue
                         metadata = item.setdefault("metadata", {})
-                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "source_background", "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
+                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "page_blank_surface" if white_surface else "source_background", "reconstructionStrategy": "group", "reconstructionStrategySource": "planner"})
                         stats["plannerSuppressedElements"] += 1
 
                 preserve_boxes = [
@@ -141,9 +158,15 @@ class AIReconstructionPlanner:
                         item for item in elements
                         if item.get("type") not in {"background", "group"} and _covered_by_asset(item, box)
                     ]
+                    embedded_badge_text = {
+                        item["id"] for item in covered
+                        if item.get("type") == "text" and _inside_whole_badge(item, covered)
+                    }
                     editable_text = [
                         item for item in covered
                         if item.get("type") == "text"
+                        and item.get("id") not in embedded_badge_text
+                        and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))
                         and item.get("role") not in {"logo", "decorative_text"}
                         and float(item.get("confidence") or 0) >= 0.5
                         and str(item.get("text") or "").strip()
@@ -163,9 +186,10 @@ class AIReconstructionPlanner:
                         tx2 = min(x2 - x1, round(right - x1))
                         ty2 = min(y2 - y1, round(bottom - y1))
                         if tx2 > tx1 and ty2 > ty1:
-                            pad_x = min(12, max(2, round((tx2 - tx1) * 0.05)))
-                            pad_y = max(2, round((ty2 - ty1) * 0.20))
-                            cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
+                            # OCR boxes select candidate ink, not rectangular deletion.
+                            region = np.zeros(mask.shape, np.uint8)
+                            cv2.rectangle(region, (tx1, ty1), (min(mask.shape[1]-1, tx2), min(mask.shape[0]-1, ty2)), 255, -1)
+                            mask |= tight_text_mask(crop, region, (text_item.get("style") or {}).get("color"))
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
                     if text_area_ratio > 0.20 and (module_id.startswith(("detected_visual_", "segmented_visual_", "contour_visual_")) or strategy == "mixed_component"):
                         continue
@@ -174,10 +198,12 @@ class AIReconstructionPlanner:
                     if np.any(mask) and safe_to_clean:
                         crop = _clean_text_from_asset(crop, mask)
                     alpha = _module_alpha(module, box)
+                    if alpha is None:
+                        alpha = _single_ellipse_alpha(covered, box)
                     if alpha is not None:
                         crop = np.dstack((crop, alpha))
-                    cv2.imwrite(str(asset_path), crop)
-                    cv2.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
+                    image_io.imwrite(str(asset_path), crop)
+                    image_io.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
                     z_index = max((int(item.get("zIndex") or 0) for item in covered), default=1) + 1
                     planned_assets.append({
                         "id": asset_id,
@@ -198,11 +224,11 @@ class AIReconstructionPlanner:
                     stats["plannerCvVisualRegions"] += int(from_cv)
                     for item in covered:
                         metadata = item.setdefault("metadata", {})
-                        if item in editable_text and np.any(mask) and safe_to_clean:
+                        if item in editable_text and safe_to_clean:
                             metadata.update({"plannerModuleId": module_id, "reconstructionStrategy": "editable_text", "reconstructionStrategySource": "planner", "textCleanedFromAsset": asset_id})
                             item["zIndex"] = z_index + 1
                             continue
-                        if item.get("type") == "text" and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.5:
+                        if item.get("type") == "text" and item.get("id") not in embedded_badge_text and not any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")) and item.get("role") not in {"logo", "decorative_text"} and float(item.get("confidence") or 0) >= 0.5:
                             continue
                         if not metadata.get("suppressed"):
                             stats["plannerSuppressedElements"] += 1
@@ -211,7 +237,7 @@ class AIReconstructionPlanner:
                 module_assets = [item["id"] for item in planned_assets[module_asset_start:]]
                 normalized_modules[-1]["assetIds"] = module_assets
                 if strategy in {"cutout_image", "mixed_component"} and not module_assets:
-                    normalized_modules[-1]["resolvedStrategy"] = "editable_text" if _text_occupancy(module_box, elements) > 0 else "background"
+                    normalized_modules[-1]["resolvedStrategy"] = "objectize_local_surface" if local_surface else "editable_text" if _text_occupancy(module_box, elements) > 0 else "background"
 
                 for item_id in ignore_ids:
                     item = by_id[item_id]
@@ -254,7 +280,7 @@ def _clean_text_from_asset(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
         textured[y:y + height, x:x + width][region] = 0
     if np.any(textured):
         result = cv2.inpaint(result, textured, 4, cv2.INPAINT_TELEA)
-    return result
+    return np.where(mask[:, :, None] > 0, result, crop)
 
 
 def _pixel_box(raw: Any, width: int, height: int, *, max_area: float = 0.80) -> tuple[int, int, int, int] | None:
@@ -384,6 +410,11 @@ def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dic
         if not 0.0003 <= area_ratio <= 0.30 or w < 20 or h < 20 or _text_occupancy((x, y, x + w, y + h), elements) > 0.12:
             continue
         mask = np.asarray(segment.get("mask") or [], dtype=np.uint8)
+        if not mask.size and segment.get("alphaCrop"):
+            asset_path = _path_from_src(segment["alphaCrop"])
+            asset = image_io.imread(str(asset_path), cv2.IMREAD_UNCHANGED) if asset_path and asset_path.is_file() else None
+            if asset is not None and asset.ndim == 3 and asset.shape[2] == 4:
+                mask = asset[:, :, 3]
         if mask.ndim != 2 or not mask.size:
             continue
         fill = float(np.count_nonzero(mask)) / mask.size
@@ -395,7 +426,7 @@ def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dic
 
 
 def _contour_visual_modules(source_path: Path, elements: list[dict[str, Any]], width: int, height: int) -> list[dict[str, Any]]:
-    image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if image is None:
         return []
     edges = cv2.Canny(image, 70, 160)
@@ -447,6 +478,11 @@ def _has_nontext_visual(source: np.ndarray, box: tuple[int, int, int, int], elem
     crop = source[y1:y2, x1:x2]
     if crop.size == 0:
         return False
+    border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+    page_color = np.median(border, axis=0)
+    crop_color = np.median(crop.reshape(-1, 3), axis=0)
+    if np.max(np.abs(crop_color - page_color)) >= 8:
+        return True
     edges = cv2.Canny(crop, 70, 160)
     for item in elements:
         if item.get("type") != "text":
@@ -520,11 +556,53 @@ def _module_alpha(module: dict[str, Any], crop_box: tuple[int, int, int, int]) -
     return alpha
 
 
+def _single_ellipse_alpha(elements: list[dict[str, Any]], crop_box: tuple[int, int, int, int]) -> np.ndarray | None:
+    """Mask a tightly cropped, detected oval without masking mixed modules."""
+    visuals = [item for item in elements if item.get("type") not in {"text", "group", "background"}]
+    if len(visuals) != 1 or visuals[0].get("type") != "ellipse":
+        return None
+    item = visuals[0]
+    bounds = item.get("bbox") or {}
+    left = float(bounds.get("left", item.get("x", 0)))
+    top = float(bounds.get("top", item.get("y", 0)))
+    width = float(bounds.get("width", item.get("width", 0)))
+    height = float(bounds.get("height", item.get("height", 0)))
+    x1, y1, x2, y2 = crop_box
+    if width <= 0 or height <= 0 or (x2 - x1) > width * 1.25 or (y2 - y1) > height * 1.25:
+        return None
+    if left < x1 - 2 or top < y1 - 2 or left + width > x2 + 2 or top + height > y2 + 2:
+        return None
+    scale = 4
+    alpha_large = np.zeros(((y2 - y1) * scale, (x2 - x1) * scale), dtype=np.uint8)
+    center = (round((left + width / 2 - x1) * scale), round((top + height / 2 - y1) * scale))
+    axes = (max(1, round(width * scale / 2)), max(1, round(height * scale / 2)))
+    cv2.ellipse(alpha_large, center, axes, float(item.get("rotation") or 0), 0, 360, 255, -1, cv2.LINE_AA)
+    return cv2.resize(alpha_large, (x2 - x1, y2 - y1), interpolation=cv2.INTER_AREA)
+
+
 def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
     area = max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(0, min(left[3], right[3]) - max(left[1], right[1]))
     left_area = (left[2] - left[0]) * (left[3] - left[1])
     right_area = (right[2] - right[0]) * (right[3] - right[1])
     return area / max(1, left_area + right_area - area)
+
+
+def _inside_whole_badge(text: dict[str, Any], covered: list[dict[str, Any]]) -> bool:
+    for visual in covered:
+        if visual.get("type") != "image":
+            continue
+        metadata = visual.get("metadata") or {}
+        if not (metadata.get("wholeBadgeAsset") or metadata.get("componentType") == "wholeBadgeImage" or visual.get("componentType") == "wholeBadgeImage"):
+            continue
+        bounds = visual.get("bbox") or {}
+        try:
+            left, top = float(bounds["left"]), float(bounds["top"])
+            right, bottom = left + float(bounds["width"]), top + float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _coverage(text, (left, top, right, bottom)) >= 0.85:
+            return True
+    return False
 
 
 def _coverage(item: dict[str, Any], box: tuple[int, int, int, int]) -> float:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,7 @@ def _color_at(image: np.ndarray, x: int, y: int) -> str:
 
 
 def detect_simple_shapes(image_path: Path, text_regions: list[OCRResult]) -> list[dict[str, Any]]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         return []
     height, width = image.shape[:2]
@@ -179,7 +180,7 @@ def _sample_shape_fill(image: np.ndarray, x: int, y: int, width: int, height: in
 
 
 def detect_image_regions(image_path: Path, text_regions: list[OCRResult], shapes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         return []
     height, width = image.shape[:2]

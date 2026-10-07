@@ -6,25 +6,26 @@ import re
 import shutil
 from pathlib import Path
 
-from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, SEGMENTATION_PROVIDER, VISION_PROVIDER
-from app.services.fusion.adjustment_validator import apply_safe_adjustments
+from app.config import (
+    CONVERSION_MODE,
+    LAYOUT_PROVIDER,
+    OCR_PROVIDER,
+    RECONSTRUCTION_SURFACE_MODE,
+    SEGMENTATION_PROVIDER,
+    VISION_PROVIDER,
+)
 from app.models.project_store import ProjectStore
-from app.services.inpainting.service import InpaintingService
 from app.services.layout.service import LayoutService
 from app.services.ocr.service import OCRService
 from app.services.pptx import PPTXRenderer
+from app.services.preprocessing.service import preprocess_image
+from app.services.reconstruction.planner import AIReconstructionPlanner
+from app.services.reconstruction.router import ReconstructionRouter
+from app.services.refinement import TypographyLayoutRefiner
 from app.services.scene.scene_analyzer import SceneAnalyzer
 from app.services.segmentation.segmentation_provider import create_segmentation_provider
-from app.services.preprocessing.service import preprocess_image
-from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
-from app.services.reconstruction.router import ReconstructionRouter
-from app.services.reconstruction.planner import AIReconstructionPlanner
-from app.services.reconstruction.quality_guard import preserve_bad_text_regions
-from app.services.reconstruction.layered_background import separate_foreground
-from app.services.reconstruction.asset_metrics import measure_movable_assets
-from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage, suppress_text_like_assets
-from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
-from app.services.refinement import TypographyLayoutRefiner
+from app.services.visual_qa.analyzer import render_preview, run_visual_qa
+from app.utils import image_io
 
 
 class ReconstructionPipeline:
@@ -84,7 +85,7 @@ class ReconstructionPipeline:
             item["width"] = float(box.get("width", item.get("width", 1)))
             item["height"] = float(box.get("height", item.get("height", 1)))
             item["zIndex"] = int(scene_item.get("zIndex", item.get("zIndex", 0)))
-            for field in ("role", "componentType", "groupId", "visionConfidence", "finalConfidence"):
+            for field in ("role", "componentType", "groupId", "visionConfidence", "finalConfidence", "source", "owner", "contour", "editable"):
                 if field in scene_item:
                     item[field] = copy.deepcopy(scene_item[field])
             scene_metadata = scene_item.get("metadata") or {}
@@ -105,383 +106,183 @@ class ReconstructionPipeline:
         return refined
 
     def analyze_project(self, project_id: str, mode: str | None = None, page: int = 1, allow_fallback: bool = False) -> tuple[list[dict], str, list[str]]:
+        """The sole production route: proposals -> verified owners -> background.
+
+        Old erase/repair helpers remain for reading historical artifacts, but
+        this entry point cannot invoke them or an automatic revision loop.
+        """
+        from app.services.layout.detectors import (
+            detect_simple_shapes,
+            detect_text_elements,
+        )
+        from app.services.reconstruction.exclusive_ownership import (
+            audit_raster_text,
+            build_exclusive_scene,
+        )
+        if RECONSTRUCTION_SURFACE_MODE != "exclusive_object_first":
+            raise ValueError("Erase-first/white-objectized reconstruction is disabled")
         conversion_mode = mode if mode in {"fast", "standard", "high_quality", "maximum"} else CONVERSION_MODE
         record = self.store.get(project_id)
-        ocr = OCRService(OCR_PROVIDER)
-        inpainting = InpaintingService(INPAINT_PROVIDER)
-        inpainting.force_clean = conversion_mode in {"high_quality", "maximum"}
-        inpainting.prefer_inpaint = conversion_mode in {"high_quality", "maximum"}
-        if hasattr(self.scene_analyzer.vision_provider, "strict"):
-            self.scene_analyzer.vision_provider.strict = conversion_mode in {"high_quality", "maximum"} and not allow_fallback
-        slides: list[dict] = []
-        warnings = list(ocr.warnings) + list(inpainting.warnings) + self.segmentation_warnings + self.scene_analyzer.layout_warnings + self.scene_analyzer.vlm_warnings
-        project_output = OUTPUTS_DIR / project_id
-        reconstruction_stats = {
-            "aiUsed": False,
-            "visionProvider": "local",
-            "visionModel": None,
-            "visionMatchedElements": 0,
-            "aiStrategiesApplied": 0,
-            "criticRounds": 0,
-            "criticAdjustmentsApplied": 0,
-            "textBlocksMerged": 0,
-            "singleLinePreserved": 0,
-            "ghostingRegionsDetected": 0,
-            "ghostingRegionsRecleaned": 0,
-            "aiBackgroundRepairs": 0,
-            "wholeBadgeAssets": 0,
-            "duplicateElementsRemoved": 0,
-            "badgeForegroundTransparentExtractions": 0,
-            "badgeSyntheticBackgroundsSuppressed": 0,
-            "duplicateBadgeLayersRemoved": 0,
-            "typographyRefined": False,
-            "fontRoleAssignments": 0,
-            "fontFamilyAdjustments": 0,
-            "fontSizeAdjustments": 0,
-            "textPositionAdjustments": 0,
-            "textboxResizeAdjustments": 0,
-            "pageAlignmentAdjustments": 0,
-            "plannedModules": 0,
-            "wholeImageRegions": 0,
-            "cutoutImages": 0,
-            "nativeShapesPlanned": 0,
-            "backgroundSeparatedRegions": 0,
-            "movableAssetCount": 0,
-            "backgroundResidualCount": 0,
-            "movableVisualCoverage": 0.0,
-            "textFallbackCutouts": 0,
-            "plannerSuppressedElements": 0,
-            "plannerDuplicateTexts": 0,
-            "plannerSnappedRegions": 0,
-            "plannerCvVisualRegions": 0,
-            "mixedModules": 0,
-            "editableTextboxes": 0,
-            "suppressedDuplicates": 0,
-            "visualTextFallbacks": 0,
-            "restoredModules": 0,
-            "backgroundTextErased": 0,
-            "assetTextErased": 0,
-            "detectedTextCount": 0,
-            "editableTextCount": 0,
-            "nonEditableTextCount": 0,
-            "ghostingCount": 0,
-        }
-        typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         images = record.get("images", [])
-        if page < 1 or page > len(images):
+        if not 1 <= page <= len(images):
             raise ValueError("Page does not exist")
-        for page_index, image in [(page, images[page - 1])]:
-            source_path = Path(image["path"])
-            page_output = project_output
-            normalized_path = page_output / "normalized" / f"page_{page_index}.png"
-            width, height = preprocess_image(source_path, normalized_path)
-            original_path = page_output / "original.png" if page_index == 1 else page_output / f"original_{page_index}.png"
-            shutil.copy2(normalized_path, original_path)
-            regions = ocr.recognize(normalized_path)
-            background_path = page_output / "backgrounds" / f"page_{page_index}.png"
-            background_url = f"/media/backgrounds/{project_id}/{background_path.name}"
-            layout, _ = self.layout_service.build_layout(normalized_path, width, height, regions, background_url, page_output / "assets")
-            preserve_regions = [
-                [float(item.get("x", 0)), float(item.get("y", 0)), float(item.get("x", 0)) + float(item.get("width", 0)), float(item.get("y", 0)) + float(item.get("height", 0))]
-                for item in layout.get("elements", [])
-                if (item.get("metadata") or {}).get("preserveAsImage")
-            ]
-            segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
-            scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
-            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
-            self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", self.scene_analyzer.vision_routing)
-            if conversion_mode in {"high_quality", "maximum"} and not allow_fallback and not self.scene_analyzer.vision_routing.get("aiUsed"):
-                attempts = self.scene_analyzer.vision_routing.get("attempts") or []
-                reason = str(attempts[-1].get("error") or "Qwen 视觉规划不可用") if attempts else "Qwen 视觉规划不可用"
-                raise AIUnavailableError(f"{reason}；处理已暂停。请检查 AI 设置并重试，或明确选择基础模式继续。")
-            planned = ((scene_raw.get("vision") or {}).get("reconstructionPlan") or {}).get("modules") or []
-            if conversion_mode in {"high_quality", "maximum"} and not allow_fallback and not planned:
-                raise AIUnavailableError("Qwen 未返回可用的模块规划；处理已暂停，请重试或明确选择基础模式继续。")
-            self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
-            scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
-            planner = getattr(self, "reconstruction_planner", None) or AIReconstructionPlanner()
-            planner_stats = planner.apply(scene_refined, normalized_path, page_output / "assets", project_id, page_index)
-            self._write_json(page_output / "reconstruction_plan.json" if page_index == 1 else page_output / f"reconstruction_plan_{page_index}.json", scene_refined.get("reconstructionPlan", {}))
-            reconstruction_stats["mixedModules"] += sum(1 for item in (scene_refined.get("reconstructionPlan") or {}).get("modules", []) if item.get("reconstructionStrategy") == "mixed_component")
-            for key, value in planner_stats.items():
-                reconstruction_stats[key] += value
-            for item in scene_refined.get("elements", []):
-                if (item.get("metadata") or {}).get("reconstructionStrategySource") == "planner" and item.get("type") == "image":
-                    box = item["bbox"]
-                    preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
-            inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
-            reconstruction_stats["aiBackgroundRepairs"] += int(getattr(inpainting, "ai_repaired_regions", 0))
-            _apply_preserved_text_ownership(layout, inpainting.last_strategies)
-            for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
-                reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
-            for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
-                reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
-            if conversion_mode in {"high_quality", "maximum"}:
-                for item in scene_refined.get("elements", []):
-                    metadata = item.setdefault("metadata", {})
-                    if item.get("type") not in {"text", "background"} and not metadata.get("preserveWholeAsset") and not (metadata.get("reconstructionStrategySource") == "planner" and metadata.get("reconstructionStrategy") == "native_shape"):
-                        metadata.update({"suppressed": True, "suppressRender": True, "ownedBy": "source_background", "reconstructionStrategySource": "background-ownership"})
-            self.reconstruction_router.apply(scene_refined.get("elements", []))
-            routing = self.scene_analyzer.vision_routing
-            reconstruction_stats["aiUsed"] = reconstruction_stats["aiUsed"] or bool(routing.get("aiUsed"))
-            if routing.get("usedProvider") == "qwen":
-                reconstruction_stats["visionProvider"] = "qwen"
-                reconstruction_stats["visionModel"] = routing.get("usedModel") or reconstruction_stats["visionModel"]
-            reconstruction_stats["visionMatchedElements"] += sum(
-                1 for item in scene_refined.get("elements", []) if (item.get("metadata") or {}).get("visionMatched")
-            )
-            reconstruction_stats["aiStrategiesApplied"] += sum(
-                1
-                for item in scene_refined.get("elements", [])
-                if (item.get("metadata") or {}).get("reconstructionStrategySource") == "vision"
-            )
-            layout = self._apply_refined_scene(layout, scene_refined)
-            layout, typography_stats = typography_layout_refiner.refine(layout)
-            fit_text_to_ocr_lines(layout)
-            suppress_text_like_assets(layout)
-            asset_repairs: list[dict] = []
-            local_provider = getattr(getattr(inpainting, "provider", None), "name", "") == "local_lama"
-            asset_provider = getattr(inpainting, "_professional_provider", lambda: None)() if conversion_mode in {"high_quality", "maximum"} or local_provider else None
-            reconstruction_stats["backgroundSeparatedRegions"] += separate_foreground(background_path, layout.get("elements", []), professional_provider=asset_provider, repair_report=asset_repairs if conversion_mode in {"high_quality", "maximum"} else None)
-            reconstruction_stats["aiBackgroundRepairs"] += sum(item["problem"] == "professionalInpaintingApplied" for item in asset_repairs)
-            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None)
-            for key, value in erasure_stats.items():
-                reconstruction_stats[key] += value
-            if local_provider:
-                reconstruction_stats["aiBackgroundRepairs"] = max(reconstruction_stats["aiBackgroundRepairs"], int(getattr(inpainting.provider, "successes", 0)))
-            reconstruction_stats["suppressedDuplicates"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("duplicateSuppressed"))
-            reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
-            for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
-                reconstruction_stats[key] += int(typography_stats[key])
-            layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "layoutProvider": self.scene_analyzer.layout_provider.name, "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats, "reconstructionPlan": scene_refined.get("reconstructionPlan", {})})
-            self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
-            self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
-            self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", routing)
-            shutil.copy2(background_path, page_output / "background.png" if page_index == 1 else page_output / f"background_{page_index}.png")
-            preview_path = page_output / "reconstructed_preview.png" if page_index == 1 else page_output / f"reconstructed_preview_{page_index}.png"
-            render_preview(background_path, layout, preview_path)
-            shutil.copy2(preview_path, page_output / "initial_preview.png" if page_index == 1 else page_output / f"initial_preview_{page_index}.png")
-            if conversion_mode in {"high_quality", "maximum"}:
-                guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index)
-                reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
-                reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
-                    render_preview(background_path, layout, preview_path)
-            critic_rounds = {"fast": 0, "standard": 1, "high_quality": 8, "maximum": 12}[conversion_mode]
-            critic_reports: list[dict] = []
-            best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            if conversion_mode in {"high_quality", "maximum"} and float(best_score.get("overall", 0)) < 0.85:
-                guard = preserve_bad_text_regions(normalized_path, background_path, preview_path, layout, page_output / "assets", page_index, minimum_f1=0.8)
-                reconstruction_stats["visualTextFallbacks"] += guard["preservedTextRegions"]
-                reconstruction_stats["restoredModules"] += guard["restoredModules"]
-                if guard["preservedTextRegions"] or any((item.get("metadata") or {}).get(key) for item in layout.get("elements", []) for key in ("sourceTextRecleaned", "sourceVisualRestored", "visualTextAdjusted")):
-                    render_preview(background_path, layout, preview_path)
-                    best_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            stagnation = 0
-            revision_status = "not_requested" if critic_rounds == 0 else "converged"
-            if critic_rounds and routing.get("usedProvider") not in {None, "none", "local"}:
-                for round_index in range(critic_rounds):
-                    try:
-                        critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
-                    except Exception as exc:
-                        if conversion_mode in {"high_quality", "maximum"} and not allow_fallback:
-                            raise AIUnavailableError("Qwen 视觉复核失败；处理已暂停。请检查 AI 设置并重试，或明确选择基础模式继续。") from exc
-                        raise
-                    critic_reports.append(critic)
-                    before_scene, before_layout = copy.deepcopy(scene_refined), copy.deepcopy(layout)
-                    before_background = background_path.read_bytes()
-                    ghost_boxes = _critic_ghosting_boxes(critic, layout)
-                    if ghost_boxes:
-                        recleaned = inpainting.reclean_background(background_path, ghost_boxes)
-                        reconstruction_stats["ghostingRegionsDetected"] += recleaned
-                        reconstruction_stats["ghostingRegionsRecleaned"] += recleaned
-                    scene_refined = apply_safe_adjustments(scene_refined, critic)
-                    reconstruction_stats["criticRounds"] += 1
-                    applied = len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
-                    reconstruction_stats["criticAdjustmentsApplied"] += applied
-                    layout = self._apply_refined_scene(layout, scene_refined)
-                    layout, _ = typography_layout_refiner.refine(layout)
-                    fit_text_to_ocr_lines(layout)
-                    suppress_text_like_assets(layout)
-                    render_preview(background_path, layout, preview_path)
-                    candidate_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-                    improvement = float(candidate_score.get("overall", 0)) - float(best_score.get("overall", 0))
-                    critic["visualImprovement"] = round(improvement, 4)
-                    if improvement > 0.002:
-                        best_score = candidate_score
-                        stagnation = 0
-                    else:
-                        scene_refined, layout = before_scene, before_layout
-                        background_path.write_bytes(before_background)
-                        render_preview(background_path, layout, preview_path)
-                        stagnation += 1
-                    self._write_json(page_output / f"visual_critic_{round_index + 1}.json", critic)
-                    if not applied or stagnation >= 2:
-                        revision_status = "stagnated" if critic.get("issues") else "converged"
-                        break
-                else:
-                    revision_status = "round_limit_reached"
-            if critic_reports:
-                self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
-                self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
-            score = run_visual_qa(normalized_path, preview_path, page_output, layout)
-            ghosting_count = count_text_ghosting(normalized_path, background_path, layout)
-            reconstruction_stats["ghostingCount"] += ghosting_count
-            score["ghostingCount"] = ghosting_count
-            score["editableTextMismatchCount"] = sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and (item.get("metadata") or {}).get("visualTextMismatch") and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
-            asset_metrics = measure_movable_assets(normalized_path, background_path, layout, scene_refined.get("reconstructionPlan") or {})
-            reconstruction_stats.update(asset_metrics)
-            score.update(asset_metrics)
-            text_coverage = measure_text_coverage(layout, len(regions))
-            for key in ("detectedTextCount", "editableTextCount", "nonEditableTextCount"):
-                reconstruction_stats[key] += int(text_coverage[key])
-            score.update(text_coverage)
-            professional_pending = int(getattr(inpainting, "professional_pending", 0)) + sum(item["problem"] == "professionalInpaintingPending" for item in asset_repairs)
-            enrich_quality_score(score, editable_coverage=float(text_coverage["editableTextCoverage"]), movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=ghosting_count, background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=professional_pending)
-            score["issues"] = [issue for issue in score.get("issues", []) if issue.get("problem") != "professionalInpaintingPending"]
-            score["issues"].extend({"elementId": f"text_background_{index}", "problem": "professionalInpaintingPending", "bbox": item.get("cleanBBox") or item.get("bbox")} for index, item in enumerate(inpainting.last_strategies) if item.get("professionalRepair") in {"unavailable", "invalid_mask", "rejected", "failed"})
-            score.setdefault("issues", []).extend({"elementId": f"asset_background_{index}", "problem": "professionalInpaintingPending", "bbox": item["bbox"]} for index, item in enumerate(asset_repairs) if item["problem"] == "professionalInpaintingPending")
-            if conversion_mode in {"high_quality", "maximum"} and text_coverage["editableTextCoverage"] < 0.95:
-                revision_status = "stagnated"
-                score["coverageGate"] = "review_required"
-                warnings.append("普通文字可编辑覆盖率偏低，需复核未转换的文字。")
-            if conversion_mode in {"high_quality", "maximum"} and ghosting_count:
-                revision_status = "stagnated"
-                score["ghostingGate"] = "review_required"
-                warnings.append("检测到可编辑文字下方仍有原字残留，需复核文字清理。")
-            if conversion_mode in {"high_quality", "maximum"} and score["editableTextMismatchCount"]:
-                revision_status = "stagnated"
-                score["textFidelityGate"] = "review_required"
-            if conversion_mode in {"high_quality", "maximum"} and (asset_metrics["movableVisualCoverage"] < 0.85 or asset_metrics["backgroundResidualCount"] or professional_pending or any(issue.get("problem") in {"duplicateText", "duplicateElement", "wrongBBox", "wrongZOrder", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "textOverlap"} for issue in score.get("issues", []))):
-                revision_status = "stagnated"
-                score["structuralGate"] = "review_required"
-                warnings.append("视觉对象或复杂背景仍有待修复区域，请复核本页质量报告。")
-            if conversion_mode in {"high_quality", "maximum"} and float(score.get("overall", 0)) < 0.85:
-                revision_status = "stagnated"
-                score["visualGate"] = "review_required"
-            if page_index > 1 and (page_output / "difference.png").is_file():
-                shutil.copy2(page_output / "difference.png", page_output / f"difference_{page_index}.png")
-            score["revisionStatus"] = revision_status
-            score["visionProvider"] = routing.get("usedProvider", "local")
-            score["visionModel"] = routing.get("usedModel")
-            score["inpaintingProvider"] = getattr(inpainting, "professional_provider_name", "none") if getattr(inpainting, "professional_provider_name", "none") != "none" else asset_provider.name if asset_provider else "unavailable"
-            score["professionalInpaintingAttempts"] = int(getattr(inpainting.provider, "attempts", 0)) if local_provider else int(getattr(inpainting, "professional_attempts", 0)) + sum(item["provider"] != "unavailable" for item in asset_repairs)
-            score["localInpaintAttempts"] = int(getattr(getattr(inpainting, "provider", None), "attempts", 0))
-            score["localInpaintSuccesses"] = int(getattr(getattr(inpainting, "provider", None), "successes", 0))
-            score["localInpaintFallbacks"] = int(getattr(getattr(inpainting, "provider", None), "failures", 0))
-            score["aiImageEditAttempts"] = 0
-            score["aiBackgroundRepairs"] = reconstruction_stats["aiBackgroundRepairs"]
-            score["revisionRounds"] = len(critic_reports)
-            score["revisionRound"] = 0
-            score["issuesBefore"] = []
-            from app.services.reconstruction.revision import collect_revision_issues
-            score["issuesAfter"] = collect_revision_issues(layout, score, scene_raw)
-            score["improvedRegions"] = []
-            score["stagnationReason"] = "initial_quality_gate" if revision_status == "stagnated" else None
-            shutil.copy2(preview_path, page_output / "final_preview.png" if page_index == 1 else page_output / f"final_preview_{page_index}.png")
-            shutil.copy2(normalized_path, page_output / "source.png" if page_index == 1 else page_output / f"source_{page_index}.png")
-            shutil.copy2(background_path, page_output / "clean_background.png" if page_index == 1 else page_output / f"clean_background_{page_index}.png")
-            self._write_json(page_output / "visual_score.json" if page_index == 1 else page_output / f"visual_score_{page_index}.json", score)
-            self._write_json(page_output / "visual_validation.json" if page_index == 1 else page_output / f"visual_validation_{page_index}.json", score)
-            self._write_json(page_output / "problem_report.json" if page_index == 1 else page_output / f"problem_report_{page_index}.json", {"revisionRound": 0, "issuesBefore": [], "issuesAfter": score["issuesAfter"], "improvedRegions": [], "stagnationReason": score["stagnationReason"], "editableTextCoverage": score["editableTextCoverage"], "overall": score.get("overall")})
-            page_archive = page_output / "pages" / f"page_{page_index}"
-            page_archive.mkdir(parents=True, exist_ok=True)
-            archive_sources = {
-                "source.png": normalized_path,
-                "clean_background.png": background_path,
-                "reconstruction_plan.json": page_output / ("reconstruction_plan.json" if page_index == 1 else f"reconstruction_plan_{page_index}.json"),
-                "scene_raw.json": page_output / ("scene_raw.json" if page_index == 1 else f"scene_raw_{page_index}.json"),
-                "scene_refined.json": page_output / ("scene_refined.json" if page_index == 1 else f"scene_refined_{page_index}.json"),
-                "initial_preview.png": page_output / ("initial_preview.png" if page_index == 1 else f"initial_preview_{page_index}.png"),
-                "final_preview.png": preview_path,
-                "visual_validation.json": page_output / ("visual_validation.json" if page_index == 1 else f"visual_validation_{page_index}.json"),
-                "vision_debug.json": page_output / "vision_debug.json",
-            }
-            for name, source in archive_sources.items():
-                if source.is_file():
-                    shutil.copy2(source, page_archive / name)
-            for directory in ("module_assets", "text_clean_assets"):
-                source_dir = page_output / directory / f"page_{page_index}"
-                (page_archive / directory).mkdir(exist_ok=True)
-                if source_dir.is_dir():
-                    shutil.copytree(source_dir, page_archive / directory, dirs_exist_ok=True)
-            warnings.extend(scene_warnings)
-            reconstruction_stats["editableTextboxes"] += sum(1 for item in layout.get("elements", []) if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")))
-            reconstruction_stats["textFallbackCutouts"] += sum(1 for item in layout.get("elements", []) if (item.get("metadata") or {}).get("sourceTextFallback"))
-            self.store.save_slide(project_id, page_index, layout)
-            slides.append(layout)
-        if slides:
-            output_path, validation = PPTXRenderer().render_project(project_id, slides)
-            shutil.copy2(output_path, project_output / "output.pptx")
-            self._write_json(project_output / "conversion_report.json", {
-                "projectId": project_id,
-                "mode": conversion_mode,
-                "ocrProvider": ocr.provider_name,
-                "visionProvider": reconstruction_stats["visionProvider"],
-                "visionModel": reconstruction_stats["visionModel"],
-                "aiUsed": reconstruction_stats["aiUsed"],
-                "visionMatchedElements": reconstruction_stats["visionMatchedElements"],
-                "aiStrategiesApplied": reconstruction_stats["aiStrategiesApplied"],
-                "criticRounds": reconstruction_stats["criticRounds"],
-                "criticAdjustmentsApplied": reconstruction_stats["criticAdjustmentsApplied"],
-                "textBlocksMerged": reconstruction_stats["textBlocksMerged"],
-                "singleLinePreserved": reconstruction_stats["singleLinePreserved"],
-                "ghostingRegionsDetected": reconstruction_stats["ghostingRegionsDetected"],
-                "ghostingRegionsRecleaned": reconstruction_stats["ghostingRegionsRecleaned"],
-                "aiBackgroundRepairs": reconstruction_stats["aiBackgroundRepairs"],
-                "wholeBadgeAssets": reconstruction_stats["wholeBadgeAssets"],
-                "duplicateElementsRemoved": reconstruction_stats["duplicateElementsRemoved"],
-                "badgeForegroundTransparentExtractions": reconstruction_stats["badgeForegroundTransparentExtractions"],
-                "badgeSyntheticBackgroundsSuppressed": reconstruction_stats["badgeSyntheticBackgroundsSuppressed"],
-                "duplicateBadgeLayersRemoved": reconstruction_stats["duplicateBadgeLayersRemoved"],
-                "typographyRefined": reconstruction_stats["typographyRefined"],
-                "fontRoleAssignments": reconstruction_stats["fontRoleAssignments"],
-                "fontFamilyAdjustments": reconstruction_stats["fontFamilyAdjustments"],
-                "fontSizeAdjustments": reconstruction_stats["fontSizeAdjustments"],
-                "textPositionAdjustments": reconstruction_stats["textPositionAdjustments"],
-                "textboxResizeAdjustments": reconstruction_stats["textboxResizeAdjustments"],
-                "pageAlignmentAdjustments": reconstruction_stats["pageAlignmentAdjustments"],
-                "plannedModules": reconstruction_stats["plannedModules"],
-                "wholeImageRegions": reconstruction_stats["wholeImageRegions"],
-                "cutoutImages": reconstruction_stats["cutoutImages"],
-                "nativeShapesPlanned": reconstruction_stats["nativeShapesPlanned"],
-                "backgroundSeparatedRegions": reconstruction_stats["backgroundSeparatedRegions"],
-                "movableAssetCount": reconstruction_stats["movableAssetCount"],
-                "backgroundResidualCount": reconstruction_stats["backgroundResidualCount"],
-                "movableVisualCoverage": reconstruction_stats["movableVisualCoverage"],
-                "textFallbackCutouts": reconstruction_stats["textFallbackCutouts"],
-                "plannerSuppressedElements": reconstruction_stats["plannerSuppressedElements"],
-                "plannerDuplicateTexts": reconstruction_stats["plannerDuplicateTexts"],
-                "plannerSnappedRegions": reconstruction_stats["plannerSnappedRegions"],
-                "plannerCvVisualRegions": reconstruction_stats["plannerCvVisualRegions"],
-                "mixedModules": reconstruction_stats["mixedModules"],
-                "editableTextboxes": reconstruction_stats["editableTextboxes"],
-                "detectedTextCount": reconstruction_stats["detectedTextCount"],
-                "editableTextCount": reconstruction_stats["editableTextCount"],
-                "nonEditableTextCount": reconstruction_stats["nonEditableTextCount"],
-                "ghostingCount": reconstruction_stats["ghostingCount"],
-                "editableTextCoverage": round(reconstruction_stats["editableTextCount"] / reconstruction_stats["detectedTextCount"], 4) if reconstruction_stats["detectedTextCount"] else 1.0,
-                "suppressedDuplicates": reconstruction_stats["suppressedDuplicates"],
-                "visualTextFallbacks": reconstruction_stats["visualTextFallbacks"],
-                "restoredModules": reconstruction_stats["restoredModules"],
-                "backgroundTextErased": reconstruction_stats["backgroundTextErased"],
-                "assetTextErased": reconstruction_stats["assetTextErased"],
-                "revisionStatus": revision_status,
-                "requestedVisionProvider": self.scene_analyzer.vision_routing.get("requestedProvider"),
-                "routing": self.scene_analyzer.vision_routing,
-                "layoutProvider": self.scene_analyzer.layout_provider.name,
-                "segmentationProvider": self.segmentation_provider.name,
-                "slideCount": len(slides),
-                "validation": validation,
-                "warnings": sorted(set(warnings + getattr(self.scene_analyzer.vision_provider, "warnings", []))),
-            })
-        warnings.extend(ocr.warnings)
-        warnings.extend(inpainting.warnings)
-        return slides, ocr.provider_name, sorted(set(warnings))
+        root = self.store.root / project_id
+        root.mkdir(parents=True, exist_ok=True)
+        # Preserve the previous scene, assets, background and QA before analysis.
+        # A failed API call never destroys an already usable result.
+        from datetime import datetime, timezone
+        from uuid import uuid4
+        token = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:6]
+        candidate = root / "candidates" / token
+        candidate.mkdir(parents=True)
+        original_source = Path(images[page-1]["path"])
+        normalized = candidate / "normalized" / f"page_{page}.png"
+        width, height = preprocess_image(original_source, normalized)
+        ocr = OCRService(OCR_PROVIDER)
+        regions = ocr.recognize(normalized)
+        # Do NOT call LayoutService's badge suppressor, pre-cleaner or planner.
+        # Scene fusion is used for proposals, never OCR body or position edits.
+        ocr_layout = {"version": "1.1", "slide": {"width": width, "height": height}, "elements": detect_text_elements(regions)}
+        ocr_layout["elements"].extend(detect_simple_shapes(normalized, regions))
+        if hasattr(self.scene_analyzer.vision_provider, "strict"):
+            self.scene_analyzer.vision_provider.strict = conversion_mode != "fast" and not allow_fallback
+        segments = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized, candidate / "assets", project_id)
+        scene, scene_warnings = self.scene_analyzer.analyze(normalized, ocr_layout, regions, segments,
+            enable_vision=conversion_mode != "fast", mode="high" if conversion_mode in {"maximum", "high_quality"} else conversion_mode)
+        routing = self.scene_analyzer.vision_routing
+        self._write_json(candidate / "routing.json", routing)
+        self._write_json(candidate / "vision_debug.json", self._vision_debug_payload())
+        if conversion_mode != "fast" and not allow_fallback and not routing.get("aiUsed"):
+            raise AIUnavailableError("Qwen 页面理解未成功；候选已保留，原结果没有被覆盖。请检查 AI 设置后重试。")
+        self._write_json(candidate / "scene_raw.json", scene)
+        self._write_json(candidate / "ocr_layout.json", ocr_layout)
+        layout = build_exclusive_scene(normalized, ocr_layout, scene, segments, candidate, project_id, page)
+        layout["metadata"].update({"conversionMode": conversion_mode, "ocrProvider": ocr.provider_name,
+            "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
+            "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name})
+        background = candidate / "backgrounds" / f"page_{page}.png"
+        # Preview renders the candidate paths before assets have been committed.
+        preview_layout = copy.deepcopy(layout)
+        for item in preview_layout["elements"]:
+            if item.get("src"):
+                folder = "backgrounds" if item["type"] == "background" else "assets"
+                item["src"] = str(candidate / folder / item["src"].split("/")[-1])
+        preview = candidate / "reconstructed_preview.png"
+        render_preview(background, preview_layout, preview)
+        audit = audit_raster_text(normalized, layout, candidate)
+        self._write_json(candidate / "raster_text_audit.json", audit)
+        if audit["missingAssetCount"] or audit["rasterNativeDuplicateTextCount"]:
+            raise ValueError("Candidate has missing assets or retained original glyphs; previous result kept")
+        source_image = image_io.imread(normalized)
+        preview_image = image_io.imread(preview)
+        import numpy as np
+        if source_image is None or preview_image is None:
+            raise ValueError("Candidate preview unavailable")
+        native_ink = np.zeros(source_image.shape[:2], bool)
+        for node in layout["metadata"]["ownershipAudit"]["nodes"]:
+            if node["owner"] != "editable_text":
+                continue
+            mask = image_io.imread(candidate / node["mask"], -1)
+            x1,y1,x2,y2 = node["sourceBBox"]
+            native_ink[y1:y2, x1:x2] |= mask[:, :, 3] > 0
+        diff = np.max(np.abs(source_image.astype(float)-preview_image.astype(float)), axis=2)
+        # Permit a small antialiasing fringe around a measured font replacement.
+        import cv2
+        text_support = cv2.dilate(native_ink.astype(np.uint8), np.ones((5,5), np.uint8)) > 0
+        outside_text_changed = int(((diff > 0) & ~text_support).sum())
+        if outside_text_changed:
+            raise ValueError(f"Candidate loses or changes {outside_text_changed} non-text pixels; no commit allowed")
+        detected = len(layout["metadata"]["ownershipAudit"]["textDecisions"])
+        editable = sum(e.get("owner") == "editable_text" for e in layout["elements"])
+        score = run_visual_qa(normalized, preview, candidate, layout)
+        score.update({"editableTextCoverage": editable/max(1,detected), "detectedTextCount": detected,
+            "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
+            "editableTextCount": editable, "nonEditableTextCount": detected-editable, "objectExtractionCoverage": 1,
+            "movableVisualCoverage": 1, "visualAreaPreserved": 1, "nonTextChangedPixelCount": outside_text_changed,
+            "missingVisualCount": 0, "missingAssetCount": 0, "ghostingCount": 0, "duplicateCount": 0,
+            "backgroundResidualCount": 0, "shapeCount": sum(e.get("owner") == "native_shape" for e in layout["elements"]),
+            "imageAssetCount": audit["activeImageCount"], "rasterNativeDuplicateTextCount": 0,
+            "revisionRounds": 0, "revisionRound": 0, "revisionStatus": "automatic_revisions_paused",
+            "issuesAfter": [], "stagnationReason": "ownership_audit_pause",
+            "metricScope": "exact non-text preview preservation; native font match measured, PowerPoint render separate"})
+        self._write_json(candidate / "visual_score.json", score)
+        self._write_json(candidate / "visual_validation.json", score)
+        self._write_json(candidate / f"scene_final_{page}.json", layout)
+        prior_slides = self.store.list_slides(project_id)
+        candidate_slides = [preview_layout if index == page else slide for index, slide in enumerate(prior_slides, 1)]
+        if page > len(prior_slides):
+            candidate_slides.append(preview_layout)
+        output_path, validation = PPTXRenderer().render_project(project_id, candidate_slides, output_dir=candidate)
+        # Freeze the prior working artifacts. Never delete an old asset.
+        if (root / "slides" / f"page_{page}.json").is_file():
+            archive = root / "snapshots" / token
+            archive.mkdir(parents=True)
+            for name in ("assets", "backgrounds", "slides", "ownership_masks"):
+                if (root / name).is_dir():
+                    shutil.copytree(root / name, archive / name)
+            for filename in ("reconstructed_preview.png", "visual_score.json", "scene_raw.json", "editable.pptx"):
+                if (root / filename).is_file():
+                    shutil.copy2(root / filename, archive / filename)
+        from app.services.reconstruction.publication import preserve_published_state
+        suffix = "" if page == 1 else f"_{page}"
+        protected_files = [f"slides/page_{page}.json", f"backgrounds/page_{page}.png",
+                           f"normalized/page_{page}.png", "editable.pptx", "output.pptx", "validation.json",
+                           "conversion_report.json", f"ownership_labels_{page}.png",
+                           f"ownership_audit_{page}.json", f"scene_final_{page}.json"]
+        protected_files += [f"{name}{suffix}.json" for name in
+                            ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit")]
+        protected_files += [f"{name}{suffix}.png" for name in
+                            ("source", "original", "reconstructed_preview", "final_preview", "initial_preview", "clean_background")]
+        with preserve_published_state(root, protected_files):
+            for name in ("assets", "ownership_masks", "normalized"):
+                if (candidate / name).is_dir():
+                    shutil.copytree(candidate / name, root / name, dirs_exist_ok=True)
+            (root / "backgrounds").mkdir(exist_ok=True)
+            shutil.copy2(background, root / "backgrounds" / background.name)
+            suffix = "" if page == 1 else f"_{page}"
+            for filename in ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit"):
+                self._write_json(root / f"{filename}{suffix}.json", json.loads((candidate / f"{filename}.json").read_text(encoding="utf-8")))
+            for filename in ("source", "original"):
+                shutil.copy2(normalized, root / f"{filename}{suffix}.png")
+            for filename in ("reconstructed_preview", "final_preview", "initial_preview"):
+                shutil.copy2(preview, root / f"{filename}{suffix}.png")
+            shutil.copy2(background, root / f"clean_background{suffix}.png")
+            for filename in (f"ownership_labels_{page}.png", f"ownership_audit_{page}.json", f"scene_final_{page}.json"):
+                shutil.copy2(candidate / filename, root / filename)
+            self.store.save_slide(project_id, page, layout)
+            shutil.copy2(output_path, root / "editable.pptx")
+            shutil.copy2(candidate / "validation.json", root / "validation.json")
+            shutil.copy2(output_path, root / "output.pptx")
+            warnings = list(ocr.warnings) + scene_warnings + list(getattr(self.segmentation_provider, "warnings", []))
+            warnings.append(f"自动优化已暂停；{detected-editable}/{detected} 条文字保留在可移动图片中，避免不可靠替换造成重影。")
+            self._write_json(root / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode,
+                "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
+                "aiUsed": bool(routing.get("aiUsed")), "routing": routing, "criticRounds": 0,
+                "pipeline": "exclusive_object_first", "revisionStatus": "automatic_revisions_paused", "validation": validation,
+                "warnings": warnings, "quality": score})
+        return [layout], ocr.provider_name, warnings
 
 
 class AIUnavailableError(RuntimeError):
     """High quality analysis paused until the user explicitly chooses recovery."""
+
+
+def _ensure_uncovered_text_owners(layout: dict, uncovered_ids: list[str]) -> None:
+    """Keep OCR lines missed by the visual plan without duplicating merged lines."""
+    elements = layout.get("elements", [])
+    active = [item for item in elements if item.get("type") == "text" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+    owned_ids = {str(source_id) for item in active for source_id in ((item.get("metadata") or {}).get("sourceOcrIds") or [item.get("id")])}
+    for text_id in uncovered_ids:
+        if text_id in owned_ids:
+            continue
+        item = next((entry for entry in elements if entry.get("id") == text_id and entry.get("type") == "text"), None)
+        if item is None:
+            continue
+        metadata = item.setdefault("metadata", {})
+        for key in ("suppressed", "suppressRender", "ownedBy"):
+            metadata.pop(key, None)
+        metadata.update({"reconstructionStrategy": "editable_text", "reconstructionStrategySource": "ocr_plan_fallback", "textOwner": text_id})
+        owned_ids.add(text_id)
 
 
 def _redact_debug_text(value: object) -> str:

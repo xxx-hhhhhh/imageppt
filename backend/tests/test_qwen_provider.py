@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from app.services.vision.qwen_provider import QwenProvider, VisionProviderError, image_to_data_url
+from app.services.vision.qwen_provider import _plan_text_coverage
 from app.services.vision.schemas import extract_json, normalize_scene_payload, validate_json
 
 
@@ -44,6 +45,16 @@ def test_scene_schema_preserves_reconstruction_semantics():
     assert element["reconstructionStrategy"] == "transparent_image"
     assert element["doNotVectorize"] is True
     assert element["visualComplexity"] == 0.9
+
+
+def test_plan_normalization_keeps_module_with_noncanonical_children_and_strategy():
+    plan = validate_json({"reconstructionPlan": {"modules": [{
+        "moduleId": "card", "bbox": {"left": 0.1, "top": 0.1, "width": 0.4, "height": 0.4},
+        "reconstructionStrategy": "hybrid", "children": ["icon", "label"],
+    }]}})["reconstructionPlan"]
+    assert len(plan["modules"]) == 1
+    assert plan["modules"][0]["reconstructionStrategy"] == "mixed_component"
+    assert plan["modules"][0]["children"] == [{"id": "icon"}, {"id": "label"}]
 
 
 def test_qwen_provider_retries_json_repair(monkeypatch, tmp_path):
@@ -114,10 +125,11 @@ def test_qwen_requests_dedicated_plan_when_scene_omits_body(monkeypatch, tmp_pat
     ]}
     result = provider.analyze_scene(image_path, context)
     assert len(calls) == 2
-    assert result["reconstructionPlan"]["modules"][0]["id"] == "body"
+    assert [item["id"] for item in result["reconstructionPlan"]["modules"]] == ["header", "body"]
+    assert result["planCoverage"]["textCoverage"] == 1.0
 
 
-def test_high_quality_rejects_plan_that_still_omits_body(monkeypatch, tmp_path):
+def test_high_quality_keeps_partial_plan_with_ocr_fallback(monkeypatch, tmp_path):
     provider = object.__new__(QwenProvider)
     provider.name = "qwen"
     provider.model = "qwen3-vl-flash"
@@ -130,8 +142,70 @@ def test_high_quality_rejects_plan_that_still_omits_body(monkeypatch, tmp_path):
         {"id": str(index), "type": "text", "text": "line", "bbox": {"left": 10, "top": 35 + index * 10, "width": 40, "height": 8}}
         for index in range(4)
     ]}
-    with pytest.raises(VisionProviderError, match="does not cover"):
-        provider.analyze_scene(image_path, context, mode="high")
+    result = provider.analyze_scene(image_path, context, mode="high")
+    assert result["planCoverage"]["uncoveredTextIds"] == ["0", "1", "2", "3"]
+    assert result["planCoverage"]["status"] == "partial"
+    assert result["reconstructionPlan"]["modules"][0]["id"] == "header"
+
+
+def test_plan_text_coverage_reports_uncovered_titles_and_labels():
+    context = {"width": 100, "height": 100, "candidate_elements": [
+        {"id": name, "type": "text", "text": name, "bbox": {"left": 10, "top": top, "width": 20, "height": 5}}
+        for name, top in (("title", 5), ("body", 45), ("label", 85))
+    ]}
+    partial = {"modules": [{"id": "body", "bbox": {"left": 0, "top": 0.3, "width": 1, "height": 0.4}}]}
+    complete = {"modules": [{"id": "all", "bbox": {"left": 0, "top": 0, "width": 1, "height": 1}}]}
+    assert _plan_text_coverage(partial, context)["uncoveredTextIds"] == ["title", "label"]
+    assert _plan_text_coverage(complete, context)["textCoverage"] == 1.0
+
+
+def test_plan_retry_receives_uncovered_ids_only_once(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    plan = {"modules": [{"id": "module", "bbox": {"left": 0, "top": 0, "width": 1, "height": 0.48}, "confidence": 0.9}]}
+    calls = []
+    def fake_request(messages, repair_prompt=None):
+        calls.append(messages)
+        return json.dumps({"elements": [], "reconstructionPlan": plan} if len(calls) == 1 else plan)
+    monkeypatch.setattr(provider, "_request", fake_request)
+    context = {"width": 100, "height": 100, "candidate_elements": [
+        {"id": f"text_{i}", "type": "text", "text": "line", "bbox": {"left": 5, "top": 5 + i * 16, "width": 20, "height": 6}}
+        for i in range(5)
+    ]}
+    result = provider.analyze_scene(image_path, context, mode="high")
+    assert len(calls) == 2
+    assert "uncoveredTextIds" in calls[1][1]["content"][1]["text"]
+    assert result["planCoverage"]["textCoverage"] == 0.6
+    assert result["planCoverage"]["ocrFallbackTextIds"] == ["text_3", "text_4"]
+
+
+def test_complete_plan_needs_no_retry(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    calls = []
+    plan = {"modules": [{"id": "page", "bbox": {"left": 0, "top": 0, "width": 1, "height": 1}, "confidence": 0.9}]}
+    monkeypatch.setattr(provider, "_request", lambda messages, repair_prompt=None: calls.append(messages) or json.dumps({"reconstructionPlan": plan}))
+    context = {"width": 100, "height": 100, "candidate_elements": [{"id": "title", "type": "text", "text": "Title", "bbox": {"left": 10, "top": 10, "width": 30, "height": 10}}]}
+    result = provider.analyze_scene(image_path, context, mode="high")
+    assert len(calls) == 1
+    assert result["planCoverage"]["status"] == "complete"
+
+
+def test_high_quality_fails_when_plan_is_completely_unusable(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name = "qwen"
+    provider.model = "qwen3-vl-flash"
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    monkeypatch.setattr(provider, "_request", lambda messages, repair_prompt=None: json.dumps({"elements": [], "reconstructionPlan": {"modules": []}}))
+    with pytest.raises(VisionProviderError, match="no usable modules"):
+        provider.analyze_scene(image_path, {"width": 100, "height": 100}, mode="high")
 
 
 def test_scene_payload_normalizes_common_qwen_aliases():

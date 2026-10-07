@@ -46,6 +46,7 @@ export interface LayoutJSON {
   source?: string | null;
   backgroundUrl?: string | null;
   coordinateSystem?: string;
+  metadata?: { planCoverage?: { status?: 'partial' | 'complete'; textCoverage?: number; uncoveredTextIds?: string[] }; [key: string]: unknown };
   elements: LayoutElement[];
 }
 
@@ -89,5 +90,15 @@ export interface RevisionResponse {
   editableCoverageBefore: number;
   editableCoverageAfter: number;
   stagnationReason?: string | null;
+  assetsBefore: number;
+  assetsAfter: number;
+  missingAssetCount: number;
+  preservedAssetCount: number;
+  replacedAssetCount: number;
+  inpaintedRegions: number;
+  protectedRegions: number;
+  newlyLostVisualPixels: number;
+  largestNewVisualLoss: number;
+  rollbackTriggered: boolean;
   regionalAnalysis?: { elementId?: string; problem: string; bbox: number[]; pixelDifference: number; edgeDifference: number; strategyChange: string }[];
 }

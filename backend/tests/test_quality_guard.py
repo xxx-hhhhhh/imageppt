@@ -83,5 +83,10 @@ def test_low_confidence_visual_mismatch_does_not_add_false_ocr_text(tmp_path: Pa
     preserve_bad_text_regions(*paths, layout, tmp_path / "assets", 1)
     assert layout["elements"][0]["metadata"]["suppressRender"] is True
     assert layout["elements"][0]["metadata"]["fallbackReason"] == "low_confidence_ocr_mismatch"
-    assert len(layout["elements"]) == 1
-    np.testing.assert_array_equal(cv2.imread(str(paths[1]))[15:65, 10:80], source[15:65, 10:80])
+    assert len(layout["elements"]) == 2
+    cutout = layout["elements"][1]
+    assert cutout["type"] == "image" and cutout["metadata"]["ownedTextId"] == "false-text"
+    image = cv2.imread(str(tmp_path / "assets" / "fallback_1_false-text.png"), cv2.IMREAD_UNCHANGED)
+    assert image.shape[2] == 4 and image[0, 0, 3] == 0
+    assert image[20, 20, 3] == 255
+    np.testing.assert_array_equal(cv2.imread(str(paths[1])), blank)

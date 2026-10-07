@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 import json
@@ -13,15 +14,34 @@ from app.services.inpainting.service import InpaintingService
 from app.models.project_store import ProjectStore
 from app.services.reconstruction.layered_background import separate_foreground
 from app.services.reconstruction.asset_metrics import measure_movable_assets
+from app.services.reconstruction.objectization_audit import audit_objectization, repair_missing_regions, _recover_pale_asset_gaps
+from app.services.reconstruction.asset_ownership import is_badge_owned_text, is_uncertain_image_owned_text, mark_image_dominant_ocr, preserve_uncertain_text_as_visual, restore_image_owned_text
+from app.services.reconstruction.background_objects import objectize_background_regions
+from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.planner import AIReconstructionPlanner
+from app.services.reconstruction.residual_objects import extract_residual_objects
+from app.services.reconstruction.replacement_qa import check_replacement_regions
+from app.services.reconstruction.residual_bleed import repair_residual_color_damage, restore_hidden_source_assets
+from app.services.reconstruction.revision_integrity import asset_path, assess_revision, inspect_assets, localize_project_assets, protected_visuals
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
+from app.services.reconstruction.white_objectization import _occupy_text_glyphs, detect_flat_page_surface
+from app.services.reconstruction.owner_gate import compact_retained_fragments, ownership_evidence
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
+
+OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
+
+# Bump when repair/acceptance algorithms change so obsolete failed attempts do
+# not permanently prevent a newer strategy from repairing the same region.
+REVISION_STRATEGY_VERSION = 14
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
     """Continue local revisions while a high-quality page measurably improves."""
+    from app.config import AUTOMATIC_REVISIONS_ENABLED
+    if not AUTOMATIC_REVISIONS_ENABLED:
+        raise ValueError("Automatic revisions are paused pending exclusive ownership audit")
     root = store.root / project_id
     conversion_report = root / "conversion_report.json"
     mode = json.loads(conversion_report.read_text(encoding="utf-8")).get("mode") if conversion_report.is_file() else "standard"
@@ -67,6 +87,9 @@ def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_round
 
 def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> dict:
     """Attempt a regional revision using saved slide and QA artifacts only."""
+    from app.config import AUTOMATIC_REVISIONS_ENABLED
+    if not AUTOMATIC_REVISIONS_ENABLED:
+        raise ValueError("Automatic revisions are paused pending exclusive ownership audit")
     root = store.root / project_id
     source = root / ("source.png" if page == 1 else f"source_{page}.png")
     background = root / "backgrounds" / f"page_{page}.png"
@@ -75,6 +98,13 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     if not all(path.is_file() for path in (source, background, preview, score_path)):
         raise FileNotFoundError("Page analysis artifacts are not available")
     baseline = store.get_slide(project_id, page)
+    localized = localize_project_assets(root, baseline)
+    if localized:
+        store.save_slide(project_id, page, baseline)
+    baseline_assets = inspect_assets(root, baseline)
+    if baseline_assets["missingAssetCount"]:
+        raise ValueError("Current slide has missing image assets; repair the existing result before revision")
+    asset_files_before = {path.resolve() for path in (root / "assets").glob("*") if path.is_file()}
     score_before = json.loads(score_path.read_text(encoding="utf-8"))
     history_path = root / f"revision_history_{page}.json"
     history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
@@ -83,10 +113,56 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     raw_scene = json.loads(scene_path.read_text(encoding="utf-8")) if scene_path.is_file() else {}
     problem_path = root / ("problem_report.json" if page == 1 else f"problem_report_{page}.json")
     previous_report = json.loads(problem_path.read_text(encoding="utf-8")) if problem_path.is_file() else {}
-    issues_before = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else collect_revision_issues(baseline, score_before, raw_scene)
-    priority = {"ghosting": 0, "duplicateText": 1, "duplicateElement": 1, "wrongOwnership": 2, "wrongZOrder": 2, "wrongBBox": 3, "textOverlap": 4, "missingEditableText": 5, "brokenChartOrModule": 6, "assetBakedIntoBackground": 7, "professionalInpaintingPending": 8, "backgroundResidual": 9}
-    tried = {(item.get("problem"), item.get("elementId")) for attempt in history if not attempt.get("accepted") for item in attempt.get("targetedIssues", [])}
-    ranked = sorted(issues_before, key=lambda item: priority.get(item["problem"], 9))
+    # Revalidate actual source layers; saved scores can predate detector fixes.
+    score_before["ghostingCount"] = count_text_ghosting(source, background, baseline)
+    baseline_audit = audit_objectization(source, background, preview, baseline)
+    score_before["objectizationAudit"] = baseline_audit
+    baseline_detected_ids = {str(source_id) for item in baseline.get("elements", []) if item.get("type") == "text"
+                             for source_id in ((item.get("metadata") or {}).get("sourceOcrIds") or [item.get("id")]) if source_id}
+    baseline_detected = max(int(score_before.get("detectedTextCount") or 0), len(baseline_detected_ids))
+    baseline_coverage = measure_text_coverage(baseline, baseline_detected)["editableTextCoverage"]
+    baseline_metrics = measure_movable_assets(source, background, baseline,
+                                              (baseline.get("metadata") or {}).get("reconstructionPlan") or {})
+    # Reapply today's ownership gates to the raw visual score, not to an
+    # already enriched score or to stale ghosting/editability statistics.
+    score_before["overall"] = score_before.get("visualSceneScore", score_before.get("overall", 0))
+    score_before.update(baseline_metrics)
+    enrich_quality_score(score_before, editable_coverage=baseline_coverage,
+                         movable_coverage=float(baseline_metrics["movableVisualCoverage"]),
+                         ghosting_count=int(score_before["ghostingCount"]),
+                         background_residual_count=int(baseline_metrics["backgroundResidualCount"]),
+                         professional_pending=int(score_before.get("professionalRepairPending") or 0))
+    saved_issues = previous_report.get("issuesAfter") if isinstance(previous_report.get("issuesAfter"), list) else []
+    # Saved reports and scores describe the previous render. Pixel-derived
+    # objectization issues must be revalidated against the current assets and
+    # preview before a revision is allowed to create another visual object.
+    carry_issues = [item for item in [*saved_issues, *collect_revision_issues(baseline, score_before, raw_scene)]
+                    if item.get("problem") not in OBJECTIZATION_AUDIT_PROBLEMS]
+    issues_before = list({(item.get("problem"), item.get("elementId")): item for item in [*carry_issues, *baseline_audit["issues"]]}.values())
+    visual_ocr_ids = mark_image_dominant_ocr(source, baseline)
+    issues_before.extend({"problem": "wrongOwnership", "elementId": item_id,
+                          "reason": "image_dominant_ocr"} for item_id in visual_ocr_ids)
+    baseline_by_id = {str(item.get("id")): item for item in baseline.get("elements", [])}
+    issues_before = [issue for issue in issues_before if issue.get("problem") != "ghosting"
+                     or (baseline_by_id.get(str(issue.get("elementId")), {}).get("metadata") or {}).get("ghostingDetected")]
+    issues_before = [issue for issue in issues_before if not (
+        issue.get("problem") == "missingEditableText"
+        and (is_badge_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline)
+             or is_uncertain_image_owned_text(baseline_by_id.get(str(issue.get("elementId")), {}), baseline))
+    )]
+    priority = {"ghosting": 0, "pageSurfaceLost": 1, "pageSurfaceBakedIntoBackground": 1, "largeVisualLoss": 1, "missingBackplate": 1, "missingVisualObject": 1, "blankVisualOwner": 1, "unsupportedNativeShape": 1, "paleAssetGap": 1,
+                "duplicateText": 2, "duplicateElement": 2, "wrongOwnership": 2,
+                "visualContentMismatch": 3, "squareCutoutUnresolved": 3, "wrongZOrder": 3, "wrongBBox": 4,
+                "textOverlap": 5, "missingEditableText": 6, "brokenChartOrModule": 7,
+                "assetBakedIntoBackground": 8, "professionalInpaintingPending": 9, "backgroundResidual": 10}
+    tried = {(item.get("problem"), item.get("elementId")) for attempt in history
+             if not attempt.get("accepted") and attempt.get("strategyVersion") == REVISION_STRATEGY_VERSION
+             for item in attempt.get("targetedIssues", [])}
+    ranked = sorted(issues_before, key=lambda item: (
+        0 if item.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
+                                    "colored_residual_washed_out"}
+        else priority.get(item["problem"], 9),
+        -int(item.get("pixelArea") or 0)))
     target_issues = [item for item in ranked if (item.get("problem"), item.get("elementId")) not in tried][:4]
     candidate = copy.deepcopy(baseline)
     candidate_dir = root / "revisions" / f"round_{round_number}"
@@ -94,14 +170,58 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     candidate_bg = candidate_dir / "background.png"
     candidate_preview = candidate_dir / "preview.png"
     shutil.copy2(background, candidate_bg)
+    shutil.copy2(background, candidate_dir / "baseline_background.png")
+    shutil.copy2(preview, candidate_dir / "baseline_preview.png")
+    (candidate_dir / "baseline_layout.json").write_text(json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8")
     inpainting = InpaintingService(INPAINT_PROVIDER)
-    local_cleaner = inpainting.clean_array if inpainting.provider.name == "local_lama" else None
+    local_cleaner = (lambda image, mask: inpainting.clean_array(image, mask, owner_mask=mask)) if inpainting.provider.name == "local_lama" and any(issue["problem"] == "ghosting" for issue in target_issues) else None
     local_provider = inpainting.provider if inpainting.provider.name == "local_lama" else None
     touched_text: set[str] = set()
     erase_text: set[str] = set()
     changed_ids: set[str] = set()
+    inpainted_regions = 0
     by_id = {str(item.get("id")): item for item in candidate.get("elements", [])}
     regional_analysis = _analyze_regions(source, preview, target_issues, by_id, candidate_dir)
+    changed_ids.update(restore_hidden_source_assets(source, candidate, target_issues, root / "assets"))
+    restored_pale_assets = repair_residual_color_damage(source, candidate, target_issues,
+                                                         root / "assets", project_id, round_number)
+    changed_ids.update(restored_pale_assets)
+    pale_targets = {str(issue.get("elementId")) for issue in target_issues if issue.get("problem") == "paleAssetGap"}
+    if pale_targets:
+        pale_repairs = _recover_pale_asset_gaps(source, preview, candidate, root / "assets", project_id, page,
+                                                target_ids=pale_targets,
+                                                asset_prefix=f"revision_page_{page}_round_{round_number}")
+        changed_ids.update(str(item["id"]) for item in pale_repairs)
+
+    if any(issue.get("problem") in {"pageSurfaceLost", "pageSurfaceBakedIntoBackground"} for issue in target_issues):
+        image = image_io.imread(str(source), cv2.IMREAD_COLOR)
+        color = detect_flat_page_surface(image) if image is not None else None
+        if color is not None:
+            for item in candidate.get("elements", []):
+                if item.get("type") == "background":
+                    item["zIndex"] = -1000
+            surface_id = f"page_surface_{page}"
+            existing = by_id.get(surface_id)
+            fill = "#" + "".join(f"{int(channel):02X}" for channel in color[::-1])
+            if existing is None:
+                surface = {"id": surface_id, "type": "rectangle", "x": 0, "y": 0,
+                           "width": image.shape[1], "height": image.shape[0], "rotation": 0,
+                           "zIndex": -999, "style": {"fill": fill, "opacity": 1},
+                           "metadata": {"reconstructionStrategy": "native_shape",
+                                        "reconstructionStrategySource": "flat_page_surface",
+                                        "layerRole": "page_surface", "pageSurface": True}}
+                candidate.setdefault("elements", []).append(surface)
+                by_id[surface_id] = surface
+            else:
+                existing.update({"zIndex": -999, "style": {"fill": fill, "opacity": 1}})
+            changed_ids.add(surface_id)
+            if any(issue.get("problem") == "pageSurfaceBakedIntoBackground" for issue in target_issues):
+                occupied = _surface_residual_occupancy(image, candidate, surface_id)
+                residuals, _ = extract_residual_objects(image, occupied, root / "assets", project_id, page,
+                                                        asset_prefix=f"revision_{round_number}_surface_page_{page}")
+                candidate["elements"].extend(residuals)
+                changed_ids.update(item["id"] for item in residuals)
+                image_io.imwrite(str(candidate_bg), np.full_like(image, 255))
 
     for issue in target_issues:
         item = by_id.get(str(issue.get("elementId")))
@@ -109,6 +229,15 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             continue
         problem = issue["problem"]
         metadata = item.setdefault("metadata", {})
+        if problem == "wrongOwnership" and metadata.get("imageDominantOCREvidence"):
+            restored = preserve_uncertain_text_as_visual(
+                source, candidate, item, root / "assets", project_id,
+                prefix=f"revision_{round_number}_visual_ocr",
+            )
+            if restored is not None:
+                changed_ids.update(restored)
+                changed_ids.add(item["id"])
+                continue
         if problem in {"missingEditableText", "wrongOwnership"} and item.get("type") == "text":
             metadata.pop("suppressed", None)
             metadata.pop("suppressRender", None)
@@ -131,6 +260,14 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 loser.setdefault("metadata", {})["suppressed"] = True
                 changed_ids.add(loser["id"])
         elif problem == "ghosting" and item.get("type") == "text":
+            preserved = preserve_uncertain_text_as_visual(
+                source, candidate, item, root / "assets", project_id,
+                prefix=f"revision_{round_number}_uncertain_text",
+            )
+            if preserved is not None:
+                changed_ids.update(preserved)
+                changed_ids.add(item["id"])
+                continue
             touched_text.add(item["id"])
             erase_text.add(item["id"])
             changed_ids.add(item["id"])
@@ -140,6 +277,9 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 item["zIndex"] = max(int(item.get("zIndex") or 0), int(owner.get("zIndex") or 0) + 1)
                 changed_ids.add(item["id"])
         elif problem == "backgroundResidual" and item.get("type") == "image":
+            changed_ids.add(item["id"])
+        elif problem == "unsupportedNativeShape" and item.get("type") in {"rectangle", "roundedRectangle"}:
+            metadata.update({"suppressed": True, "suppressRender": True})
             changed_ids.add(item["id"])
 
     for text_id in touched_text:
@@ -158,12 +298,20 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             item["width"] = max(4.0, float(raw[2]) - float(raw[0]))
             item["height"] = max(4.0, (float(raw[3]) - float(raw[1])) * 1.1)
     if erase_text:
-        erase_editable_text_sources(candidate_bg, candidate, complex_cleaner=local_cleaner, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}")
+        ghosting_ids = {str(issue.get("elementId")) for issue in target_issues if issue["problem"] == "ghosting"}
+        erasure = erase_editable_text_sources(candidate_bg, candidate, complex_cleaner=local_cleaner, target_text_ids=erase_text, copy_asset_prefix=f"revision_{round_number}", project_root=root, protect_background_elements=True, force_asset_reclean_ids=ghosting_ids)
+        inpainted_regions += erasure["backgroundTextErased"]
 
-    residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id]
+    residual_assets = [by_id[str(issue["elementId"])] for issue in target_issues if issue["problem"] == "backgroundResidual" and str(issue.get("elementId")) in by_id and not (by_id[str(issue["elementId"])].get("metadata") or {}).get("backgroundSeparated") and _background_contains_original(source, candidate_bg, by_id[str(issue["elementId"])])]
     if residual_assets:
-        separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
-    baked = [issue for issue in target_issues if issue["problem"] in {"assetBakedIntoBackground", "brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list)][:4]
+        inpainted_regions += separate_foreground(candidate_bg, residual_assets, professional_provider=local_provider)
+    background_objects = objectize_background_regions(
+        source, candidate_bg, candidate,
+        [issue for issue in target_issues if issue["problem"] == "assetBakedIntoBackground"],
+        root / "assets", project_id, page, round_number,
+    )
+    changed_ids.update(item["id"] for item in background_objects)
+    baked = [issue for issue in target_issues if issue["problem"] in {"brokenChartOrModule", "professionalInpaintingPending"} and isinstance(issue.get("bbox"), list) and not any(item.get("type") == "image" and _item_overlaps_box(item, issue["bbox"]) for item in protected_visuals(baseline))][:4]
     if baked:
         modules = []
         width, height = float(candidate["slide"]["width"]), float(candidate["slide"]["height"])
@@ -172,18 +320,171 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             modules.append({"id": f"revision_{round_number}_{len(modules)}", "role": "complex_visual", "strategy": "whole_image", "bbox": {"left": x1 / width, "top": y1 / height, "width": (x2 - x1) / width, "height": (y2 - y1) / height}, "confidence": 1.0})
         scene = {"canvas": {"width": width, "height": height}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": modules}}, "elements": [
             {**copy.deepcopy(item), "bbox": {"left": item.get("x", 0), "top": item.get("y", 0), "width": item.get("width", 0), "height": item.get("height", 0)}}
-            for item in candidate.get("elements", []) if item.get("type") != "background"
+            for item in candidate.get("elements", []) if item.get("type") == "text" and any(_item_overlaps_box(item, issue["bbox"]) for issue in baked)
         ]}
         before_ids = {item["id"] for item in candidate.get("elements", [])}
         AIReconstructionPlanner().apply(scene, source, root / "assets", project_id, page, include_detected_visuals=False, asset_prefix=f"revision_{round_number}")
         candidate = ReconstructionPipeline._apply_refined_scene(None, candidate, scene)
         new_assets = [item for item in candidate["elements"] if item["id"] not in before_ids and item.get("type") == "image"]
         if new_assets:
-            separate_foreground(candidate_bg, new_assets, professional_provider=local_provider)
+            unseparated = [item for item in new_assets if _background_contains_original(source, candidate_bg, item)]
+            if unseparated:
+                inpainted_regions += separate_foreground(candidate_bg, unseparated, professional_provider=local_provider)
             changed_ids.update(item["id"] for item in new_assets)
 
+    mismatch_boxes = [issue["bbox"] for issue in target_issues if issue.get("problem") == "visualContentMismatch"
+                      and issue.get("reason") != "colored_residual_washed_out"
+                      and isinstance(issue.get("bbox"), list)]
+    restored_visuals = restore_image_owned_text(source, candidate, root / "assets", project_id,
+                                                prefix=f"revision_{round_number}_owned_text", target_boxes=mismatch_boxes) if mismatch_boxes else []
+    changed_ids.update(restored_visuals)
+    restored_items = [by_id[item_id] for item_id in restored_visuals if item_id in by_id]
+    repair_issues = [issue for issue in target_issues if not (
+        issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
+        and issue.get("reason") in {"dark_residual_over_pale_source", "pale_support_overwritten",
+                                    "colored_residual_washed_out"}
+        and restored_pale_assets) and not (
+        issue.get("problem") == "visualContentMismatch" and isinstance(issue.get("bbox"), list)
+        and any(_overlap_fraction(tuple(float(value) for value in issue["bbox"]), item) >= 0.85 for item in restored_items))]
+    unsupported_issues = [issue for issue in repair_issues if issue.get("problem") == "unsupportedNativeShape"]
+    if unsupported_issues:
+        without_shapes = candidate_dir / "preview_without_unsupported_shapes.png"
+        render_preview(candidate_bg, candidate, without_shapes)
+        recovered_unsupported = repair_missing_regions(
+            source, candidate, unsupported_issues, root / "assets", project_id, round_number,
+            asset_prefix=f"revision_page_{page}_round_{round_number}_shape", preview_path=without_shapes)
+        changed_ids.update(str(item["id"]) for item in recovered_unsupported)
+    def covered_by_unsupported(issue: dict) -> bool:
+        box = issue.get("bbox")
+        if issue.get("problem") != "visualContentMismatch" or not isinstance(box, list) or len(box) != 4:
+            return False
+        area = max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
+        for unsupported in unsupported_issues:
+            parent = unsupported.get("bbox")
+            if not isinstance(parent, list) or len(parent) != 4:
+                continue
+            overlap = max(0, min(box[2], parent[2]) - max(box[0], parent[0])) * max(0, min(box[3], parent[3]) - max(box[1], parent[1]))
+            if overlap / area >= 0.80:
+                return True
+        return False
+
+    recovered = repair_missing_regions(source, candidate,
+                                       [issue for issue in repair_issues if issue.get("problem") != "unsupportedNativeShape"
+                                        and not covered_by_unsupported(issue)],
+                                       root / "assets", project_id, round_number,
+                                       asset_prefix=f"revision_page_{page}_round_{round_number}", preview_path=preview)
+    changed_ids.update(str(item["id"]) for item in recovered)
+    for issue in target_issues:
+        if issue["problem"] != "visualContentMismatch" or not isinstance(issue.get("bbox"), list):
+            continue
+        x1, y1, x2, y2 = issue["bbox"]
+        issue_area = max(1, (x2 - x1) * (y2 - y1))
+        for old in baseline.get("elements", []):
+            if old.get("id") in restored_visuals:
+                continue
+            if old.get("type") not in {"rectangle", "roundedRectangle", "ellipse", "image"}:
+                continue
+            ox1, oy1 = float(old.get("x") or 0), float(old.get("y") or 0)
+            ox2, oy2 = ox1 + float(old.get("width") or 0), oy1 + float(old.get("height") or 0)
+            old_area = max(1, (ox2 - ox1) * (oy2 - oy1))
+            overlap = max(0, min(x2, ox2) - max(x1, ox1)) * max(0, min(y2, oy2) - max(y1, oy1))
+            if overlap / old_area >= 0.9 and old_area <= issue_area * 1.25:
+                current = by_id.get(str(old.get("id")))
+                if current is not None:
+                    if old.get("type") == "image":
+                        old_box = (ox1, oy1, ox2, oy2)
+                        replacement = next((item for item in recovered
+                                            if item.get("type") == "image"
+                                            and (item.get("metadata") or {}).get("qaIssue") == "visualContentMismatch"
+                                            and not (item.get("metadata") or {}).get("replacesAssetId")
+                                            and _overlap_fraction(old_box, item) >= 0.9), None)
+                        if replacement is None:
+                            continue
+                        current.setdefault("metadata", {})["replacedBy"] = replacement["id"]
+                        replacement.setdefault("metadata", {})["replacesAssetId"] = str(old["id"])
+                    current.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True})
+                    changed_ids.add(str(current["id"]))
+    for issue in target_issues:
+        if issue["problem"] == "blankVisualOwner" and any(item["metadata"]["qaIssue"] == "blankVisualOwner" for item in recovered):
+            old = by_id.get(str(issue.get("elementId")))
+            if old:
+                old.setdefault("metadata", {}).update({"suppressed": True, "suppressRender": True})
+                changed_ids.add(str(old["id"]))
+    square_ids = {str(issue.get("elementId")) for issue in target_issues if issue["problem"] == "squareCutoutUnresolved"}
+    if square_ids:
+        repaired = repair_objectized_modules(source, candidate, root / "assets", project_id, target_ids=square_ids)
+        if repaired["repairedCutouts"]:
+            changed_ids.update(square_ids)
+
+    prior_ids = {item["id"] for item in candidate.get("elements", [])}
+    compacted_fragments = compact_retained_fragments(image_io.imread(str(source)), candidate, root / "assets", project_id, page)
+    if compacted_fragments:
+        changed_ids.update(item["id"] for item in candidate["elements"]
+                           if item["id"] not in prior_ids or (item.get("metadata") or {}).get("replacementOwners"))
     render_preview(candidate_bg, candidate, candidate_preview)
+    target_boxes = [entry["bbox"] for entry in regional_analysis]
+    for layout_version in (baseline, candidate):
+        for item in layout_version.get("elements", []):
+            if item.get("id") in changed_ids:
+                x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+                target_boxes.append([x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)])
+    integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview,
+                                target_boxes, source_path=source)
+    if (baseline.get("metadata") or {}).get("ownerGate"):
+        pixels = image_io.imread(str(source))
+        _, before_owners = ownership_evidence(pixels, copy.deepcopy(baseline), root / "assets")
+        _, after_owners = ownership_evidence(pixels, candidate, root / "assets")
+        candidate.setdefault("metadata", {})["ownerGate"] = after_owners
+        integrity["unownedPixelsBefore"] = before_owners["unownedPixelCount"]
+        integrity["unownedPixelsAfter"] = after_owners["unownedPixelCount"]
+        if after_owners["unownedPixelCount"] > before_owners["unownedPixelCount"]:
+            integrity["integrityErrors"].append("replacement_ownership_regressed")
+    # Retain a self-contained candidate even on rollback; published asset URLs
+    # remain unchanged and rejected files can still be removed from that namespace.
+    archive_scene = copy.deepcopy(candidate)
+    for image in archive_scene.get("elements", []):
+        if image.get("type") != "image":
+            continue
+        path = asset_path(root, image.get("src"))
+        if path is not None and path.is_file():
+            archive_assets = candidate_dir / "assets"
+            archive_assets.mkdir(exist_ok=True)
+            shutil.copy2(path, archive_assets / path.name)
+            image["src"] = f"assets/{path.name}"
+    (candidate_dir / "scene.json").write_text(json.dumps(archive_scene, ensure_ascii=False, indent=2), encoding="utf-8")
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
+    candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
+    previous_pixels = image_io.imread(str(preview), cv2.IMREAD_COLOR)
+    candidate_pixels = image_io.imread(str(candidate_preview), cv2.IMREAD_COLOR)
+    identical_preview = (previous_pixels is not None and candidate_pixels is not None
+                         and np.array_equal(previous_pixels, candidate_pixels))
+    # Objectization changes which local boxes QA samples. A larger sample can
+    # expose pre-existing gaps even when every rendered pixel is unchanged;
+    # that is not new visual loss. All other integrity gates still apply.
+    if not identical_preview and _visual_retention_regressed(baseline_audit, candidate_audit):
+        integrity["integrityErrors"].append("source_visual_loss")
+    ghosting_before = count_text_ghosting(source, background, baseline)
+    ghosting_after = count_text_ghosting(source, candidate_bg, candidate)
+    replacement_qa = check_replacement_regions(
+        source, preview, candidate_preview, baseline,
+        candidate_dir / "replacement_qa.json", candidate_dir / "replacement_compare.png",
+        ghosting_before, ghosting_after,
+    )
+    score_after["replacementQA"] = replacement_qa
+    if replacement_qa["worsenedRegions"]:
+        integrity["integrityErrors"].append("local_visual_replacement_regressed")
+    if ghosting_after > ghosting_before:
+        integrity["integrityErrors"].append("text_ghosting_regressed")
+    before_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in baseline_audit["issues"] if issue.get("problem") == "visualContentMismatch")
+    after_mismatch = sum(int(issue.get("pixelArea") or 0) for issue in candidate_audit["issues"] if issue.get("problem") == "visualContentMismatch")
+    if any(issue.get("problem") == "visualContentMismatch" for issue in target_issues):
+        if after_mismatch >= before_mismatch:
+            integrity["integrityErrors"].append("visual_mismatch_not_improved")
+    score_after["objectizationAudit"] = candidate_audit
+    score_after.setdefault("issues", []).extend(candidate_audit["issues"])
+    for key in ("visionProvider", "visionModel", "requestedVisionProvider", "ocrProvider", "conversionMode"):
+        if key in score_before:
+            score_after[key] = score_before[key]
     for key, field in (("localInpaintAttempts", "attempts"), ("localInpaintSuccesses", "successes"), ("localInpaintFallbacks", "failures")):
         score_after[key] = int(score_before.get(key) or 0) + int(getattr(inpainting.provider, field, 0))
     if local_provider:
@@ -192,9 +493,10 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     detected = max(int(score_before.get("detectedTextCount") or 0), len(detected_ids))
     coverage_before = float(score_before["editableTextCoverage"]) if "detectedTextCount" in score_before and "editableTextCoverage" in score_before else float(measure_text_coverage(baseline, detected)["editableTextCoverage"])
     coverage_after = float(measure_text_coverage(candidate, detected)["editableTextCoverage"])
-    asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {})
+    asset_metrics = measure_movable_assets(source, candidate_bg, candidate, (candidate.get("metadata") or {}).get("reconstructionPlan") or {},
+                                          debug_path=candidate_dir / "movable_coverage_debug.png")
     score_after.update(asset_metrics)
-    enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=count_text_ghosting(source, candidate_bg, candidate), background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
+    enrich_quality_score(score_after, editable_coverage=coverage_after, movable_coverage=float(asset_metrics["movableVisualCoverage"]), ghosting_count=ghosting_after, background_residual_count=int(asset_metrics["backgroundResidualCount"]), professional_pending=int(score_before.get("professionalRepairPending") or 0))
     issues_after = collect_revision_issues(candidate, score_after, raw_scene)
     prior_regions = {item.get("elementId"): float(item.get("score") or 0) for item in score_before.get("regions", [])}
     improved = sorted({str(item.get("elementId")) for item in score_after.get("regions", []) if item.get("elementId") in changed_ids and float(item.get("score") or 0) > prior_regions.get(item.get("elementId"), 0) + 0.02})
@@ -205,62 +507,190 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     coverage_delta = coverage_after - coverage_before
     visual_improved = visual_delta > 0.003 and coverage_delta >= -0.01
     editable_improved = coverage_delta > 0.02 and visual_delta >= -0.12
-    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
+    critical = {"missingEditableText", "ghosting", "duplicateText", "wrongOwnership", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "backgroundResidual", "brokenChartOrModule", "wrongZOrder"}
     resolved_critical = any(problem in critical for problem, _ in before_keys - after_keys)
     local_improved = resolved_critical and visual_delta >= -0.005 and coverage_delta >= -0.01
-    accepted = bool(changed_ids) and (visual_improved or editable_improved or local_improved) and len(issues_after) <= len(issues_before) + 1
-    stagnation_reason = None if accepted else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
+    restored_mismatch = bool(restored_visuals) and before_mismatch > 0 and after_mismatch < before_mismatch * 0.2 and coverage_delta >= -0.01
+    pale_repaired = (bool(pale_targets) and int(baseline_audit.get("unownedPaleSupportPixels") or 0)
+                     - int(candidate_audit.get("unownedPaleSupportPixels") or 0) >= 120
+                     and visual_delta >= -0.005 and coverage_delta >= -0.01)
+    structural_improved = compacted_fragments >= 32 and identical_preview
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired or structural_improved) and len(issues_after) <= len(issues_before) + 1
+    reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
+                          "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
+                          "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],
+                          "preservedAssetCount": integrity["preservedAssetCount"] if accepted else baseline_assets["assets"],
+                          "replacedAssetCount": integrity["replacedAssetCount"] if accepted else 0,
+                          "backgroundWhiteAfter": integrity["backgroundWhiteAfter"] if accepted else integrity["backgroundWhiteBefore"],
+                          "previewWhiteAfter": integrity["previewWhiteAfter"] if accepted else integrity["previewWhiteBefore"]}
+    stagnation_reason = None if accepted else "integrity_check_failed" if integrity["integrityErrors"] else "no_targetable_issues" if not target_issues else "no_supported_change" if not changed_ids else "no_measurable_improvement"
     report = {
-        "revisionRound": round_number, "accepted": accepted,
+        "revisionRound": round_number, "accepted": accepted, "strategyVersion": REVISION_STRATEGY_VERSION,
+        "localizedAssetCount": localized,
+        "imageOwnedUncertainTextIds": [item["id"] for item in candidate.get("elements", []) if is_uncertain_image_owned_text(item, candidate)],
         "targetedIssues": target_issues,
         "issuesBefore": issues_before, "issuesAfter": issues_after if accepted else issues_before,
         "improvedRegions": improved if accepted else [], "visualBefore": float(score_before.get("overall") or 0),
         "visualAfter": float(score_after.get("overall") or 0),
         "editableCoverageBefore": coverage_before, "editableCoverageAfter": coverage_after,
         "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
+        **reported_integrity, "inpaintedRegions": inpainted_regions if accepted else 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": not accepted,
+        "discardedCandidateAssets": 0,
+        "compactedFragmentCount": compacted_fragments if accepted else 0,
+        "backgroundObjectizedRegions": len(background_objects) if accepted else 0,
     }
-    history.append(report)
-    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-    (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if accepted:
-        shutil.copy2(candidate_bg, background)
-        shutil.copy2(candidate_preview, preview)
-        shutil.copy2(candidate_bg, root / ("clean_background.png" if page == 1 else f"clean_background_{page}.png"))
-        shutil.copy2(candidate_preview, root / ("final_preview.png" if page == 1 else f"final_preview_{page}.png"))
+        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
+        score_after.update({"revisionRound": round_number, "revisionStatus": "improving" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, **measure_text_coverage(candidate, detected), **reported_integrity, "inpaintedRegions": inpainted_regions, "rollbackTriggered": False})
+        validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
+        accepted_problem = {"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}
+        replacements = {background: candidate_bg, preview: candidate_preview,
+                        root / ("clean_background.png" if page == 1 else f"clean_background_{page}.png"): candidate_bg,
+                        root / ("final_preview.png" if page == 1 else f"final_preview_{page}.png"): candidate_preview}
         difference = candidate_dir / "difference.png"
         if difference.is_file():
-            shutil.copy2(difference, root / "difference.png")
-        needs_review = float(score_after.get("overall") or 0) < 0.85 or coverage_after < 0.95 or bool(issues_after)
-        score_after.update({"revisionRound": round_number, "revisionStatus": "improving" if needs_review else "improved", "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, **measure_text_coverage(candidate, detected)})
-        score_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
-        validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
-        validation_path.write_text(json.dumps(score_after, ensure_ascii=False, indent=2), encoding="utf-8")
-        problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_after, "improvedRegions": improved, "stagnationReason": None, "editableTextCoverage": coverage_after, "overall": score_after.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
-        store.save_slide(project_id, page, candidate)
+            replacements[root / "difference.png"] = difference
+        _commit_revision(store, project_id, page, candidate, candidate_dir, replacements,
+                         {score_path: score_after, validation_path: score_after, problem_path: accepted_problem})
     else:
-        score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason})
+        report["discardedCandidateAssets"] = _discard_candidate_assets(root, candidate, asset_files_before)
+        score_before.update({"revisionRound": round_number, "revisionStatus": "stagnated", "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, **reported_integrity, "inpaintedRegions": 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": True})
         score_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
         validation_path = root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json")
         validation_path.write_text(json.dumps(score_before, ensure_ascii=False, indent=2), encoding="utf-8")
         problem_path.write_text(json.dumps({"revisionRound": round_number, "issuesBefore": issues_before, "issuesAfter": issues_before, "improvedRegions": [], "stagnationReason": stagnation_reason, "editableTextCoverage": coverage_before, "overall": score_before.get("overall")}, ensure_ascii=False, indent=2), encoding="utf-8")
+    history.append(report)
+    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    (candidate_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"layout": candidate if accepted else baseline, **report}
+
+
+def _surface_residual_occupancy(source: np.ndarray, layout: dict, surface_id: str) -> np.ndarray:
+    """Reserve existing objects without hiding visual support inside textboxes."""
+    occupied = np.zeros(source.shape[:2], np.uint8)
+    for item in layout.get("elements", []):
+        if item.get("id") == surface_id or item.get("type") in {"background", "group"}:
+            continue
+        if any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
+            continue
+        raw_text_box = (item.get("metadata") or {}).get("rawOCRBBox") if item.get("type") == "text" else None
+        if isinstance(raw_text_box, list) and len(raw_text_box) == 4:
+            try:
+                left, top, right, bottom = (float(value) for value in raw_text_box)
+            except (TypeError, ValueError):
+                raw_text_box = None
+        if not isinstance(raw_text_box, list) or len(raw_text_box) != 4:
+            left, top = float(item.get("x") or 0), float(item.get("y") or 0)
+            right = left + float(item.get("width") or 0)
+            bottom = top + float(item.get("height") or 0)
+        x1, y1 = max(0, round(left)), max(0, round(top))
+        x2, y2 = min(source.shape[1], round(right)), min(source.shape[0], round(bottom))
+        if x2 > x1 and y2 > y1:
+            if item.get("type") == "text":
+                _occupy_text_glyphs(source, occupied, (x1, y1, x2, y2))
+            else:
+                occupied[y1:y2, x1:x2] = 255
+    return occupied
+
+
+def _discard_candidate_assets(root: Path, candidate: dict, preexisting: set[Path]) -> int:
+    """Remove only new files referenced by a rejected candidate."""
+    asset_dir = (root / "assets").resolve()
+    discard: set[Path] = set()
+    for item in candidate.get("elements", []):
+        if item.get("type") != "image":
+            continue
+        path = asset_path(root, item.get("src"))
+        if path is not None:
+            resolved = path.resolve()
+            if resolved.parent == asset_dir and resolved not in preexisting:
+                discard.add(resolved)
+    for path in discard:
+        path.unlink(missing_ok=True)
+    return len(discard)
+
+
+def _visual_retention_regressed(before: dict, after: dict) -> bool:
+    salient = max(int(before.get("salientVisualPixels") or 0), int(after.get("salientVisualPixels") or 0))
+    # Page-wide coverage can round to 1.0 even when a small but meaningful
+    # icon disappears. Keep an absolute pixel guard alongside the ratio.
+    missing_growth = int(after.get("missingVisualPixels") or 0) - int(before.get("missingVisualPixels") or 0)
+    missing_threshold = max(24, min(96, round(salient * 0.0002)))
+    largest_after = int(after.get("largestMissingVisualRegion", missing_growth))
+    largest_before = int(before.get("largestMissingVisualRegion", 0))
+    lost_to_white = (missing_growth > missing_threshold and largest_after > missing_threshold
+                     and largest_after > largest_before + 24)
+    # Small icons, chart strokes and decorative fragments may disappear in
+    # separate components. Their aggregate loss matters even when no single
+    # connected region exceeds the contiguous-loss threshold.
+    fragmented_loss = (salient > 0 and missing_growth > max(96, round(salient * 0.0003))
+                       and largest_after > largest_before + 8)
+    mismatch_growth = int(after.get("visualMismatchPixels") or 0) - int(before.get("visualMismatchPixels") or 0)
+    lost_to_wrong_color = salient > 0 and mismatch_growth > max(48, round(salient * 0.0002))
+    pale_before = int(before.get("paleAssetGapPixels") or 0)
+    pale_growth = int(after.get("paleAssetGapPixels") or 0) - pale_before
+    lost_pale_support = pale_growth > max(48, min(300, round(pale_before * 0.015)))
+    text_support_before = int(before.get("textBoundPaleGapPixels") or 0)
+    text_support_growth = int(after.get("textBoundPaleGapPixels") or 0) - text_support_before
+    lost_text_support = text_support_growth > max(48, min(300, round(text_support_before * 0.015)))
+    washed_growth = int(after.get("washedColoredAssetPixels") or 0) - int(before.get("washedColoredAssetPixels") or 0)
+    lost_colored_asset = washed_growth > 200
+    surface_growth = int(after.get("pageSurfaceMismatchPixels") or 0) - int(before.get("pageSurfaceMismatchPixels") or 0)
+    monolithic_growth = int(after.get("monolithicPageImageCount") or 0) > int(before.get("monolithicPageImageCount") or 0)
+    return (lost_to_white or fragmented_loss or lost_to_wrong_color or lost_pale_support or lost_text_support
+            or lost_colored_asset or surface_growth > 100 or monolithic_growth)
+
+
+def _commit_revision(store: ProjectStore, project_id: str, page: int, candidate: dict, candidate_dir: Path, replacements: dict[Path, Path], payloads: dict[Path, dict]) -> None:
+    backups: dict[Path, Path | None] = {}
+    targets = [*replacements, *payloads]
+    for index, target in enumerate(targets):
+        backup = candidate_dir / f"commit_backup_{index}{target.suffix}"
+        if target.is_file():
+            shutil.copy2(target, backup)
+            backups[target] = backup
+        else:
+            backups[target] = None
+    try:
+        for target, source in replacements.items():
+            shutil.copy2(source, target)
+        for target, payload in payloads.items():
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        store.save_slide(project_id, page, candidate)
+    except Exception:
+        for target, backup in backups.items():
+            if backup is None:
+                target.unlink(missing_ok=True)
+            else:
+                shutil.copy2(backup, target)
+        raise
 
 
 def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None) -> list[dict]:
     issues: list[dict] = []
     for issue in score.get("issues", []):
-        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending"}:
+        if issue.get("problem") in {"textOverlap", "wrongBBox", "wrongZOrder", "duplicateText", "duplicateElement", "imageDistortion", "moduleBoundary", "brokenChartOrModule", "professionalInpaintingPending", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage", "largeVisualLoss", "missingBackplate", "missingVisualObject", "blankVisualOwner", "visualContentMismatch", "assetBakedIntoBackground", "squareCutoutUnresolved"}:
             issues.append(issue)
         elif issue.get("problem") == "criticalRegionMismatch":
             item = next((element for element in layout.get("elements", []) if element.get("id") == issue.get("elementId")), None)
             if item and item.get("type") in {"image", "rectangle", "roundedRectangle", "ellipse", "line", "arrow"}:
                 x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+                # Tiny pale border fragments have unstable pixel scores after
+                # antialiasing; they are not evidence of a broken whole module.
+                slide = layout.get("slide") or {}
+                page_area = float(slide.get("width") or 0) * float(slide.get("height") or 0)
+                item_area = float(item.get("width") or 0) * float(item.get("height") or 0)
+                if ((item.get("metadata") or {}).get("layerRole") == "container"
+                        and page_area > 0 and item_area < max(400, page_area * 0.0005)):
+                    continue
                 issues.append({**issue, "problem": "brokenChartOrModule", "bbox": [x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)]})
     for item in layout.get("elements", []):
         meta = item.get("metadata") or {}
         if item.get("type") != "text" or not str(item.get("text") or "").strip() or item.get("role") in {"logo", "decorative_text"}:
             continue
         item_id = item["id"]
+        if is_badge_owned_text(item, layout) or is_uncertain_image_owned_text(item, layout):
+            continue
         if meta.get("duplicateSuppressed") or str(meta.get("ownedBy") or "").startswith("text_"):
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
@@ -298,7 +728,9 @@ def collect_revision_issues(layout: dict, score: dict, scene: dict | None = None
         for asset in active_visuals:
             if asset.get("type") == "image" and not (asset.get("metadata") or {}).get("backgroundSeparated"):
                 issues.append({"elementId": asset["id"], "problem": "backgroundResidual"})
-    if scene:
+    audit = score.get("objectizationAudit") or {}
+    background_is_clear = bool(audit.get("whiteBackground")) and int(audit.get("backgroundResidualRegions") or 0) == 0
+    if scene and not background_is_clear:
         active_images = [item for item in layout.get("elements", []) if item.get("type") == "image" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
         for region in scene.get("regions", []):
             if region.get("type") not in {"image", "figure", "chart", "table"} or float(region.get("confidence") or 0) < 0.6:
@@ -320,9 +752,32 @@ def _overlap_fraction(box: tuple[float, float, float, float], item: dict) -> flo
     return overlap / max(1, (box[2] - box[0]) * (box[3] - box[1]))
 
 
+def _item_overlaps_box(item: dict, box: list[float]) -> bool:
+    x, y = float(item.get("x") or 0), float(item.get("y") or 0)
+    w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+    overlap = max(0.0, min(x + w, float(box[2])) - max(x, float(box[0]))) * max(0.0, min(y + h, float(box[3])) - max(y, float(box[1])))
+    return overlap / max(1.0, min(w * h, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))) >= 0.15
+
+
+def _background_contains_original(source_path: Path, background_path: Path, item: dict) -> bool:
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
+    if source is None or background is None or source.shape != background.shape:
+        return False
+    height, width = source.shape[:2]
+    x1, y1 = max(0, int(float(item.get("x") or 0))), max(0, int(float(item.get("y") or 0)))
+    x2 = min(width, x1 + int(float(item.get("width") or 0)))
+    y2 = min(height, y1 + int(float(item.get("height") or 0)))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    original = source[y1:y2, x1:x2]
+    current = background[y1:y2, x1:x2]
+    return float(np.mean(cv2.absdiff(original, current))) < 35 and float(np.std(original)) > 10
+
+
 def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], by_id: dict[str, dict], output: Path) -> list[dict]:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    previous = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    previous = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     if source is None or previous is None:
         return []
     height, width = source.shape[:2]
@@ -345,7 +800,7 @@ def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], 
         previous_edges = cv2.Canny(previous_crop, 60, 160)
         pixel_difference = float(np.mean(cv2.absdiff(original_crop, previous_crop))) / 255
         edge_difference = float(np.mean(cv2.absdiff(original_edges, previous_edges))) / 255
-        cv2.imwrite(str(output / f"region_{index + 1}_source.png"), original_crop)
-        cv2.imwrite(str(output / f"region_{index + 1}_previous.png"), previous_crop)
+        image_io.imwrite(str(output / f"region_{index + 1}_source.png"), original_crop)
+        image_io.imwrite(str(output / f"region_{index + 1}_previous.png"), previous_crop)
         analysis.append({"elementId": issue.get("elementId"), "problem": issue.get("problem"), "bbox": [x1, y1, x2, y2], "pixelDifference": round(pixel_difference, 4), "edgeDifference": round(edge_difference, 4), "strategyChange": "movable_image_with_editable_text" if issue.get("problem") in {"brokenChartOrModule", "assetBakedIntoBackground"} else "editable_text_repair" if issue.get("problem") in {"missingEditableText", "ghosting", "wrongBBox", "textOverlap"} else "ownership_repair"})
     return analysis

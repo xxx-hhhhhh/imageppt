@@ -156,13 +156,33 @@ def normalize_scene_payload(payload: Any, diagnostics: dict[str, Any] | None = N
             ]
             candidate["visualComplexity"] = _normalize_plan_score(candidate.get("visualComplexity"), 0.5)
             candidate["editablePriority"] = _normalize_plan_score(candidate.get("editablePriority"), 0.5)
+            strategy_aliases = {"hybrid": "mixed_component", "image": "movable_image", "local_image": "movable_image", "transparent_image": "movable_image", "shape": "native_shape", "text": "editable_text", "background_image": "background"}
+            for field in ("strategy", "reconstructionStrategy"):
+                value = candidate.get(field)
+                if isinstance(value, str) and value in strategy_aliases:
+                    candidate[field] = strategy_aliases[value]
+                    _warning(diag, f"reconstructionPlan.modules[{index}].{field}: {value!r} -> {candidate[field]!r}")
+            valid_strategies = {"editable", "whole_image", "hybrid", "editable_text", "native_shape", "movable_image", "cutout_image", "mixed_component", "background", "ignore"}
+            valid_reconstruction = {"editable_text", "native_shape", "movable_image", "cutout_image", "mixed_component", "background", "whole_image", "ignore"}
+            if candidate.get("strategy") is None:
+                candidate["strategy"] = "editable"
+            elif candidate["strategy"] not in valid_strategies:
+                _warning(diag, f"reconstructionPlan.modules[{index}].strategy: unsupported value -> editable")
+                candidate["strategy"] = "editable"
+            if candidate.get("reconstructionStrategy") not in valid_reconstruction | {None}:
+                _warning(diag, f"reconstructionPlan.modules[{index}].reconstructionStrategy: unsupported value ignored")
+                candidate.pop("reconstructionStrategy", None)
+            children = candidate.get("children")
+            if isinstance(children, list):
+                candidate["children"] = [item if isinstance(item, dict) else {"id": str(item)} for item in children if item is not None]
             if isinstance(candidate.get("ownership"), str):
                 candidate["ownership"] = {"owner": candidate["ownership"]}
             elif not isinstance(candidate.get("ownership", {}), dict):
                 candidate["ownership"] = {}
             modules.append(QwenPlanModule.model_validate(candidate).model_dump(mode="json"))
-        except (TypeError, ValueError, ValidationError):
-            _warning(diag, f"reconstructionPlan.modules[{index}]: invalid module ignored")
+        except (TypeError, ValueError, ValidationError) as exc:
+            fields = ",".join(".".join(str(part) for part in error["loc"]) for error in exc.errors()) if isinstance(exc, ValidationError) else type(exc).__name__
+            _warning(diag, f"reconstructionPlan.modules[{index}]: invalid module ignored ({fields})")
     plan_fields = {key: raw_plan.get(key, {} if key == "page" else []) for key in ("page", "sections", "textRegions", "visualRegions")} if isinstance(raw_plan, dict) else {}
     normalized["reconstructionPlan"] = {**plan_fields, "modules": modules}
     diag["normalizedPayload"] = normalized

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import math
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
@@ -28,6 +29,9 @@ def _path_from_src(src: str | None) -> Path | None:
     if not src:
         return None
     clean = src.split("?", 1)[0]
+    direct = Path(clean)
+    if direct.is_absolute() and not clean.replace("\\", "/").startswith("/media/"):
+        return direct
     parts = clean.replace("\\", "/").split("/")
     try:
         if "backgrounds" in parts:
@@ -65,12 +69,19 @@ def font_px_to_pt(font_size_px: float, pixels_to_inches: float) -> float:
 
 
 class PPTXRenderer:
-    def render_project(self, project_id: str, layouts: list[dict[str, Any]]) -> tuple[Path, dict[str, Any]]:
+    def render_project(self, project_id: str, layouts: list[dict[str, Any]], *, output_dir: Path | None = None) -> tuple[Path, dict[str, Any]]:
         if not layouts:
             raise ValueError("No analyzed slides to export")
         first = layouts[0]["slide"]
         slide_width = 13.333
-        slide_height = slide_width * first["height"] / first["width"]
+        ratio = float(first["height"]) / float(first["width"])
+        if not math.isfinite(ratio) or not 1/56 <= ratio <= 56:
+            raise ValueError("Image aspect ratio exceeds PowerPoint's supported slide dimensions")
+        slide_width = min(56.0, max(1.0, slide_width, 1.0 / ratio))
+        slide_height = slide_width * ratio
+        if slide_height > 56:
+            slide_height = 56.0
+            slide_width = slide_height / ratio
         presentation = Presentation()
         presentation.slide_width = Inches(slide_width)
         presentation.slide_height = Inches(slide_height)
@@ -83,11 +94,12 @@ class PPTXRenderer:
             sy = slide_height / px_height
             for element in sorted(layout.get("elements", []), key=lambda item: item.get("zIndex", 0)):
                 self._add_element(slide, element, sx, sy)
-        output_path = OUTPUTS_DIR / project_id / "editable.pptx"
+        destination = output_dir or OUTPUTS_DIR / project_id
+        output_path = destination / "editable.pptx"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         presentation.save(output_path)
         report = validate_pptx(output_path, layouts)
-        save_validation(report, OUTPUTS_DIR / project_id / "validation.json")
+        save_validation(report, destination / "validation.json")
         return output_path, report
 
     def _add_element(self, slide: Any, element: dict[str, Any], sx: float, sy: float) -> None:
@@ -131,7 +143,11 @@ class PPTXRenderer:
             paragraph.line_spacing = float(style.get("lineSpacing", 1.12))
             run = paragraph.add_run()
             lines = element.get("lines") or []
-            text = "\n".join(str(line.get("text", "")) for line in lines) if lines else (element.get("text") or "")
+            # The editor changes `text`; OCR lines are provenance, not another
+            # body source. An intentional empty edit must stay empty too.
+            text = element.get("text")
+            if text is None:
+                text = "\n".join(str(line.get("text", "")) for line in lines)
             fit = fit_textbox(
                 text,
                 float(element.get("width", 1)),
@@ -140,6 +156,10 @@ class PPTXRenderer:
                 original_line_count=original_line_count,
                 preserve_line_count=preserve_line_count,
             )
+            if metadata.get("exclusiveFontVerified"):
+                # Keep the measured one-line font; do not fit it a second time.
+                fit = {"text": text, "fontSize": style.get("fontSize", 24)}
+                frame.word_wrap = False
             run.text = str(fit["text"])
             font = run.font
             _set_font_family(font, style.get("fontFamily", "Microsoft YaHei"))

@@ -34,6 +34,14 @@ class SceneAnalyzer:
         for item in layout.get("elements", []):
             element_type, role = classify_element(item)
             elements.append({"id": item["id"], "type": element_type, "role": role, "bbox": {"left": float(item.get("x", 0)), "top": float(item.get("y", 0)), "width": float(item.get("width", 0)), "height": float(item.get("height", 0))}, "rotation": float(item.get("rotation", 0)), "zIndex": int(item.get("zIndex", 0)), "groupId": item.get("groupId") or (item.get("metadata") or {}).get("groupId"), "editable": item.get("type") not in {"background", "group"}, "confidence": float(item.get("confidence") or 0.7), "text": item.get("text"), "src": item.get("src"), "style": item.get("style") or {}, "metadata": item.get("metadata") or {}})
+        for segment in segmentation:
+            if segment.get("source") != "ultralytics_sam2" or not segment.get("alphaCrop"):
+                continue
+            elements.append({"id": segment["id"], "type": "image", "role": "complex_visual", "bbox": segment["bbox"],
+                             "rotation": 0, "zIndex": 1, "editable": True, "confidence": segment["confidence"],
+                             "src": segment["alphaCrop"], "owner": "movable_image", "source": segment["source"],
+                             "contour": segment.get("contour"), "style": {},
+                             "metadata": {"reconstructionStrategy": "local_image", "reconstructionStrategySource": "sam2", "retainedVisual": True}})
         text_analysis = analyze_text_regions(ocr_results, width, height)
         provider_regions = self.layout_provider.analyze(image_path)
         relations = analyze_relations(elements) + analyze_alignment(elements) + detect_repetition(elements) + detect_grid(elements)
@@ -59,6 +67,13 @@ class SceneAnalyzer:
             vision = {"provider": "none", "page": {}, "elements": [], "groups": [], "relations": [], "repeatedComponents": [], "layers": [], "confidence": 0.0, "aiUsed": False}
             self.vision_routing = {"requestedProvider": "qwen", "usedProvider": "local", "usedModel": None, "fallbackCount": 0, "aiUsed": False, "attempts": []}
         fused = fuse_scene({"elements": elements, "groups": groups, "relations": relations}, ocr_results, vision)
+        uncovered = set((vision.get("planCoverage") or {}).get("uncoveredTextIds") or [])
+        for item in fused["elements"]:
+            if item.get("type") == "text" and item.get("id") in uncovered:
+                metadata = item.setdefault("metadata", {})
+                metadata.update({"reconstructionStrategy": "editable_text", "reconstructionStrategySource": "ocr_plan_fallback", "textOwner": item["id"]})
+                for key in ("suppressed", "suppressRender", "ownedBy"):
+                    metadata.pop(key, None)
         scene = {"version": "2.0", "canvas": {"width": width, "height": height, "backgroundColor": analyze_colors(image_path).get("background", "#FFFFFF")}, "regions": provider_regions, "elements": fused["elements"], "groups": fused["groups"], "relations": fused["relations"], "repeatedComponents": fused["repeatedComponents"], "layers": fused["layers"], "page": fused["page"], "styleTokens": analyze_colors(image_path), "confidence": {"ocr": sum((item.confidence for item in ocr_results), 0.0) / max(1, len(ocr_results)), "layout": self.layout_provider.name, "segmentation": len(segmentation), "vision": vision.get("confidence", 0.0), "final": sum((item.get("finalConfidence", 0.0) for item in fused["elements"]), 0.0) / max(1, len(fused["elements"]))}, "textLines": text_analysis["lines"], "paragraphs": text_analysis["paragraphs"], "segmentation": segmentation, "vision": vision, "visionRouting": self.vision_routing}
         warnings = self.layout_warnings + list(getattr(self.layout_provider, "warnings", [])) + self.vision_warnings + list(getattr(self.vision_provider, "warnings", []))
         return scene, warnings

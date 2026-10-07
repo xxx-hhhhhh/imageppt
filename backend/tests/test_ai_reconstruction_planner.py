@@ -67,6 +67,33 @@ def test_detected_visual_outside_ai_plan_becomes_editable_image_asset(tmp_path: 
         assert crop.size == (140, 130)
 
 
+def test_whole_badge_keeps_embedded_letters_in_image(tmp_path: Path) -> None:
+    source = tmp_path / "badge.png"
+    with Image.new("RGB", (300, 220), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((80, 50, 180, 150), fill="#C71818")
+        draw.text((115, 90), "AI", fill="white")
+        image.save(source)
+    badge = _element("badge", "image", (80, 50, 100, 100))
+    badge["metadata"].update({"wholeBadgeAsset": True, "componentType": "wholeBadgeImage"})
+    letters = _element("letters", "text", (110, 84, 40, 30), "AI")
+    scene = {"canvas": {"width": 300, "height": 220}, "elements": [badge, letters],
+             "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+                 {"id": "badge-module", "reconstructionStrategy": "movable_image",
+                  "bbox": {"left": 80 / 300, "top": 50 / 220, "width": 100 / 300, "height": 100 / 220},
+                  "confidence": 0.95}
+             ]}}}
+
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "badge-project", 1)
+
+    planned = next(item for item in scene["elements"] if item.get("id", "").startswith("planner_page_1_region_"))
+    assert planned["metadata"]["textCleaned"] is False
+    assert planned["metadata"]["editableTextIds"] == []
+    assert letters["metadata"]["ownedBy"] == planned["id"]
+    with Image.open(tmp_path / "assets" / f"{planned['id']}.png") as crop:
+        assert crop.getpixel((40, 50)) == Image.open(source).getpixel((120, 100))
+
+
 def test_bounded_unplanned_visual_is_movable_and_removed_from_background(tmp_path: Path, monkeypatch) -> None:
     project_id = "visual-ownership"
     project = tmp_path / project_id
@@ -214,6 +241,27 @@ def test_chart_movable_image_keeps_its_label_editable(tmp_path: Path) -> None:
     assert scene["reconstructionPlan"]["modules"][0]["requestedStrategy"] == "movable_image"
 
 
+def test_chart_caption_cleaning_preserves_nearby_axis_line(tmp_path: Path) -> None:
+    source = tmp_path / "chart_axis.png"
+    with Image.new("RGB", (320, 220), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.line((45, 177, 220, 177), fill="#133a88", width=2)
+        draw.text((90, 183), "Chart", fill="#102b5c")
+        image.save(source)
+    label = _element("axis-caption", "text", (85, 183, 75, 20), "Chart")
+    label["metadata"]["rawOCRBBox"] = [85, 183, 160, 203]
+    scene = {"canvas": {"width": 320, "height": 220}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "chart", "role": "chart", "reconstructionStrategy": "movable_image",
+         "bbox": {"left": 0.1, "top": 0.2, "width": 0.65, "height": 0.75}, "confidence": 0.95},
+    ]}}, "elements": [label]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
+    asset = next(item for item in scene["elements"] if item["type"] == "image")
+    with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as image:
+        # Three pixels above the OCR box belongs to the chart, not the caption.
+        assert image.convert("RGB").getpixel((68, 133)) == (19, 58, 136)
+    assert label["metadata"]["textCleanedFromAsset"] == asset["id"]
+
+
 def test_flowchart_prefers_reliable_shapes_and_falls_back_for_complex_nodes(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (400, 300), "white").save(source)
@@ -239,6 +287,39 @@ def test_background_module_owns_visual_member_but_not_text(tmp_path: Path) -> No
     ]}}, "elements": [_element("wash", "rectangle", (0, 0, 200, 150)), _element("caption", "text", (20, 20, 80, 20), "Caption")]}
     AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False)
     assert scene["elements"][0]["metadata"]["ownedBy"] == "source_background"
+    assert not scene["elements"][1]["metadata"].get("suppressed")
+
+
+def test_white_surface_reclassifies_local_background_and_preserves_inner_frame(tmp_path: Path) -> None:
+    source = tmp_path / "title_strip.png"
+    with Image.new("RGB", (400, 240), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((45, 60, 295, 130), fill="#2458A8")
+        draw.rectangle((55, 70, 285, 120), outline="white", width=4)
+        draw.text((85, 83), "TITLE", fill="white")
+        image.save(source)
+    scene = {"canvas": {"width": 400, "height": 240}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "strip", "role": "title_bar", "reconstructionStrategy": "background", "bbox": {"left": .1125, "top": .25, "width": .625, "height": .2917}, "memberIds": ["label"], "confidence": .94},
+    ]}}, "elements": [_element("label", "text", (85, 83, 70, 18), "TITLE")]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False, white_surface=True)
+    module = scene["reconstructionPlan"]["modules"][0]
+    assert module["surfaceRole"] == "local_object"
+    assert module["resolvedStrategy"] == "cutout_image"
+    assert not scene["elements"][0]["metadata"].get("suppressed")
+    asset = next(item for item in scene["elements"] if item["type"] == "image")
+    with Image.open(tmp_path / "assets" / f"{asset['id']}.png") as image:
+        assert image.getpixel((10, 10)) == (255, 255, 255)  # inner white frame
+        assert image.getpixel((5, 5)) == (36, 88, 168)  # blue title surface
+
+
+def test_white_surface_page_environment_keeps_bounded_visual_children(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (300, 200), "#f0f0f0").save(source)
+    scene = {"canvas": {"width": 300, "height": 200}, "vision": {"aiUsed": True, "reconstructionPlan": {"modules": [
+        {"id": "page", "role": "background", "reconstructionStrategy": "background", "bbox": {"left": 0, "top": 0, "width": 1, "height": 1}, "memberIds": ["wash", "badge"], "confidence": .92},
+    ]}}, "elements": [_element("wash", "rectangle", (0, 0, 300, 200)), _element("badge", "ellipse", (60, 60, 48, 48))]}
+    AIReconstructionPlanner().apply(scene, source, tmp_path / "assets", "test-project", 1, include_detected_visuals=False, white_surface=True)
+    assert scene["elements"][0]["metadata"]["ownedBy"] == "page_blank_surface"
     assert not scene["elements"][1]["metadata"].get("suppressed")
 
 

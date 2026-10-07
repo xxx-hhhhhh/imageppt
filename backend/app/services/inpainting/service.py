@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 import tempfile
@@ -26,7 +27,7 @@ class InpaintingService:
         self.professional_provider_name = "none"
 
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        image = image_io.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise FileNotFoundError(image_path)
         mask = np.zeros_like(image, dtype=np.uint8)
@@ -65,8 +66,8 @@ class InpaintingService:
         targets = [item for item in self.last_strategies if item.get("willReconstruct") and item.get("cleanBBox")]
         if not targets:
             return 0
-        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-        background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+        source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+        background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
         if source is None or background is None:
             return 0
         mask = np.zeros(source.shape[:2], dtype=np.uint8)
@@ -76,7 +77,7 @@ class InpaintingService:
         try:
             candidate = self.provider.inpaint_array(source, mask)
             background[mask > 0] = candidate[mask > 0]
-            cv2.imwrite(str(background_path), background)
+            image_io.imwrite(str(background_path), background)
             for item in targets:
                 item["professionalRepair"] = "accepted"
                 item["reconstructionStrategy"] = "local_lama"
@@ -87,7 +88,18 @@ class InpaintingService:
                 item["professionalRepair"] = "fallback_opencv"
             return 0
 
-    def clean_array(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def clean_array(self, image: np.ndarray, mask: np.ndarray, *, owner_mask: np.ndarray | None = None, protected_mask: np.ndarray | None = None) -> np.ndarray:
+        # A caller must supply replacement-owner evidence; requests without it
+        # preserve the input. LaMa is not a generic module-cleaning operation.
+        if owner_mask is None or owner_mask.shape != mask.shape:
+            return image.copy()
+        mask = np.uint8((mask > 0) & (owner_mask > 0)) * 255
+        if protected_mask is not None:
+            if protected_mask.shape != mask.shape:
+                return image.copy()
+            mask[protected_mask > 0] = 0
+        if not np.any(mask):
+            return image.copy()
         if isinstance(self.provider, LocalIOPaintClient):
             try:
                 candidate = self.provider.inpaint_array(image, mask)
@@ -107,8 +119,8 @@ class InpaintingService:
                 item["professionalRepair"] = "unavailable"
             self.professional_pending = len(targets)
             return 0
-        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-        background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+        source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+        background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
         if source is None or background is None:
             self.professional_pending = len(targets)
             return 0
@@ -130,7 +142,7 @@ class InpaintingService:
                 self.professional_attempts += 1
                 try:
                     provider.inpaint(source_path, mask, candidate_path)
-                    candidate = cv2.imread(str(candidate_path), cv2.IMREAD_COLOR)
+                    candidate = image_io.imread(str(candidate_path), cv2.IMREAD_COLOR)
                     if candidate is None or candidate.shape != source.shape:
                         raise ValueError("Inpainting output dimensions changed")
                     before = cv2.Canny(source[y1:y2, x1:x2], 50, 150)
@@ -146,13 +158,13 @@ class InpaintingService:
                     item["professionalRepair"] = "failed"
         self.professional_pending = len(targets) - repaired
         if repaired:
-            cv2.imwrite(str(background_path), background)
+            image_io.imwrite(str(background_path), background)
         return repaired
 
     def reclean_background(self, background_path: Path, bboxes: list[list[float]]) -> int:
         count = 0
         if isinstance(self.provider, LocalIOPaintClient) and bboxes:
-            image = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+            image = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
             if image is not None:
                 mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 for box in bboxes:
@@ -161,7 +173,7 @@ class InpaintingService:
                 try:
                     candidate = self.provider.inpaint_array(image, mask)
                     image[mask > 0] = candidate[mask > 0]
-                    cv2.imwrite(str(background_path), image)
+                    image_io.imwrite(str(background_path), image)
                     count = len(bboxes)
                 except Exception:
                     pass

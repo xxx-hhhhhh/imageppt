@@ -1,9 +1,14 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 import statistics
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
+
+import cv2
+import numpy as np
 
 from app.services.typography.font_matcher import font_records, match_font, resolve_font_path
 
@@ -31,6 +36,39 @@ _ROLE_POLICY = {
 _SINGLE_LINE_ROLES = {"main_title", "section_title", "subtitle", "card_title", "label", "slogan"}
 
 
+def _source_title_font_class(source: np.ndarray, item: dict[str, Any]) -> str | None:
+    """Recognize a distinctly heavy title from source ink, never from its role alone."""
+    raw = (item.get("metadata") or {}).get("rawOCRBBox")
+    color = str((item.get("style") or {}).get("color") or "").lstrip("#")
+    if not isinstance(raw, list) or len(raw) != 4 or len(color) != 6:
+        return None
+    try:
+        ink_color = np.frombuffer(bytes.fromhex(color)[::-1], dtype=np.uint8)
+        x1, y1, x2, y2 = [int(round(float(value))) for value in raw]
+    except (ValueError, TypeError):
+        return None
+    height, width = source.shape[:2]
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+    if x2 - x1 < 80 or y2 - y1 < 28:
+        return None
+    crop = source[y1:y2, x1:x2]
+    distance = np.max(np.abs(crop.astype(np.int16) - ink_color.astype(np.int16)), axis=2)
+    ink = np.uint8((distance <= 65) & (cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) < 190))
+    if np.count_nonzero(ink) < 300 or not 0.10 <= float(np.mean(ink)) <= 0.60:
+        return None
+    # Long strokes distinguish the typeface from punctuation and antialiasing.
+    horizontal = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, 11), np.uint8))
+    vertical = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((11, 1), np.uint8))
+    if np.count_nonzero(horizontal) < 100 or np.count_nonzero(vertical) < 100:
+        return None
+    radii = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
+    h_radius = float(np.median(radii[horizontal != 0]))
+    v_radius = float(np.median(radii[vertical != 0]))
+    if min(h_radius, v_radius) >= 1.6 and max(h_radius, v_radius) / min(h_radius, v_radius) <= 1.6:
+        return "bold-sans"
+    return None
+
+
 class TypographyLayoutRefiner:
     """Apply bounded typography and alignment polish after scene fusion.
 
@@ -39,7 +77,7 @@ class TypographyLayoutRefiner:
     alignment corrections so the page keeps its original composition.
     """
 
-    def refine(self, layout: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int | bool]]:
+    def refine(self, layout: dict[str, Any], source_path: Path | None = None) -> tuple[dict[str, Any], dict[str, int | bool]]:
         refined = copy.deepcopy(layout)
         width = float(refined.get("slide", {}).get("width") or 1)
         height = float(refined.get("slide", {}).get("height") or 1)
@@ -57,8 +95,9 @@ class TypographyLayoutRefiner:
         if not texts:
             return refined, stats
 
+        source = image_io.imread(str(source_path), cv2.IMREAD_COLOR) if source_path else None
         for item in texts:
-            self._refine_text(item, refined.get("elements", []), width, height, stats)
+            self._refine_text(item, refined.get("elements", []), width, height, stats, source)
         page_changes = self._polish_page_alignment(texts, width, height)
         stats["pageAlignmentAdjustments"] = page_changes
         stats["textPositionAdjustments"] = int(stats["textPositionAdjustments"]) + page_changes
@@ -86,11 +125,18 @@ class TypographyLayoutRefiner:
         page_width: float,
         page_height: float,
         stats: dict[str, int | bool],
+        source: np.ndarray | None = None,
     ) -> None:
         style = item.setdefault("style", {})
         metadata = item.setdefault("metadata", {})
         role = _font_role(item)
         policy = _ROLE_POLICY.get(role, _ROLE_POLICY["body_text"])
+        if role in {"main_title", "section_title"} and source is not None:
+            evidence = _source_title_font_class(source, item)
+            if evidence == "bold-sans":
+                policy = {"fontClass": "bold-sans", "weight": 700,
+                          "priority": ["SimHei", "Microsoft YaHei", "DengXian"]}
+                metadata["sourceFontEvidence"] = evidence
         old_family = str(style.get("fontFamily") or "")
         family = _select_family(list(policy["priority"]), str(policy["fontClass"]), role)
         style.update({
