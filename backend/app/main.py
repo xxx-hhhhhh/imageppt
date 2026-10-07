@@ -18,7 +18,7 @@ from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
 from app.schemas.vision import VisionSettingsPayload, VisionSettingsResponse, VisionTestResponse
 from app.services.pptx import PPTXRenderer
 from app.services.reconstruction import ReconstructionPipeline
-from app.services.reconstruction.pipeline import AIUnavailableError
+from app.services.reconstruction.pipeline import AIUnavailableError, ReconstructionQualityError
 from app.services.reconstruction.downgrade import downgrade_problem_regions
 from app.services.reconstruction.revision import run_revision_loop
 from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
@@ -113,6 +113,8 @@ def analyze_project(project_id: str, mode: str = Query("maximum", pattern="^(fas
         slides, provider, warnings = pipeline.analyze_project(project_id, mode, page, allow_fallback)
     except AIUnavailableError as exc:
         raise HTTPException(status_code=409, detail={"code": "AI_UNAVAILABLE", "message": str(exc)}) from exc
+    except ReconstructionQualityError as exc:
+        raise HTTPException(status_code=409, detail={"code": "EDITABLE_TEXT_RECONSTRUCTION_INCOMPLETE", "message": str(exc)}) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="页面重建失败，请重试。") from exc
     routing = pipeline.scene_analyzer.vision_routing

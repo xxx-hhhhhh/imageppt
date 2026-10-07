@@ -190,7 +190,13 @@ def test_alpha_substrate_cannot_override_a_verified_child_or_claim_its_pixels(tm
         if e.get("src"):
             e["src"] = str(output / ("backgrounds" if e["type"] == "background" else "assets") / e["src"].split("/")[-1])
     render_preview(output / "backgrounds/page_1.png",local,output / "preview.png")
-    assert np.array_equal(rgb,image_io.imread(output / "preview.png"))
+    from app.services.reconstruction.preservation_checks import inspect_preservation
+    check = inspect_preservation(source, layout, output, output / "preview.png")
+    # Explicitly measured feather borders may change; non-text interiors and
+    # source ownership must not. Exact hard-raster equality defeats antialiasing.
+    assert check["unexpectedVisualChangedPixels"] == 0
+    assert check["measuredAntialiasEdgePixels"] > 0
+    assert np.array_equal(rgb[45:70,70:95],image_io.imread(output / "preview.png")[45:70,70:95])
     count = np.zeros((120,200),np.uint8)
     for node in layout["metadata"]["ownershipAudit"]["nodes"]:
         x1,y1,x2,y2 = node["sourceBBox"]

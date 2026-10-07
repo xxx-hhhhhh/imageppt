@@ -16,8 +16,9 @@ from playwright.sync_api import expect, sync_playwright
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("project_id")
+    parser.add_argument("--output-root",type=Path)
     args = parser.parse_args()
-    output = Path(__file__).resolve().parents[1] / "outputs" / args.project_id
+    output = (args.output_root or Path(__file__).resolve().parents[1] / "outputs") / args.project_id
     errors, missing = [], []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -26,7 +27,10 @@ def main():
         page.on("response", lambda r: missing.append(r.url) if r.status >= 400 and "/media/" in r.url else None)
         page.goto("http://127.0.0.1:5173/", wait_until="domcontentloaded")
         expect(page.get_by_role("button", name="AI设置", exact=True)).to_be_visible()
-        page.wait_for_function("() => !document.querySelector('button:disabled')?.textContent?.includes('AI解析')")
+        page.wait_for_function("""async () => {
+          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+          const state=useProjectStore.getState(); return Boolean(state.project?.id) && !state.busy;
+        }""")
         layout = page.evaluate("""async id => {
           const response = await fetch('/api/projects/'+id+'/slides/1');
           if (!response.ok) throw new Error('Actual saved layout unavailable');
@@ -42,7 +46,31 @@ def main():
         page.wait_for_function("() => [...document.querySelectorAll('img')].filter(i => i.offsetParent !== null).every(i => i.complete && i.naturalWidth > 0)")
         page.screenshot(path=str(output / "browser_review.png"), full_page=True)
         page.get_by_role("button", name="手动编辑", exact=True).first.click()
-        image = min((e for e in layout["elements"] if e.get("owner") == "movable_image"), key=lambda e: e["width"]*e["height"])
+        for text in (e for e in layout['elements'] if e.get('metadata',{}).get('exclusiveFontVerified')):
+            expect(page.locator(f'[data-element-id="{text["id"]}"]')).to_have_css('white-space','pre')
+        text = min((e for e in layout['elements'] if e.get('owner')=='editable_text' and len(e.get('text') or '')>=4),key=lambda e:e['y'])
+        # The DOM owns visible text; the underlying Fabric proxy must not paint
+        # the same foreground pixels (that used to duplicate/wrap old lines).
+        duplicate_pixels = page.evaluate("""item => {
+          const c=document.querySelector('canvas.lower-canvas');
+          const d=c.getContext('2d').getImageData(Math.round(item.x),Math.round(item.y),Math.round(item.width),Math.round(item.height)).data;
+          const hex=item.style.color.slice(1), rgb=[0,2,4].map(i=>parseInt(hex.slice(i,i+2),16));
+          let count=0; for(let i=0;i<d.length;i+=4) if(d[i+3]>0 && rgb.every((v,j)=>Math.abs(d[i+j]-v)<4)) count++;
+          return count;
+        }""",text)
+        assert duplicate_pixels==0, 'Fabric paints a second native text copy'
+        node = page.locator(f'[data-element-id="{text["id"]}"]')
+        node.dblclick()
+        expect(node.locator('[data-text-content]')).to_have_attribute('contenteditable','true')
+        page.keyboard.press('Control+A')
+        page.keyboard.insert_text('单一文字层回归')
+        page.get_by_label('字号',exact=True).click()
+        expect(page.get_by_role('textbox',name='内容',exact=True)).to_have_value('单一文字层回归')
+        page.evaluate("""async layout => {
+          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+          useProjectStore.setState({slides:[layout],selectedIds:[]});
+        }""",layout)
+        image = min((e for e in layout["elements"] if e.get("owner") == "movable_image" and e['width']*e['height']>1500), key=lambda e: e["width"]*e["height"])
         node = page.locator(f'[data-element-id="{image["id"]}"]')
         expect(node).to_be_visible()
         bounds = node.bounding_box()
@@ -70,7 +98,8 @@ def main():
         expect(page.get_by_role("button",name="保存当前页面",exact=True)).to_be_enabled()
         page.screenshot(path=str(output / "browser_final.png"),full_page=True)
         assert not errors and not missing, {"errors":errors,"missing":missing}
-        result = {"projectId": args.project_id,"realSavedApiLayout":True,"imageDrag":True,"imageResize":True,
+        result = {"projectId": args.project_id,"realSavedApiLayout":True,"imageDrag":True,"imageResize":True,"nativeSingleLineRendering":True,
+                  "domTextEditing":True,"fabricDuplicateTextPixelCount":duplicate_pixels,
                   "missingAssets":missing,"browserErrors":errors,"nativeTextCount":sum(e.get('owner') == 'editable_text' for e in layout['elements']),
                   "originalResultFilesModified":False,"automaticRevisionCalls":0}
         (output / "exclusive_browser.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")

@@ -25,7 +25,6 @@ from app.services.refinement import TypographyLayoutRefiner
 from app.services.scene.scene_analyzer import SceneAnalyzer
 from app.services.segmentation.segmentation_provider import create_segmentation_provider
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
-from app.utils import image_io
 
 
 class ReconstructionPipeline:
@@ -173,27 +172,19 @@ class ReconstructionPipeline:
         self._write_json(candidate / "raster_text_audit.json", audit)
         if audit["missingAssetCount"] or audit["rasterNativeDuplicateTextCount"]:
             raise ValueError("Candidate has missing assets or retained original glyphs; previous result kept")
-        source_image = image_io.imread(normalized)
-        preview_image = image_io.imread(preview)
-        import numpy as np
-        if source_image is None or preview_image is None:
-            raise ValueError("Candidate preview unavailable")
-        native_ink = np.zeros(source_image.shape[:2], bool)
-        for node in layout["metadata"]["ownershipAudit"]["nodes"]:
-            if node["owner"] != "editable_text":
-                continue
-            mask = image_io.imread(candidate / node["mask"], -1)
-            x1,y1,x2,y2 = node["sourceBBox"]
-            native_ink[y1:y2, x1:x2] |= mask[:, :, 3] > 0
-        diff = np.max(np.abs(source_image.astype(float)-preview_image.astype(float)), axis=2)
-        # Permit a small antialiasing fringe around a measured font replacement.
-        import cv2
-        text_support = cv2.dilate(native_ink.astype(np.uint8), np.ones((5,5), np.uint8)) > 0
-        outside_text_changed = int(((diff > 0) & ~text_support).sum())
+        from app.services.reconstruction.preservation_checks import inspect_preservation
+        preservation = inspect_preservation(normalized,layout,candidate,preview)
+        self._write_json(candidate / "preservation_checks.json",preservation)
+        if any(preservation[k] for k in ("unownedSourcePixels", "multiplyOwnedSourcePixels", "unownedGlyphPaperPixels", "multiplyOwnedGlyphPaperPixels")):
+            raise ValueError("Source owners are incomplete or duplicated")
+        outside_text_changed = preservation["unexpectedVisualChangedPixels"]
         if outside_text_changed:
             raise ValueError(f"Candidate loses or changes {outside_text_changed} non-text pixels; no commit allowed")
         detected = len(layout["metadata"]["ownershipAudit"]["textDecisions"])
         editable = sum(e.get("owner") == "editable_text" for e in layout["elements"])
+        reliable_ocr = sum(e.get("type") == "text" and float(e.get("confidence") or 0)>=.9 for e in ocr_layout["elements"])
+        if reliable_ocr and not editable:
+            raise ReconstructionQualityError("检测到了可靠文字，但尚未生成原生文本框。候选已保留，当前结果没有被覆盖；本次不能标记为可编辑重建成功。")
         score = run_visual_qa(normalized, preview, candidate, layout)
         score.update({"editableTextCoverage": editable/max(1,detected), "detectedTextCount": detected,
             "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
@@ -201,10 +192,13 @@ class ReconstructionPipeline:
             "movableVisualCoverage": 1, "visualAreaPreserved": 1, "nonTextChangedPixelCount": outside_text_changed,
             "missingVisualCount": 0, "missingAssetCount": 0, "ghostingCount": 0, "duplicateCount": 0,
             "backgroundResidualCount": 0, "shapeCount": sum(e.get("owner") == "native_shape" for e in layout["elements"]),
+            "preservationChecks":preservation,"reliableOCRTextCount":reliable_ocr,
+            "nativeReliableTextCoverage":editable/max(1,reliable_ocr),
             "imageAssetCount": audit["activeImageCount"], "rasterNativeDuplicateTextCount": 0,
             "revisionRounds": 0, "revisionRound": 0, "revisionStatus": "automatic_revisions_paused",
             "issuesAfter": [], "stagnationReason": "ownership_audit_pause",
-            "metricScope": "exact non-text preview preservation; native font match measured, PowerPoint render separate"})
+            "semanticObjectCoverage":None,
+            "metricScope": "source-pixel ownership and glyph-local repairs; semantic extraction completeness is not implied; font substitution/verified antialias edges explicit; PowerPoint render separate"})
         self._write_json(candidate / "visual_score.json", score)
         self._write_json(candidate / "visual_validation.json", score)
         self._write_json(candidate / f"scene_final_{page}.json", layout)
@@ -230,9 +224,9 @@ class ReconstructionPipeline:
                            "conversion_report.json", f"ownership_labels_{page}.png",
                            f"ownership_audit_{page}.json", f"scene_final_{page}.json"]
         protected_files += [f"{name}{suffix}.json" for name in
-                            ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit")]
+                            ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit", "preservation_checks")]
         protected_files += [f"{name}{suffix}.png" for name in
-                            ("source", "original", "reconstructed_preview", "final_preview", "initial_preview", "clean_background")]
+                            ("source", "original", "reconstructed_preview", "final_preview", "initial_preview", "clean_background", "editable_text_removed_preview")]
         with preserve_published_state(root, protected_files):
             for name in ("assets", "ownership_masks", "normalized"):
                 if (candidate / name).is_dir():
@@ -240,12 +234,13 @@ class ReconstructionPipeline:
             (root / "backgrounds").mkdir(exist_ok=True)
             shutil.copy2(background, root / "backgrounds" / background.name)
             suffix = "" if page == 1 else f"_{page}"
-            for filename in ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit"):
+            for filename in ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit", "preservation_checks"):
                 self._write_json(root / f"{filename}{suffix}.json", json.loads((candidate / f"{filename}.json").read_text(encoding="utf-8")))
             for filename in ("source", "original"):
                 shutil.copy2(normalized, root / f"{filename}{suffix}.png")
             for filename in ("reconstructed_preview", "final_preview", "initial_preview"):
                 shutil.copy2(preview, root / f"{filename}{suffix}.png")
+            shutil.copy2(candidate / "editable_text_removed_preview.png",root / f"editable_text_removed_preview{suffix}.png")
             shutil.copy2(background, root / f"clean_background{suffix}.png")
             for filename in (f"ownership_labels_{page}.png", f"ownership_audit_{page}.json", f"scene_final_{page}.json"):
                 shutil.copy2(candidate / filename, root / filename)
@@ -265,6 +260,10 @@ class ReconstructionPipeline:
 
 class AIUnavailableError(RuntimeError):
     """High quality analysis paused until the user explicitly chooses recovery."""
+
+
+class ReconstructionQualityError(RuntimeError):
+    """A raster-only slide containing reliable OCR is not editable success."""
 
 
 def _ensure_uncovered_text_owners(layout: dict, uncovered_ids: list[str]) -> None:

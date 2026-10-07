@@ -20,6 +20,9 @@ def _font(style: dict[str, Any], size_scale: float = 1.0) -> ImageFont.FreeTypeF
         Path("C:/Windows/Fonts/msyh.ttc") if "YaHei" in family else Path("C:/Windows/Fonts/simsun.ttc"),
         Path("C:/Windows/Fonts/arial.ttf"),
     ]
+    measured_file = str(style.get("fontFile") or "")
+    if measured_file and Path(measured_file).name == measured_file:
+        candidates.insert(0,Path("C:/Windows/Fonts") / measured_file)
     for path in candidates:
         if path.exists():
             try:

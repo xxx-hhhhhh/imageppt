@@ -1,6 +1,16 @@
 # 开发报告
 
-> 下方包含历史验收记录。最新结论见“2026-10-07 互斥 ownership 止损审计”；旧记录中的 coverage=100% 不等于视觉或编辑性合格。
+> 下方包含历史验收记录。最新普通文字修复见 `docs/NATIVE_TEXT_RECOVERY_20261007.md`；此前 0 原生文字的止损版本并未满足可编辑验收。旧记录中的 coverage=100% 不等于视觉或编辑性合格。
+
+## 2026-10-07 普通文字与边缘修复（最新）
+
+在 `codex/object-first-exclusive-ownership` 继续开发，没有新建源码项目、没有自动优化或 UI 改版。修复过严字体 gate 导致全页 raster fallback、硬 Mask/碎片图、原字压缩晕边、重复纸面承载造成 PowerPoint 白色接缝，以及 DOM/Fabric 重复绘字和单行换行不一致。
+
+真实用户 API/浏览器记录 `6b972f8b615e4f2092895a9dba16bd49`：PaddleOCR 99 条，Qwen3-VL-Flash + SAM2，**59 个原生文本框 + 35 个 movable image**。改字、字号、颜色、拖动、缩放、保存、PPT 导出通过；真正 PowerPoint 打开未修改原始导出并渲染。源像素、纸面归属未覆盖/重复均为 0，缺失资产和原字重复检查为 0，非文字禁止范围内变化为 0。自动优化入口 409，revision 轮数 0。
+
+新增 `editable_text.py`、`visual_assets.py`、`preservation_checks.py`、文字/边缘回归测试和真实验收脚本；修改现有 pipeline/API/Owner builder/preview/EditorCanvas，统一 Layout 仍是唯一渲染依据。后端 **402 passed**，Ruff 与致命错误检查通过；TypeScript + Vite build 通过（604KB bundle 警告）；最终浏览器回归连续两次通过。细节、机读报告和 PowerPoint/浏览器对比路径见上述专项报告。
+
+仍有 40 条 OCR 保留图片，本页 native Shape 为 0，部分复杂背景对象仍为完整局部裁切而非精细透明抠图，浅色底板有微小修补痕迹。未完成四类真实页面和 WPS 本轮实测，不宣称全部可编辑或无瑕疵。Drive 原项目已同步，用户旧页保留，模型/密钥/依赖不上传。
 
 ## 1. 已完成内容
 

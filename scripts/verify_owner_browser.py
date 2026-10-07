@@ -7,6 +7,7 @@ uses the user's existing configuration; no settings or credentials are changed.
 import argparse
 import json
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
@@ -19,8 +20,10 @@ def main():
     parser.add_argument("image", type=Path)
     parser.add_argument("--mode", choices=("fast", "standard", "high_quality", "maximum"), default="standard")
     parser.add_argument("--timeout-ms", type=int, default=900000)
+    parser.add_argument("--output-root", type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    output_root = args.output_root or root / "outputs"
     errors, missing = [], []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -57,7 +60,9 @@ def main():
         node = page.locator(f'[data-element-id="{target["id"]}"]')
         expect(node).to_be_visible()
         page.wait_for_function("() => [...document.querySelectorAll('.visual-image img')].every(i => i.complete && i.naturalWidth > 0)", timeout=30000)
-        output = root / "outputs" / identifier
+        output = output_root / identifier
+        output.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(output / "editable.pptx",output / "unmodified_reconstruction.pptx")
         page.screenshot(path=str(output / "browser_before_edit.png"), full_page=True)
         node.dblclick()
         expect(node.locator('[data-text-content]')).to_have_attribute("contenteditable", "true")
@@ -96,7 +101,7 @@ def main():
             page.get_by_role("button", name="通过本页", exact=True).click()
         with page.expect_download(timeout=30000) as downloaded:
             page.get_by_role("button", name="导出PPT", exact=True).click()
-        output = root / "outputs" / identifier
+        output = output_root / identifier
         pptx = output / "browser_acceptance.pptx"
         downloaded.value.save_as(str(pptx))
         assert any(edited in shape.text for slide in Presentation(pptx).slides for shape in slide.shapes if shape.has_text_frame)
@@ -104,7 +109,10 @@ def main():
         page.screenshot(path=str(output / "browser_acceptance.png"), full_page=True)
         report = {"projectId": identifier, "realUpload": True, "realAnalysis": True, "mode": args.mode, "aiUsed": result.get("aiUsed"),
                   "ocrProvider": result.get("ocrProvider"), "editableText": True, "drag": True, "resize": True, "save": True,
-                  "nativeTextInExport": True, "missingAssetCount": len(missing), "browserErrors": errors}
+                  "nativeTextInExport": True, "nativeTextCount":len(texts),
+                  "allNativeTextCount":sum(e.get('owner')=='editable_text' for e in layout['elements']),
+                  "movableImageCount":sum(e.get('owner')=='movable_image' for e in layout['elements']),
+                  "missingAssetCount": len(missing), "browserErrors": errors}
         (output / "browser_acceptance.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(report), flush=True)
         browser.close()

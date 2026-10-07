@@ -6,14 +6,12 @@ as editable text. Semantic proposals are hints, not permission to erase.
 """
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
 from uuid import uuid4
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 from app.utils import image_io
 
@@ -50,84 +48,10 @@ def _save_exact(path: Path, rgba: np.ndarray) -> None:
         raise OSError("Replacement asset failed round-trip verification")
 
 
-def _text_candidate(source: np.ndarray, item: dict) -> tuple[dict, np.ndarray, np.ndarray] | None:
-    """Only plain, uniform-paper text with a measured font match may be replaced.
-
-    The full contrast mask (including antialiasing) is used, not a bbox fill.
-    Border texture, badges, grid lines, gradients or incompatible fonts cause
-    raster ownership instead. This is intentionally a conservative gate.
-    """
-    h, w = source.shape[:2]
-    box = box_of(item, w, h)
-    text = str(item.get("text") or "")
-    if box is None or not text.strip() or "\n" in text or float(item.get("confidence") or 0) < .95:
-        return None
-    x1, y1, x2, y2 = box
-    pad = 4
-    x1, y1, x2, y2 = max(0, x1-pad), max(0, y1-pad), min(w, x2+pad), min(h, y2+pad)
-    patch = source[y1:y2, x1:x2]
-    if min(patch.shape[:2]) < 8:
-        return None
-    ring = np.concatenate((patch[:2].reshape(-1, 3), patch[-2:].reshape(-1, 3), patch[:, :2].reshape(-1, 3), patch[:, -2:].reshape(-1, 3)))
-    colors, counts = np.unique(ring, axis=0, return_counts=True)
-    bg = colors[counts.argmax()]
-    # Tolerate mild compression, NOT a pale or patterned carrier gradient.
-    if np.mean(np.max(np.abs(ring.astype(float)-bg), axis=1) <= 3) < .985:
-        return None
-    delta = np.max(np.abs(patch.astype(float)-bg), axis=2)
-    ink = delta > 0
-    if not ink.any() or np.mean(ink) > .45 or ink[:2].any() or ink[-2:].any() or ink[:, :2].any() or ink[:, -2:].any():
-        return None
-    ys, xs = np.where(ink)
-    iy, ix, ih, iw = ys.min(), xs.min(), ys.max()-ys.min()+1, xs.max()-xs.min()+1
-    dark = delta >= max(30, np.quantile(delta[ink], .65))
-    if not dark.any():
-        return None
-    fg = np.median(patch[dark], axis=0).astype(np.uint8)
-    # Multicolour illustrations inside an OCR bbox must remain images.
-    if np.mean(np.max(np.abs(patch[dark].astype(float)-fg), axis=1) <= 28) < .95:
-        return None
-    target = ink[iy:iy+ih, ix:ix+iw].astype(np.uint8)
-    best = None
-    for family, filename in (("Microsoft YaHei", "msyh.ttc"), ("SimSun", "simsun.ttc"), ("Arial", "arial.ttf")):
-        path = Path("C:/Windows/Fonts") / filename
-        if not path.is_file():
-            continue
-        for size in range(max(8, int(ih*.8)), min(180, int(ih*1.55)+2)):
-            font = ImageFont.truetype(str(path), size=size)
-            bounds = font.getbbox(text)
-            tw, th = bounds[2]-bounds[0], bounds[3]-bounds[1]
-            if abs(tw-iw) > 3 or abs(th-ih) > 3 or min(tw, th) <= 0:
-                continue
-            raster = Image.new("L", (tw+6, th+6))
-            ImageDraw.Draw(raster).text((3-bounds[0], 3-bounds[1]), text, font=font, fill=255)
-            raw = np.array(raster) > 0
-            py, px = np.where(raw)
-            actual_w, actual_h = px.max()-px.min()+1, py.max()-py.min()+1
-            if actual_w != iw or actual_h != ih:
-                continue
-            predicted = raw[py.min():py.max()+1, px.min():px.max()+1]
-            union = np.count_nonzero(predicted | (target > 0))
-            iou = np.count_nonzero(predicted & (target > 0))/max(1, union)
-            if best is None or iou > best[0]:
-                best = (iou, family, size, (bounds[0]+px.min()-3, bounds[1]+py.min()-3))
-    if best is None or best[0] < .82:
-        return None
-    _, family, size, bounds = best
-    element = copy.deepcopy(item)
-    element.update(x=float(x1+ix-bounds[0]), y=float(y1+iy-bounds[1]), width=float(max(iw+8, size*len(text))), height=float(size*1.6),
-                   type="text", owner="editable_text", editable=True, source="ocr", role=item.get("role", "body_text"))
-    element["width"] = min(element["width"], w-element["x"])
-    element["height"] = min(element["height"], h-element["y"])
-    element["style"] = {**element.get("style", {}), "fontFamily": family, "fontSize": size, "fontWeight": 400,
-                        "color": "#" + "".join(f"{v:02X}" for v in fg[::-1]), "align": "left", "verticalAlign": "top"}
-    element["metadata"] = {"reconstructionStrategy": "editable_text", "exclusiveFontVerified": True,
-                           "fontMaskIoU": round(best[0], 4), "rawOCRBBox": list(box), "originalLineCount": 1}
-    mask = np.zeros((h, w), bool)
-    # Every non-background pixel of the proven plain text is removed once.
-    mask[y1:y2, x1:x2] = ink
-    fill = np.broadcast_to(bg, source.shape).copy()
-    return element, mask, fill
+def _text_candidate(source: np.ndarray, item: dict, hints: dict | None = None,
+                    diagnostics: dict | None = None) -> tuple[dict, np.ndarray, np.ndarray] | None:
+    from app.services.reconstruction.editable_text import restore_text_candidate
+    return restore_text_candidate(source,item,hints,diagnostics)
 
 
 def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segments: list[dict],
@@ -138,6 +62,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     h, w = source.shape[:2]
     labels = np.zeros((h, w), np.int32)
     ink = np.zeros((h, w), bool)
+    substrate_claimed = np.zeros((h,w),bool)
     cleaned = source.copy()
     elements: list[dict] = []
     nodes: list[dict] = []
@@ -179,20 +104,25 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     for item in ocr_layout.get("elements", []):
         if item.get("type") != "text":
             continue
-        candidate = _text_candidate(source, item)
+        hints = semantic.get(item["id"]) or {}
+        diagnostics = {}
+        candidate = _text_candidate(source, item, hints, diagnostics)
         if candidate is not None and not np.any(ink & candidate[1]):
             element, mask, fill = candidate
-            hints = semantic.get(item["id"]) or {}
             element["role"] = hints.get("role") or element.get("role")
             element["groupId"] = hints.get("groupId")
             register(element, mask, "editable_text", "ocr_verified_font")
             ink |= mask
-            cleaned[mask] = fill[mask]  # No whole-bbox erase, no generative inpaint.
+            # Repair ONLY after replacement + source mask are persisted. A
+            # measured smooth local surface avoids Telea's wave/blotch artifacts
+            # in dense text. The card itself is never an authorized erase mask.
+            cleaned[mask] = fill[mask]
+            element["metadata"]["textRepairStrategy"] = "owner_gated_measured_local_paper"
             decision = "editable_text"
         else:
             decision = "movable_image"
         text_decisions.append({"id": item["id"], "text": item.get("text"), "bbox": list(box_of(item, w, h) or ()),
-                               "decision": decision, "reason": "verified_plain_text" if decision == "editable_text" else "preserve_source_until_replacement_is_reliable"})
+                               "decision": decision, "reason": diagnostics.get("reason"), "evidence": diagnostics})
 
     # Native geometry needs pixel evidence, not a VLM label or guessed colour.
     # Only fully uniform, axis-aligned rectangles pass this first safety gate.
@@ -217,7 +147,8 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                  "metadata": {"reconstructionStrategy": "native_shape", "exclusiveGeometryVerified": True}}
         register(shape, mask, "native_shape", "cv_exact_uniform_rectangle")
 
-    def image_owner(mask: np.ndarray, role: str, hint: str, parent: str | None = None) -> None:
+    def image_owner(mask: np.ndarray, role: str, hint: str, parent: str | None = None,
+                    seed: tuple[tuple[int,int,int,int],np.ndarray,dict] | None = None) -> None:
         mask = mask & (labels == 0)
         if not mask.any():
             return
@@ -225,8 +156,18 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         x1, y1, x2, y2 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
         identifier = f"{prefix}_visual_{len(nodes)+1:03d}"
         rgba = np.dstack((cleaned[y1:y2, x1:x2], (mask[y1:y2, x1:x2]*255).astype(np.uint8)))
+        seed_evidence = {}
+        if seed is not None:
+            (sx,sy,_,_),seed_rgba,seed_evidence = seed
+            source_rgba = seed_rgba[y1-sy:y2-sy,x1-sx:x2-sx]
+            rgba[:,:,:3] = source_rgba[:,:,:3]
+            rgba[:,:,3] = np.where(mask[y1:y2,x1:x2],source_rgba[:,:,3],0)
         # Clean paper beneath native glyphs is a substrate, not an old glyph.
-        substrate = ink[y1:y2, x1:x2]
+        # Exactly one raster carrier supplies repaired paper beneath each
+        # native glyph. Copying the same jagged substrate into every overlapping
+        # image creates interpolation seams in PowerPoint even when PIL looks OK.
+        substrate = ink[y1:y2, x1:x2] & ~substrate_claimed[y1:y2,x1:x2]
+        rgba[:,:,:3][substrate] = cleaned[y1:y2,x1:x2][substrate]
         rgba[:, :, 3][substrate] = 255
         # PowerPoint resamples each PNG independently. Complementary hard masks
         # can otherwise expose white hairline cracks between two exact owners.
@@ -234,7 +175,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         # beneath already-verified replacement owners. This is a synthetic
         # substrate, NOT another claim on their original source content.
         floor = rgba[:, :, 3] > 0
-        eligible = labels[y1:y2, x1:x2] > 0
+        eligible = (labels[y1:y2, x1:x2] > 0) & ~ink[y1:y2,x1:x2]
         synthetic_floor = np.zeros(floor.shape, bool)
         for _ in range(2):
             previous = floor.copy()
@@ -253,10 +194,18 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 synthetic_floor |= extend
         path = assets / f"{identifier}.png"
         _save_exact(path, rgba)  # A missing/corrupt asset aborts without a background write.
+        substrate_path = mask_dir / f"{identifier}_paper.png"
+        paper_mask = np.zeros(rgba.shape,np.uint8)
+        paper_mask[:,:,3] = substrate.astype(np.uint8)*255
+        _save_exact(substrate_path,paper_mask)
+        substrate_claimed[y1:y2,x1:x2] |= substrate
         element = {"id": identifier, "type": "image", "x": int(x1), "y": int(y1), "width": int(x2-x1), "height": int(y2-y1),
                    "src": f"/media/assets/{project_id}/{path.name}", "rotation": 0, "zIndex": 2,
                    "role": role, "groupId": parent, "style": {"opacity": 1}, "confidence": 1,
                    "metadata": {"reconstructionStrategy": "transparent_image", "proposal": hint,
+                                **seed_evidence,
+                                "paperSubstrateMask":str(substrate_path.relative_to(output)).replace("\\","/"),
+                                "paperSubstrateBBox":[int(x1),int(y1),int(x2),int(y2)],
                                 "cleanSubstratePixels": int(substrate.sum()), "edgeSubstratePixels": int(synthetic_floor.sum()),
                                 "edgeSubstratePolicy": "two_pixel_owned_boundary_color_not_source_copy", "preserveWholeAsset": True}}
         register(element, mask, "movable_image", hint)
@@ -276,9 +225,12 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         x1, y1, x2, y2 = box
         if asset is None or asset.ndim != 3 or asset.shape[2] != 4 or asset.shape[:2] != (y2-y1, x2-x1):
             continue
+        from app.services.reconstruction.visual_assets import prepare_visual_seed
+        refined = prepare_visual_seed(cleaned,box,asset[:,:,3])
+        (x1,y1,x2,y2),rgba_seed,_ = refined
         mask = np.zeros((h, w), bool)
-        mask[y1:y2, x1:x2] = asset[:, :, 3] > 0
-        image_owner(mask, "segmented_visual", segment.get("source", "opencv_segment"))
+        mask[y1:y2, x1:x2] = rgba_seed[:, :, 3] > 0
+        image_owner(mask, "segmented_visual", segment.get("source", "opencv_segment"),seed=refined)
 
     modules = ((scene.get("vision") or {}).get("reconstructionPlan") or {}).get("modules") or []
     proposals = []
@@ -301,6 +253,17 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         mask = np.zeros((h, w), bool)
         mask[max(0,y1-2):min(h,y2+2), max(0,x1-2):min(w,x2+2)] = True
         image_owner(mask, "raster_text_fallback", "ocr_unreliable_font")
+
+    # Glyph extraction can isolate little paper islands between Chinese strokes.
+    # Keep these in ONE coherent line carrier, not dozens of jagged 1px assets.
+    # Existing semantic/SAM carrier owners take precedence; nothing is recopied.
+    for decision in text_decisions:
+        if decision["decision"] != "editable_text" or not decision["bbox"]:
+            continue
+        x1,y1,x2,y2 = decision["bbox"]
+        mask = np.zeros((h,w),bool)
+        mask[max(0,y1-4):min(h,y2+4),max(0,x1-4):min(w,x2+4)] = True
+        image_owner(mask,"text_paper_carrier","ocr_local_paper",decision["id"])
 
     # Background LAST: only an edge-connected, exact flat colour is intentional
     # background. Pale plates and disconnected white cards are NOT background.
@@ -375,7 +338,9 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             decision["replacementOwners"] = [nodes[i-1]["id"] for i in np.unique(labels[y1:y2, x1:x2]) if i > 0]
     graph = {"version": "3.0-exclusive", "policy": "exactly_one_source_owner", "nodes": nodes,
              "textDecisions": text_decisions, "unownedPixelCount": int((labels == 0).sum()),
-             "sourcePixelCount": w*h, "automaticRevisionsPaused": True, "inpaintCalls": 0}
+             "sourcePixelCount": w*h, "automaticRevisionsPaused": True,
+             "inpaintCalls":0,
+             "repairScope":"glyph-local measured paper, after persisted owner; never a whole module"}
     (output / f"ownership_audit_{page}.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
     result = {"version": "1.1", "sceneVersion": "3.0-exclusive-owner-evidence", "slide": {"width": w, "height": h},
               "coordinateSystem": "source-pixels-left-top", "source": source_path.name,
@@ -444,6 +409,18 @@ def audit_raster_text(source_path: Path, layout: dict, output: Path) -> dict:
         x1, y1, x2, y2 = max(0,x1), max(0,y1), min(w,x2), min(h,y2)
         patch = source[y1:y2, x1:x2]
         mask = tight_text_mask(patch, np.ones(patch.shape[:2], np.uint8)*255, (item.get("style") or {}).get("color")) > 0
+        if (item.get("metadata") or {}).get("nativeTextMeasured"):
+            # Dense small glyphs bias the old bbox-median estimate. Its dilated
+            # mask can include unchanged PAPER pixels, falsely reporting ghosts.
+            # Independently remeasure surrounding source paper, not the claimed
+            # deletion mask, so genuinely unremoved ink still fails this check.
+            from app.services.reconstruction.editable_text import measured_surface
+            ax, ay, bx, by = max(0, x1-6), max(0, y1-6), min(w, x2+6), min(h, y2+6)
+            measured = measured_surface(source[ay:by, ax:bx])
+            if measured is not None:
+                paper, _ = measured
+                local_paper = paper[y1-ay:y2-ay, x1-ax:x2-ax]
+                mask &= np.max(np.abs(patch.astype(float)-local_paper.astype(float)), axis=2) >= 8
         match = np.max(np.abs(source[y1:y2, x1:x2].astype(float)-raster[y1:y2, x1:x2]), axis=2) <= 3
         count = int((mask & match).sum())
         ratio = count/max(1, int(mask.sum()))

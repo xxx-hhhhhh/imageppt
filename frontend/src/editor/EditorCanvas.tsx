@@ -197,7 +197,7 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     const bottom = Math.min(.95 - top, Math.max(0, crop.bottom || 0));
     return <div data-element-id={element.id} className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   }
-  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}><span data-text-content style={{ display: 'block', width: '100%', height: '100%' }}>{element.text}</span>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: element.metadata?.exclusiveFontVerified ? 'pre' : 'pre-wrap', overflow: 'hidden' }}><span data-text-content style={{ display: 'block', width: '100%', height: '100%' }}>{element.text}</span>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (element.type === 'line' || element.type === 'arrow') return <div data-element-id={element.id} className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div data-element-id={element.id} className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   return null;
@@ -206,15 +206,17 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
 async function createFabricObject(element: LayoutElement): Promise<any> {
   const style = element.style || {};
   const common = { left: element.x, top: element.y, angle: element.rotation, opacity: style.opacity ?? 1, originX: 'left' as const, originY: 'top' as const };
-  // Images use the interactive DOM layer so their crop preview has one owner.
+  // Text and images have one VISIBLE owner: the interactive DOM layer.
   if (element.type === 'image') return null;
+  if (element.type === 'text') {
+    // Retain Fabric's selection/group interaction proxy, but do not paint a
+    // second text copy with different wrapping underneath the DOM text.
+    return new Textbox(element.text || '', { ...common, opacity: 0, width: element.width, height: element.height, fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', fill: style.color || '#111827', textAlign: style.align || 'left', editable: false, splitByGrapheme: false });
+  }
   if (element.type === 'background' && element.src) {
     const image = await FabricImage.fromURL(assetUrl(element.src));
     image.set({ ...common, width: element.width, height: element.height, scaleX: 1, scaleY: 1, selectable: false, evented: false });
     return image;
-  }
-  if (element.type === 'text') {
-    return new Textbox(element.text || '', { ...common, width: element.width, height: element.height, fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', fill: style.color || '#111827', textAlign: style.align || 'left', editable: true, splitByGrapheme: false });
   }
   const fill = colorWithOpacity(style.fill, style.opacity ?? 1);
   const stroke = style.stroke || '#17365D';
