@@ -38,6 +38,9 @@ models/
 !backend/app/models/*.py
 *.onnx
 *.pt
+*.pth
+*.ckpt
+*.safetensors
 *.pdparams
 *.pdmodel
 

@@ -142,6 +142,11 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
     used_replacements: set[str] = set()
     for old_id in sorted(missing_existing):
         retired = candidate_by_id.get(old_id) or {}
+        replacements = (retired.get("metadata") or {}).get("replacementOwners") or []
+        if replacements and all(key not in before_by_id and key in after_by_id for key in replacements):
+            if _fragment_union_covers(root, before_by_id[old_id], [after_by_id[key] for key in replacements]):
+                declared_replacements.add(old_id)
+                continue
         new_id = str((retired.get("metadata") or {}).get("replacedBy") or "")
         replacement = after_by_id.get(new_id)
         if (new_id in used_replacements or new_id in before_by_id or replacement is None
@@ -178,7 +183,7 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
     errors = []
     if after["missingAssetCount"]:
         errors.append("missing_assets")
-    if missing_unreplaced or after["assets"] < before["assets"]:
+    if missing_unreplaced or (after["assets"] < before["assets"] and not declared_replacements):
         errors.append("lost_existing_images")
     if missing_shapes:
         errors.append("lost_existing_shapes")
@@ -193,7 +198,7 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         errors.append("new_source_visual_loss")
     if outside_change > 0.015:
         errors.append("untargeted_preview_change")
-    if len(protected_visuals(candidate)) < len(protected_visuals(baseline)) - 1:
+    if len(protected_visuals(candidate)) < len(protected_visuals(baseline)) - len(declared_replacements) - 1:
         errors.append("lost_visual_objects")
     return {
         "assetsBefore": before["assets"], "assetsAfter": after["assets"],
@@ -206,6 +211,36 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
         "newlyLostVisualPixels": newly_lost, "largestNewVisualLoss": largest_new_loss,
         "integrityErrors": errors,
     }
+
+
+def _fragment_union_covers(root: Path, old: dict, replacements: list[dict]) -> bool:
+    """A many-to-fewer asset count change needs pixel proof, not declarations."""
+    path = asset_path(root, old.get("src"))
+    original = cv2.imread(str(path), -1) if path and path.is_file() else None
+    if original is None or original.ndim != 3 or original.shape[2] != 4 or old.get("rotation", 0) or old.get("crop"):
+        return False
+    if original.shape[:2] != (round(float(old["height"])), round(float(old["width"]))):
+        return False
+    x, y = round(float(old["x"])), round(float(old["y"]))
+    height, width = original.shape[:2]
+    evidence = np.zeros((height, width), bool)
+    for replacement in replacements:
+        path = asset_path(root, replacement.get("src"))
+        asset = cv2.imread(str(path), -1) if path and path.is_file() else None
+        if asset is None or asset.ndim != 3 or asset.shape[2] != 4 or replacement.get("rotation", 0) or replacement.get("crop"):
+            return False
+        ax, ay = round(float(replacement["x"])), round(float(replacement["y"]))
+        if asset.shape[:2] != (round(float(replacement["height"])), round(float(replacement["width"]))):
+            return False
+        left, top = max(x,ax), max(y,ay)
+        right, bottom = min(x+width, ax+asset.shape[1]), min(y+height, ay+asset.shape[0])
+        if right <= left or bottom <= top:
+            continue
+        old_patch = original[top-y:bottom-y, left-x:right-x]
+        new_patch = asset[top-ay:bottom-ay, left-ax:right-ax]
+        evidence[top-y:bottom-y, left-x:right-x] |= ((new_patch[:, :, 3] >= old_patch[:, :, 3])
+            & np.all(new_patch[:, :, :3] == old_patch[:, :, :3], axis=2))
+    return bool(np.any(original[:, :, 3] > 0) and np.all(evidence[original[:, :, 3] > 0]))
 
 
 def _new_source_visual_loss(source_path: Path | None, preview_before: Path, preview_after: Path,

@@ -34,6 +34,14 @@ class SceneAnalyzer:
         for item in layout.get("elements", []):
             element_type, role = classify_element(item)
             elements.append({"id": item["id"], "type": element_type, "role": role, "bbox": {"left": float(item.get("x", 0)), "top": float(item.get("y", 0)), "width": float(item.get("width", 0)), "height": float(item.get("height", 0))}, "rotation": float(item.get("rotation", 0)), "zIndex": int(item.get("zIndex", 0)), "groupId": item.get("groupId") or (item.get("metadata") or {}).get("groupId"), "editable": item.get("type") not in {"background", "group"}, "confidence": float(item.get("confidence") or 0.7), "text": item.get("text"), "src": item.get("src"), "style": item.get("style") or {}, "metadata": item.get("metadata") or {}})
+        for segment in segmentation:
+            if segment.get("source") != "ultralytics_sam2" or not segment.get("alphaCrop"):
+                continue
+            elements.append({"id": segment["id"], "type": "image", "role": "complex_visual", "bbox": segment["bbox"],
+                             "rotation": 0, "zIndex": 1, "editable": True, "confidence": segment["confidence"],
+                             "src": segment["alphaCrop"], "owner": "movable_image", "source": segment["source"],
+                             "contour": segment.get("contour"), "style": {},
+                             "metadata": {"reconstructionStrategy": "local_image", "reconstructionStrategySource": "sam2", "retainedVisual": True}})
         text_analysis = analyze_text_regions(ocr_results, width, height)
         provider_regions = self.layout_provider.analyze(image_path)
         relations = analyze_relations(elements) + analyze_alignment(elements) + detect_repetition(elements) + detect_grid(elements)

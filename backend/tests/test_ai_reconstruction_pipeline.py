@@ -309,14 +309,11 @@ def test_pipeline_defaults_to_white_objectized_background(monkeypatch, tmp_path:
     assert (tmp_path / "outputs" / "local-standard" / "objectization_audit.json").is_file()
 
 
-def test_pipeline_keeps_legacy_background_option(monkeypatch, tmp_path: Path) -> None:
-    import numpy as np
-
+def test_pipeline_rejects_legacy_erase_first_option(monkeypatch, tmp_path: Path) -> None:
+    import pytest
     monkeypatch.setattr(pipeline_module, "RECONSTRUCTION_SURFACE_MODE", "legacy")
-    slides, _, _ = _run_pipeline(monkeypatch, tmp_path, False)
-    background = tmp_path / "outputs" / "local-standard" / "backgrounds" / "page_1.png"
-    assert not np.all(np.asarray(Image.open(background).convert("RGB")) == 255)
-    assert slides[0].get("metadata", {}).get("reconstructionSurfaceMode") != "white_objectized"
+    with pytest.raises(ValueError, match="erase-first pipeline is disabled"):
+        _run_pipeline(monkeypatch, tmp_path, False)
 
 
 def test_uncovered_ocr_text_has_one_editable_owner() -> None:
@@ -331,7 +328,7 @@ def test_uncovered_ocr_text_has_one_editable_owner() -> None:
     assert layout["elements"][2]["metadata"]["suppressed"] is True
 
 
-def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkeypatch, tmp_path: Path) -> None:
+def test_main_pipeline_does_not_send_flat_non_glyph_pixels_to_lama(monkeypatch, tmp_path: Path) -> None:
     import cv2
     import numpy as np
     from app.services.inpainting.local_client import LocalIOPaintClient
@@ -348,10 +345,9 @@ def test_main_pipeline_uses_local_lama_for_owned_asset_without_vision_api(monkey
         return output
 
     provider.inpaint = fake_local_call
-    monkeypatch.setattr(pipeline_module, "RECONSTRUCTION_SURFACE_MODE", "legacy")
     monkeypatch.setattr("app.services.inpainting.service.create_inpainting_provider", lambda preferred: (provider, []))
     slides, report, debug = _run_pipeline(monkeypatch, tmp_path, False, with_plan=True, inpainting_factory=InpaintingService)
     score = json.loads((tmp_path / "outputs" / "local-standard" / "visual_score.json").read_text(encoding="utf-8"))
     assert slides and report["wholeImageRegions"] >= 1
-    assert score["localInpaintSuccesses"] >= 1
+    assert score["localInpaintSuccesses"] == 0
     assert debug["provider"] == "local"

@@ -26,13 +26,14 @@ from app.services.reconstruction.revision_integrity import asset_path, assess_re
 from app.services.reconstruction.text_coverage import fit_text_to_ocr_lines, measure_text_coverage
 from app.services.reconstruction.text_erasure import count_text_ghosting, erase_editable_text_sources
 from app.services.reconstruction.white_objectization import _occupy_text_glyphs, detect_flat_page_surface
+from app.services.reconstruction.owner_gate import compact_retained_fragments, ownership_evidence
 from app.services.visual_qa.analyzer import enrich_quality_score, render_preview, run_visual_qa
 
 OBJECTIZATION_AUDIT_PROBLEMS = {"missingBackplate", "missingVisualObject", "largeVisualLoss", "blankVisualOwner", "visualContentMismatch", "unsupportedNativeShape", "paleAssetGap", "assetBakedIntoBackground", "pageSurfaceLost", "pageSurfaceBakedIntoBackground", "monolithicPageImage"}
 
 # Bump when repair/acceptance algorithms change so obsolete failed attempts do
 # not permanently prevent a newer strategy from repairing the same region.
-REVISION_STRATEGY_VERSION = 13
+REVISION_STRATEGY_VERSION = 14
 
 
 def run_revision_loop(store: ProjectStore, project_id: str, page: int, max_rounds: int = 6) -> dict:
@@ -166,7 +167,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     shutil.copy2(preview, candidate_dir / "baseline_preview.png")
     (candidate_dir / "baseline_layout.json").write_text(json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8")
     inpainting = InpaintingService(INPAINT_PROVIDER)
-    local_cleaner = inpainting.clean_array if inpainting.provider.name == "local_lama" and any(issue["problem"] == "ghosting" for issue in target_issues) else None
+    local_cleaner = (lambda image, mask: inpainting.clean_array(image, mask, owner_mask=mask)) if inpainting.provider.name == "local_lama" and any(issue["problem"] == "ghosting" for issue in target_issues) else None
     local_provider = inpainting.provider if inpainting.provider.name == "local_lama" else None
     touched_text: set[str] = set()
     erase_text: set[str] = set()
@@ -408,6 +409,11 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         if repaired["repairedCutouts"]:
             changed_ids.update(square_ids)
 
+    prior_ids = {item["id"] for item in candidate.get("elements", [])}
+    compacted_fragments = compact_retained_fragments(cv2.imread(str(source)), candidate, root / "assets", project_id, page)
+    if compacted_fragments:
+        changed_ids.update(item["id"] for item in candidate["elements"]
+                           if item["id"] not in prior_ids or (item.get("metadata") or {}).get("replacementOwners"))
     render_preview(candidate_bg, candidate, candidate_preview)
     target_boxes = [entry["bbox"] for entry in regional_analysis]
     for layout_version in (baseline, candidate):
@@ -417,6 +423,28 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                 target_boxes.append([x, y, x + float(item.get("width") or 0), y + float(item.get("height") or 0)])
     integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview,
                                 target_boxes, source_path=source)
+    if (baseline.get("metadata") or {}).get("ownerGate"):
+        pixels = cv2.imread(str(source))
+        _, before_owners = ownership_evidence(pixels, copy.deepcopy(baseline), root / "assets")
+        _, after_owners = ownership_evidence(pixels, candidate, root / "assets")
+        candidate.setdefault("metadata", {})["ownerGate"] = after_owners
+        integrity["unownedPixelsBefore"] = before_owners["unownedPixelCount"]
+        integrity["unownedPixelsAfter"] = after_owners["unownedPixelCount"]
+        if after_owners["unownedPixelCount"] > before_owners["unownedPixelCount"]:
+            integrity["integrityErrors"].append("replacement_ownership_regressed")
+    # Retain a self-contained candidate even on rollback; published asset URLs
+    # remain unchanged and rejected files can still be removed from that namespace.
+    archive_scene = copy.deepcopy(candidate)
+    for image in archive_scene.get("elements", []):
+        if image.get("type") != "image":
+            continue
+        path = asset_path(root, image.get("src"))
+        if path is not None and path.is_file():
+            archive_assets = candidate_dir / "assets"
+            archive_assets.mkdir(exist_ok=True)
+            shutil.copy2(path, archive_assets / path.name)
+            image["src"] = f"assets/{path.name}"
+    (candidate_dir / "scene.json").write_text(json.dumps(archive_scene, ensure_ascii=False, indent=2), encoding="utf-8")
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
     previous_pixels = cv2.imread(str(preview), cv2.IMREAD_COLOR)
@@ -479,7 +507,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     pale_repaired = (bool(pale_targets) and int(baseline_audit.get("unownedPaleSupportPixels") or 0)
                      - int(candidate_audit.get("unownedPaleSupportPixels") or 0) >= 120
                      and visual_delta >= -0.005 and coverage_delta >= -0.01)
-    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired) and len(issues_after) <= len(issues_before) + 1
+    structural_improved = compacted_fragments >= 32 and identical_preview
+    accepted = not integrity["integrityErrors"] and bool(changed_ids) and (visual_improved or editable_improved or local_improved or restored_mismatch or pale_repaired or structural_improved) and len(issues_after) <= len(issues_before) + 1
     reported_integrity = {**integrity, "candidateMissingAssetCount": integrity["missingAssetCount"], "candidateAssetsAfter": integrity["assetsAfter"],
                           "missingAssetCount": integrity["missingAssetCount"] if accepted else baseline_assets["missingAssetCount"],
                           "assetsAfter": integrity["assetsAfter"] if accepted else baseline_assets["assets"],
@@ -500,6 +529,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         "regionalAnalysis": regional_analysis, "candidateIssuesAfter": issues_after, "stagnationReason": stagnation_reason,
         **reported_integrity, "inpaintedRegions": inpainted_regions if accepted else 0, "attemptedInpaintedRegions": inpainted_regions, "rollbackTriggered": not accepted,
         "discardedCandidateAssets": 0,
+        "compactedFragmentCount": compacted_fragments if accepted else 0,
         "backgroundObjectizedRegions": len(background_objects) if accepted else 0,
     }
     if accepted:

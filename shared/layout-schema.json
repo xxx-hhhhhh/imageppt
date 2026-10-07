@@ -6,6 +6,8 @@
   "required": ["version", "slide", "elements"],
   "properties": {
     "version": { "type": "string" },
+    "sceneVersion": { "type": "string" },
+    "pageOwner": { "type": "object" },
     "slide": {
       "type": "object",
       "required": ["width", "height"],
@@ -36,6 +38,21 @@
           "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
           "groupId": { "type": ["string", "null"] },
           "role": { "type": ["string", "null"] },
+          "owner": { "enum": ["editable_text", "native_shape", "movable_image", "background", "intentional_ignore", null] },
+          "source": { "type": ["string", "null"] },
+          "parent": { "type": ["string", "null"] },
+          "bbox": {
+            "type": "object",
+            "required": ["left", "top", "width", "height"],
+            "properties": {
+              "left": { "type": "number" }, "top": { "type": "number" },
+              "width": { "type": "number", "minimum": 0 }, "height": { "type": "number", "minimum": 0 }
+            }
+          },
+          "contour": { "type": "array" },
+          "assetPath": { "type": ["string", "null"] },
+          "editable": { "type": "boolean" },
+          "reconstructionStrategy": { "type": "string" },
           "componentType": { "type": ["string", "null"] },
           "metadata": { "type": "object" },
           "style": { "type": "object" }

@@ -7,9 +7,10 @@ Image2EditablePPT 是一个 Windows 优先的图片转对象级可编辑 PowerPo
 目标流程：
 
 ```text
-图片 → 预处理 → OCR → 版面分析 → OCR mask → 背景修复 → Layout JSON
-     → Qwen3-VL-Flash 页面理解 → Fusion Scene Graph → React/Fabric 编辑器
-     → 保存 Layout JSON → PPTX Renderer → Visual QA/Critic → editable.pptx
+图片 → 预处理 → OCR + Qwen 页面理解 + SAM2/CV 分割 → Scene/Layout JSON
+     → 可编辑文字 / 原生 Shape / 透明图片 → 验证 replacement owner
+     → 最后处理页面底板与 tight ink 局部修补 → React/Fabric 编辑器
+     → 保存同一 Layout JSON → PPTX Renderer → 非破坏式 QA/Revision
 ```
 
 项目不会把整张原图当成唯一 PPT 背景来伪装成可编辑结果。导出时会写入清理后的背景图、原生文本框、可编辑 PowerPoint Shape，以及复杂图片/插图的独立图片对象。
@@ -147,6 +148,15 @@ PPT 页面尺寸按首个页面的像素比例建立。像素坐标通过 `slide
 - 规则版面分析无法可靠还原复杂渐变、图表、装饰插画和特殊字体；这些区域倾向保留为独立图片。
 - OpenCV inpaint 只适合文字周围纹理可推断的区域，复杂人像/结构化背景需要安装 LAMA 或后续接入 VLM。
 - PPT 中的图片和修复背景保持独立对象，但复杂背景的完全像素级复原不作保证。
+- 当前 Object First 门禁优先保留视觉像素；复杂页面可能有较多透明残余/聚合图片，仍不等于完善的语义拆分。归属率为 100% 不能代替视觉验收。
+
+### Object First 安全集成
+
+当前流程先建立文字、简单 Shape、复杂视觉图像的归属证据，最后生成页面底板；无可靠替代对象的源像素必须先保存为可移动透明资产。普通文字清理使用 tight ink，`legacy` erase-first 模式禁止执行。详见 [集成架构与限制](docs/OBJECT_FIRST_INTEGRATION.md)。
+
+可选 SAM2：运行 `.\scripts\setup.ps1 -EnableSegmentation`，将 `sam2.1_t.pt` 放在 `%LOCALAPPDATA%\Image2EditablePPT\models`，或设置 `SAM_MODEL_PATH` 为外部绝对路径。没有权重或推理失败时诚实降级到 OpenCV。Ultralytics 有 AGPL-3.0/商业许可，发布前应评估。
+
+LaMa 不再作为整块模块清洗工具；不可用时基础功能继续运行。新安装的 Python 环境、前端依赖与 Vite 执行副本均在 LOCALAPPDATA，不要求 Google Drive 支持 junction。启动/测试时从源目录更新前端执行副本。旧物理 node_modules 不会被自动删除；请勿把已有依赖复制到同步目录。
 
 ## 14. 后续计划
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import math
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
@@ -73,7 +74,14 @@ class PPTXRenderer:
             raise ValueError("No analyzed slides to export")
         first = layouts[0]["slide"]
         slide_width = 13.333
-        slide_height = slide_width * first["height"] / first["width"]
+        ratio = float(first["height"]) / float(first["width"])
+        if not math.isfinite(ratio) or not 1/56 <= ratio <= 56:
+            raise ValueError("Image aspect ratio exceeds PowerPoint's supported slide dimensions")
+        slide_width = min(56.0, max(1.0, slide_width, 1.0 / ratio))
+        slide_height = slide_width * ratio
+        if slide_height > 56:
+            slide_height = 56.0
+            slide_width = slide_height / ratio
         presentation = Presentation()
         presentation.slide_width = Inches(slide_width)
         presentation.slide_height = Inches(slide_height)
@@ -134,7 +142,11 @@ class PPTXRenderer:
             paragraph.line_spacing = float(style.get("lineSpacing", 1.12))
             run = paragraph.add_run()
             lines = element.get("lines") or []
-            text = "\n".join(str(line.get("text", "")) for line in lines) if lines else (element.get("text") or "")
+            # The editor changes `text`; OCR lines are provenance, not another
+            # body source. An intentional empty edit must stay empty too.
+            text = element.get("text")
+            if text is None:
+                text = "\n".join(str(line.get("text", "")) for line in lines)
             fit = fit_textbox(
                 text,
                 float(element.get("width", 1)),

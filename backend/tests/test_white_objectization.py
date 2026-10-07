@@ -320,7 +320,7 @@ def test_pale_module_backplate_survives_with_foreground_and_group(tmp_path):
     assert set(plate["metadata"]["moduleMemberIds"]) == {"module_icon", "module_title"}
     assert plate["zIndex"] < 10
     assert plate["type"] in {"rectangle", "roundedRectangle", "image"}
-    assert np.all(cv2.imread(str(background_path)) == 255)
+    assert np.all(cv2.imread(str(background_path)) == 250)
     preview = tmp_path / "preview.png"
     render_preview(background_path, layout, preview)
     pixels = cv2.imread(str(preview))
@@ -1090,7 +1090,7 @@ def test_gradient_page_keeps_card_surfaces_and_ribbon_after_text_cleanup(tmp_pat
     preview = tmp_path / "preview.png"
     render_preview(background, layout, preview)
     pixels = cv2.imread(str(preview))
-    assert np.all(cv2.imread(str(background)) == 255)
+    assert np.array_equal(cv2.imread(str(background))[:, 0], source[:, 0])
     assert np.max(np.abs(pixels[60, 45].astype(int) - source[60, 45].astype(int))) < 15
     assert np.max(np.abs(pixels[205, 100].astype(int) - source[205, 100].astype(int))) < 20
     report = audit_objectization(source_path, background, preview, layout)

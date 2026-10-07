@@ -87,7 +87,18 @@ class InpaintingService:
                 item["professionalRepair"] = "fallback_opencv"
             return 0
 
-    def clean_array(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def clean_array(self, image: np.ndarray, mask: np.ndarray, *, owner_mask: np.ndarray | None = None, protected_mask: np.ndarray | None = None) -> np.ndarray:
+        # A caller must supply replacement-owner evidence; requests without it
+        # preserve the input. LaMa is not a generic module-cleaning operation.
+        if owner_mask is None or owner_mask.shape != mask.shape:
+            return image.copy()
+        mask = np.uint8((mask > 0) & (owner_mask > 0)) * 255
+        if protected_mask is not None:
+            if protected_mask.shape != mask.shape:
+                return image.copy()
+            mask[protected_mask > 0] = 0
+        if not np.any(mask):
+            return image.copy()
         if isinstance(self.provider, LocalIOPaintClient):
             try:
                 candidate = self.provider.inpaint_array(image, mask)

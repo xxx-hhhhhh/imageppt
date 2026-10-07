@@ -4,8 +4,8 @@ import copy
 import json
 import re
 import shutil
+import cv2
 from pathlib import Path
-from PIL import Image
 
 from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, RECONSTRUCTION_SURFACE_MODE, SEGMENTATION_PROVIDER, VISION_PROVIDER
 from app.services.fusion.adjustment_validator import apply_safe_adjustments
@@ -33,8 +33,9 @@ from app.services.reconstruction.white_objectization import layer_objectized_ele
 from app.services.reconstruction.objectization_qa import repair_objectized_modules
 from app.services.reconstruction.objectization_audit import audit_objectization, recover_initial_missing_regions
 from app.services.reconstruction.asset_ownership import mark_image_dominant_ocr, preserve_uncertain_text_as_visual, restore_image_owned_text
-from app.services.reconstruction.revision_integrity import localize_project_assets
+from app.services.reconstruction.revision_integrity import assess_revision, localize_project_assets
 from app.services.reconstruction.replacement_qa import check_replacement_regions
+from app.services.reconstruction.owner_gate import ensure_visual_owners
 from app.services.refinement import TypographyLayoutRefiner
 
 
@@ -95,7 +96,7 @@ class ReconstructionPipeline:
             item["width"] = float(box.get("width", item.get("width", 1)))
             item["height"] = float(box.get("height", item.get("height", 1)))
             item["zIndex"] = int(scene_item.get("zIndex", item.get("zIndex", 0)))
-            for field in ("role", "componentType", "groupId", "visionConfidence", "finalConfidence"):
+            for field in ("role", "componentType", "groupId", "visionConfidence", "finalConfidence", "source", "owner", "contour", "editable"):
                 if field in scene_item:
                     item[field] = copy.deepcopy(scene_item[field])
             scene_metadata = scene_item.get("metadata") or {}
@@ -116,6 +117,8 @@ class ReconstructionPipeline:
         return refined
 
     def analyze_project(self, project_id: str, mode: str | None = None, page: int = 1, allow_fallback: bool = False) -> tuple[list[dict], str, list[str]]:
+        if RECONSTRUCTION_SURFACE_MODE == "legacy":
+            raise ValueError("Legacy erase-first pipeline is disabled; use the object-first reconstruction surface")
         conversion_mode = mode if mode in {"fast", "standard", "high_quality", "maximum"} else CONVERSION_MODE
         white_objectized = RECONSTRUCTION_SURFACE_MODE != "legacy"
         record = self.store.get(project_id)
@@ -208,6 +211,7 @@ class ReconstructionPipeline:
                 if (item.get("metadata") or {}).get("preserveAsImage")
             ]
             segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
+            warnings.extend(getattr(self.segmentation_provider, "warnings", []))
             scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
             plan_coverage = (scene_raw.get("vision") or {}).get("planCoverage") or {}
             if plan_coverage.get("status") == "partial":
@@ -235,7 +239,8 @@ class ReconstructionPipeline:
                     preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
             if white_objectized:
                 background_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.new("RGB", (width, height), "white").save(background_path)
+                # Keep the source until objectization proves replacement owners.
+                shutil.copy2(normalized_path, background_path)
             else:
                 inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
             reconstruction_stats["aiBackgroundRepairs"] += int(getattr(inpainting, "ai_repaired_regions", 0))
@@ -313,7 +318,8 @@ class ReconstructionPipeline:
                 pre_cleanup_path = page_output / ("pre_cleanup_preview.png" if page_index == 1 else f"pre_cleanup_preview_{page_index}.png")
                 render_preview(background_path, layout, pre_cleanup_path)
                 ghosting_before_cleanup = count_text_ghosting(normalized_path, background_path, layout)
-            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=inpainting.clean_array if local_provider else None, clean_background=not white_objectized)
+            owner_cleaner = (lambda image, mask: inpainting.clean_array(image, mask, owner_mask=mask)) if local_provider else None
+            erasure_stats = erase_editable_text_sources(background_path, layout, complex_cleaner=owner_cleaner, clean_background=not white_objectized)
             for key, value in erasure_stats.items():
                 reconstruction_stats[key] += value
             if white_objectized:
@@ -371,9 +377,19 @@ class ReconstructionPipeline:
                     critic_reports.append(critic)
                     before_scene, before_layout = copy.deepcopy(scene_refined), copy.deepcopy(layout)
                     before_background = background_path.read_bytes()
+                    critic_dir = page_output / "critics" / f"page_{page_index}_round_{round_index + 1}"
+                    critic_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(background_path, critic_dir / "baseline_background.png")
+                    shutil.copy2(preview_path, critic_dir / "baseline_preview.png")
+                    self._write_json(critic_dir / "baseline_scene.json", before_layout)
                     ghost_boxes = _critic_ghosting_boxes(critic, layout)
                     if ghost_boxes:
-                        recleaned = inpainting.reclean_background(background_path, ghost_boxes)
+                        ghost_ids = {str(issue.get("elementId") or issue.get("element_id"))
+                                     for issue in critic.get("issues", [])
+                                     if issue.get("oldTextGhosting") or str(issue.get("problem", "")).lower() == "oldtextghosting"}
+                        recleaned = erase_editable_text_sources(background_path, layout,
+                            target_text_ids=ghost_ids, copy_asset_prefix=f"critic_{page_index}_{round_index}",
+                            project_root=page_output, protect_background_elements=True)["backgroundTextErased"]
                         reconstruction_stats["ghostingRegionsDetected"] += recleaned
                         reconstruction_stats["ghostingRegionsRecleaned"] += recleaned
                     scene_refined = apply_safe_adjustments(scene_refined, critic)
@@ -388,9 +404,16 @@ class ReconstructionPipeline:
                         layer_objectized_elements(layout.get("elements", []))
                     render_preview(background_path, layout, preview_path)
                     candidate_score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+                    integrity = assess_revision(page_output, before_layout, layout,
+                        critic_dir / "baseline_background.png", background_path,
+                        critic_dir / "baseline_preview.png", preview_path, source_path=normalized_path)
+                    self._write_json(critic_dir / "candidate_scene.json", layout)
+                    self._write_json(critic_dir / "qa.json", {"score": candidate_score, "integrity": integrity})
+                    shutil.copy2(background_path, critic_dir / "background.png")
+                    shutil.copy2(preview_path, critic_dir / "preview.png")
                     improvement = float(candidate_score.get("overall", 0)) - float(best_score.get("overall", 0))
                     critic["visualImprovement"] = round(improvement, 4)
-                    if improvement > 0.002:
+                    if improvement > 0.002 and not integrity["integrityErrors"]:
                         best_score = candidate_score
                         stagnation = 0
                     else:
@@ -414,7 +437,15 @@ class ReconstructionPipeline:
             if white_objectized:
                 reconstruction_stats["initialRecoveredVisuals"] += recover_initial_missing_regions(
                     normalized_path, background_path, preview_path, layout, page_output / "assets", project_id, page_index)
+                owner_gate = ensure_visual_owners(cv2.imread(str(normalized_path)), layout,
+                                                 page_output / "assets", project_id, page_index)
+                render_preview(background_path, layout, preview_path)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            if white_objectized:
+                score["ownerGate"] = owner_gate
+                # This is the final canonical Layout scene consumed by editor,
+                # preview and PPT renderer, not the earlier VLM proposal.
+                self._write_json(page_output / f"scene_final_{page_index}.json", layout)
             score["initialRecoveredVisuals"] = reconstruction_stats["initialRecoveredVisuals"]
             score["plannedVisualPixelsClearedFromOtherAssets"] = reconstruction_stats["plannedVisualPixelsClearedFromOtherAssets"]
             score["trimmedOverlappingAssets"] = reconstruction_stats["trimmedOverlappingAssets"]
@@ -425,6 +456,15 @@ class ReconstructionPipeline:
                 score.setdefault("issues", []).extend(object_qa.get("issues", []))
                 audit = audit_objectization(normalized_path, background_path, preview_path, layout, page_output / ("objectization_debug.png" if page_index == 1 else f"objectization_debug_{page_index}.png"))
                 score["objectizationAudit"] = audit
+                active_elements = [element for element in layout.get("elements", [])
+                                   if not any((element.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy"))]
+                score.update({"visualAreaPreserved": audit["retainedVisualCoverage"],
+                              "objectExtractionCoverage": owner_gate["objectExtractionCoverage"],
+                              "missingVisualCount": audit["missingVisualObjects"] + audit["missingBackplates"],
+                              "missingAssetCount": owner_gate["missingAssetCount"],
+                              "shapeCount": sum(element.get("type") in {"rectangle", "roundedRectangle", "ellipse", "line", "arrow"} for element in active_elements),
+                              "imageAssetCount": sum(element.get("type") == "image" for element in active_elements),
+                              "duplicateCount": int(audit.get("duplicatePlannedVisualPixels", 0) > 0)})
                 score["issues"].extend(audit["issues"])
                 self._write_json(page_output / ("objectization_audit.json" if page_index == 1 else f"objectization_audit_{page_index}.json"), audit)
             score["planCoverage"] = plan_coverage

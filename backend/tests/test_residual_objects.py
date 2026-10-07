@@ -228,7 +228,9 @@ def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
     cv2.imwrite(str(source_path), image)
     layout = {"slide": {"width": width, "height": height}, "elements": []}
     objectize_on_white(source_path, background_path, layout, tmp_path / "pipeline_assets", "skyline", 1)
-    assert np.all(cv2.imread(str(background_path)) == 255)
+    # Object First preserves a verified smooth page field; it no longer
+    # forces a near-white gradient to pure white.
+    assert np.array_equal(cv2.imread(str(background_path))[:, 0], image[:, 0])
     assert sum(item["type"] == "image" for item in layout["elements"]) == 1
     for item in layout["elements"]:
         if item["type"] == "image":
@@ -240,7 +242,7 @@ def test_irregular_pale_skyline_on_gradient_is_a_movable_asset(tmp_path):
                  and item["y"] <= 260 < item["y"] + item["height"])
     owner["x"] += width
     render_preview(background_path, layout, tmp_path / "moved.png")
-    assert np.all(cv2.imread(str(tmp_path / "moved.png"))[260, 205] == 255)
+    assert np.array_equal(cv2.imread(str(tmp_path / "moved.png"))[260, 205], image[260, 0])
 
 
 def test_small_neutral_corner_marks_survive_near_white_gradient(tmp_path):
@@ -266,7 +268,7 @@ def test_small_neutral_corner_marks_survive_near_white_gradient(tmp_path):
     layout = {"slide": {"width": width, "height": height}, "elements": []}
     objectize_on_white(source_path, tmp_path / "background.png", layout,
                        tmp_path / "pipeline_assets", "marks", 1)
-    assert np.all(cv2.imread(str(tmp_path / "background.png")) == 255)
+    assert np.array_equal(cv2.imread(str(tmp_path / "background.png"))[:, 0], image[:, 0])
     assert sum(item["type"] == "image" for item in layout["elements"]) == len(marks)
 
 

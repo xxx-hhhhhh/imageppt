@@ -8,6 +8,8 @@ import numpy as np
 from PIL import Image
 
 from app.services.reconstruction.surface_classification import is_page_environment
+from app.services.reconstruction.owner_gate import tight_text_mask
+from app.services.pptx.renderer import _path_from_src
 
 
 class AIReconstructionPlanner:
@@ -183,12 +185,10 @@ class AIReconstructionPlanner:
                         tx2 = min(x2 - x1, round(right - x1))
                         ty2 = min(y2 - y1, round(bottom - y1))
                         if tx2 > tx1 and ty2 > ty1:
-                            pad_x = min(12, max(2, round((tx2 - tx1) * 0.05)))
-                            # OCR boxes already bound the glyphs. A height-based
-                            # margin can erase a chart axis or card border that
-                            # sits just above a caption.
-                            pad_y = 2
-                            cv2.rectangle(mask, (max(0, tx1 - pad_x), max(0, ty1 - pad_y)), (min(mask.shape[1] - 1, tx2 + pad_x), min(mask.shape[0] - 1, ty2 + pad_y)), 255, -1)
+                            # OCR boxes select candidate ink, not rectangular deletion.
+                            region = np.zeros(mask.shape, np.uint8)
+                            cv2.rectangle(region, (tx1, ty1), (min(mask.shape[1]-1, tx2), min(mask.shape[0]-1, ty2)), 255, -1)
+                            mask |= tight_text_mask(crop, region, (text_item.get("style") or {}).get("color"))
                     text_area_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
                     if text_area_ratio > 0.20 and (module_id.startswith(("detected_visual_", "segmented_visual_", "contour_visual_")) or strategy == "mixed_component"):
                         continue
@@ -223,7 +223,7 @@ class AIReconstructionPlanner:
                     stats["plannerCvVisualRegions"] += int(from_cv)
                     for item in covered:
                         metadata = item.setdefault("metadata", {})
-                        if item in editable_text and np.any(mask) and safe_to_clean:
+                        if item in editable_text and safe_to_clean:
                             metadata.update({"plannerModuleId": module_id, "reconstructionStrategy": "editable_text", "reconstructionStrategySource": "planner", "textCleanedFromAsset": asset_id})
                             item["zIndex"] = z_index + 1
                             continue
@@ -279,7 +279,7 @@ def _clean_text_from_asset(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
         textured[y:y + height, x:x + width][region] = 0
     if np.any(textured):
         result = cv2.inpaint(result, textured, 4, cv2.INPAINT_TELEA)
-    return result
+    return np.where(mask[:, :, None] > 0, result, crop)
 
 
 def _pixel_box(raw: Any, width: int, height: int, *, max_area: float = 0.80) -> tuple[int, int, int, int] | None:
@@ -409,6 +409,11 @@ def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dic
         if not 0.0003 <= area_ratio <= 0.30 or w < 20 or h < 20 or _text_occupancy((x, y, x + w, y + h), elements) > 0.12:
             continue
         mask = np.asarray(segment.get("mask") or [], dtype=np.uint8)
+        if not mask.size and segment.get("alphaCrop"):
+            asset_path = _path_from_src(segment["alphaCrop"])
+            asset = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED) if asset_path and asset_path.is_file() else None
+            if asset is not None and asset.ndim == 3 and asset.shape[2] == 4:
+                mask = asset[:, :, 3]
         if mask.ndim != 2 or not mask.size:
             continue
         fill = float(np.count_nonzero(mask)) / mask.size

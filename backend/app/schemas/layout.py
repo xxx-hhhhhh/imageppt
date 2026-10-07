@@ -14,7 +14,7 @@ ElementType = Literal[
 
 
 class ElementStyle(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
     fontClass: str = "unknown"
     fontFamily: str = "Microsoft YaHei"
     fontSize: float = 24
@@ -32,7 +32,7 @@ class ElementStyle(BaseModel):
 
 
 class LayoutElement(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
     id: str
     type: ElementType
     x: float
@@ -53,6 +53,7 @@ class LayoutElement(BaseModel):
 
 
 class SlideSize(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     width: float = Field(gt=0)
     height: float = Field(gt=0)
 

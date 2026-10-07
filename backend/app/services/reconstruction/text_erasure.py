@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from app.services.pptx.renderer import _path_from_src
+from app.services.reconstruction.owner_gate import tight_text_mask
 
 
 ComplexTextCleaner = Callable[[np.ndarray, np.ndarray], np.ndarray]
@@ -40,6 +41,8 @@ def erase_editable_text_sources(
         raw = meta.get("rawOCRBBox")
         if item.get("type") != "text" or not str(item.get("text") or "").strip():
             continue
+        if item.get("confidence") is not None and float(item["confidence"]) < .5:
+            continue  # Uncertain OCR never authorizes deleting source pixels.
         if target_text_ids is not None and str(item.get("id")) not in target_text_ids:
             continue
         if any(meta.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
@@ -58,8 +61,10 @@ def erase_editable_text_sources(
         return {"backgroundTextErased": 0, "assetTextErased": 0}
 
     background_mask = np.zeros((height, width), np.uint8)
-    for _, box in texts:
-        _mark(background_mask, box, 2)
+    for text, box in texts:
+        region = np.zeros((height, width), np.uint8)
+        _mark(region, box, 0)
+        background_mask |= tight_text_mask(background, region, (text.get("style") or {}).get("color"))
     if protect_background_elements:
         for element in layout.get("elements", []):
             meta = element.get("metadata") or {}
@@ -131,9 +136,11 @@ def erase_editable_text_sources(
                 eligible = _light_glyph_on_colored_surface(source_rgb, line_mask, glyph_color)
                 if eligible:
                     local_alpha[(line_mask > 0) & holes] = 255
-                cleaned_rgb = _clean_residual_surface(cleaned_rgb, local_alpha, line_mask, complex_cleaner,
+                candidate_rgb = _clean_residual_surface(cleaned_rgb, local_alpha, line_mask, complex_cleaner,
                                                       glyph_color=glyph_color,
                                                       bounded_support=meta.get("reconstructionStrategySource") == "round_contour")
+                authorized_ink = tight_text_mask(source_rgb, line_mask, glyph_color)
+                cleaned_rgb = np.where(authorized_ink[:, :, None] > 0, candidate_rgb, cleaned_rgb)
             original[:, :, :3] = cleaned_rgb
             # Close glyph-sized holes inside the existing support without
             # expanding its outline into neighboring white space. Only pixels
@@ -362,11 +369,16 @@ def _mark(mask: np.ndarray, box: tuple[int, int, int, int], padding: int) -> Non
 def _clean(image: np.ndarray, mask: np.ndarray, complex_cleaner: ComplexTextCleaner | None) -> np.ndarray:
     if not np.any(mask):
         return image
+    # The external model cannot alter anything outside the authorized ink mask.
+    mask = tight_text_mask(image, mask)
+    if not np.any(mask):
+        return image.copy()
     if complex_cleaner is not None:
         try:
             result = complex_cleaner(image, mask)
             if isinstance(result, np.ndarray) and result.shape == image.shape:
-                return result
+                return np.where(mask[:, :, None] > 0, result, image)
         except Exception:
             pass
-    return cv2.inpaint(image, mask, 4, cv2.INPAINT_TELEA)
+    result = cv2.inpaint(image, mask, 4, cv2.INPAINT_TELEA)
+    return np.where(mask[:, :, None] > 0, result, image)

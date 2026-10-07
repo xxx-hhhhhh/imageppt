@@ -130,6 +130,7 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
   const base: CSSProperties = { position: 'absolute', left: element.x, top: element.y, width: Math.max(1, element.width), height: Math.max(1, element.height), transform: `rotate(${element.rotation}deg)`, opacity: style.opacity ?? 1, pointerEvents: element.type === 'background' ? 'none' : 'auto', outline: selected ? '2px solid #2563a6' : undefined, outlineOffset: 2, boxShadow: lowConfidence ? '0 0 0 2px #f59e0b66' : undefined };
   const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (element.type === 'background') return;
+    if ((event.target as HTMLElement).closest('[contenteditable="true"]')) return;
     event.preventDefault();
     event.stopPropagation();
     const movingIds = movableModuleIds(page, element.id);
@@ -173,7 +174,20 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     const up = (upEvent: PointerEvent) => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, width: Math.max(12, Math.min(page.slide.width - item.x, startW + (upEvent.clientX - startX) / scaleX)), height: Math.max(12, Math.min(page.slide.height - item.y, startH + (upEvent.clientY - startY) / scaleY)) } : item) }); };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true });
   };
-  const beginTextEdit = (event: ReactMouseEvent<HTMLDivElement>) => { if (element.type !== 'text') return; const target = event.currentTarget; target.contentEditable = 'true'; target.focus(); const finish = () => { target.contentEditable = 'false'; onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, text: target.innerText } : item) }); target.removeEventListener('blur', finish); }; target.addEventListener('blur', finish); };
+  const beginTextEdit = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (element.type !== 'text') return;
+    const target = event.currentTarget.querySelector<HTMLElement>('[data-text-content]');
+    if (!target || target.isContentEditable) return;
+    // Editing must never remove React-owned sibling controls (Ctrl+A/Delete).
+    target.contentEditable = 'true';
+    target.focus();
+    const finish = () => {
+      target.contentEditable = 'false';
+      onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, text: target.innerText } : item) });
+      target.removeEventListener('blur', finish);
+    };
+    target.addEventListener('blur', finish);
+  };
   if (element.type === 'background' && element.src) return <img data-element-id={element.id} className="visual-image" src={assetUrl(element.src)} alt="" style={{ ...base, objectFit: 'cover' }} />;
   if (element.type === 'image' && element.src) {
     const crop = element.crop || {};
@@ -183,7 +197,7 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
     const bottom = Math.min(.95 - top, Math.max(0, crop.bottom || 0));
     return <div data-element-id={element.id} className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   }
-  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}>{element.text}{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', textAlign: style.align || 'left', whiteSpace: 'pre-wrap', overflow: 'hidden' }}><span data-text-content style={{ display: 'block', width: '100%', height: '100%' }}>{element.text}</span>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (element.type === 'line' || element.type === 'arrow') return <div data-element-id={element.id} className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div data-element-id={element.id} className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   return null;

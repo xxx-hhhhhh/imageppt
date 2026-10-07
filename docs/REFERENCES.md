@@ -2,6 +2,14 @@
 
 本项目在实现前阅读了以下公开仓库。实际代码采用重新设计的目录、数据模型和 API，不直接复制其源码。
 
+## 2026-10-07 Object First 重构补充
+
+新增研究 `guohuan-xie/image2PPT`（https://github.com/guohuan-xie/image2PPT）：借鉴 SAM 分割、轮廓 alpha、复杂区域 PNG、scene graph 与阶段产物。检查的参考版本 `1847650` 没有明确 LICENSE 文件，因此未复制其代码、测试、图像或模型；仅参考设计思想。未采用其先对 SAM 输入进行整块文字清理的顺序。
+
+再次研究 BrainChen/image2ppt 的 Slide AST/统一源坐标和 outputs/assets/intermediate；JadeLiu-tech/px-image2pptx 的 OCR 引导 tight ink mask 与局部修复。实现继续为本项目原创；不依赖参考仓库的 Agent 环境。
+
+新增运行时可选依赖 `ultralytics` 用于真实 SAM2 推理，遵循 AGPL-3.0 或商业许可证，不能视作 MIT。权重由用户在源目录外安装，本仓库没有复制/分发权重；发布应用前需独立审查该依赖的分发许可。
+
 ## BrainChen/image2ppt
 
 链接：https://github.com/BrainChen/image2ppt

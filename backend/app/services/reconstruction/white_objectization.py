@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from app.services.reconstruction.residual_objects import _border_color, dense_visual_artwork, extract_residual_objects, visual_candidate_mask
+from app.services.reconstruction.owner_gate import ensure_visual_owners, page_surface_evidence
 
 
 def detect_flat_page_surface(source: np.ndarray) -> np.ndarray | None:
@@ -105,8 +106,16 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
                                       "reconstructionStrategySource": "flat_page_surface",
                                       "layerRole": "page_surface", "pageSurface": True}})
     layer_objectized_elements(elements)
+    # Low-contrast surfaces and unexplained pixels are objects too. Verify
+    # replacement files before any source background pixels are discarded.
+    ensure_visual_owners(source, layout, asset_dir, project_id, page_index)
     background_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(background_path), np.full_like(source, 255))
+    surface, _ = page_surface_evidence(source)
+    if page_surface is not None:
+        # A verified flat page fill is already a movable native Shape.
+        surface = np.full_like(source, 255)
+    if not cv2.imwrite(str(background_path), surface):
+        raise OSError("Verified page surface could not be saved")
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
     return {"whiteObjectAssets": len(residual_assets) + round_assets + bordered_assets + detail_assets, "whiteObjectShapes": container_count + bordered_shapes + detail_shapes + broad_panels + int(page_surface is not None), "whiteContainerShapes": container_count + bordered_shapes + bordered_assets + detail_shapes + detail_assets + broad_panels, "whiteInternalDetails": detail_shapes + detail_assets, "whiteBackgroundPixels": width * height, "splitMonolithicImages": split_monoliths, **residual_stats}

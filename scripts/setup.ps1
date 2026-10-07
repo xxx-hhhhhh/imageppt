@@ -1,3 +1,4 @@
+param([switch]$EnableSegmentation)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'Image2EditablePPT'
@@ -12,10 +13,17 @@ if (-not (Test-Path (Join-Path $venvPath 'Scripts\python.exe'))) {
 $venvPython = Join-Path $venvPath 'Scripts\python.exe'
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r (Join-Path $projectRoot 'backend\requirements.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Backend dependency installation failed.' }
+if ($EnableSegmentation) {
+  & $venvPython -m pip install -r (Join-Path $projectRoot 'backend\requirements-segmentation.txt')
+  if ($LASTEXITCODE -ne 0) { Write-Warning 'SAM2 dependency installation failed; OpenCV fallback remains available.' }
+}
 try { & $venvPython -m pip install -r (Join-Path $projectRoot 'backend\requirements-optional.txt') } catch { Write-Warning "可选 PaddleOCR/LAMA 安装失败，应用仍会使用 RapidOCR/OpenCV fallback。" }
 $packageManager = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $packageManager) { $packageManager = Get-Command npm -ErrorAction SilentlyContinue }
 if (-not $packageManager) { throw '未找到 pnpm 或 npm。请先安装 Node.js。' }
-Push-Location (Join-Path $projectRoot 'frontend')
-try { & $packageManager.Source install } finally { Pop-Location }
-Write-Host "安装完成。Python 环境位于 $venvPath，未写入项目目录。"
+. (Join-Path $PSScriptRoot 'frontend-runtime.ps1')
+$frontendRuntime = Sync-FrontendRuntime $projectRoot
+Push-Location $frontendRuntime
+try { & $packageManager.Source install; if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' } } finally { Pop-Location }
+Write-Host "安装完成。Python 环境位于 $venvPath，前端依赖与执行副本位于 $frontendRuntime，未写入项目目录。"
