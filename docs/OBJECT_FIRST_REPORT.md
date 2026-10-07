@@ -121,6 +121,8 @@ LaMa/OpenCV adapter 仅处理确认 editable text 的紧墨迹，单次调用；
 
 重构前 checkpoint：ef8f334。提交前 fetch 发现 origin/main 已到 2989f6b，相较 52a2e08 多 172 个提交、修改 106 文件（+15606 / -301），包括另一轮 ownership、revision、背景对象化和编辑器重构。本地可运行工作树不是远端最新架构。
 
-本次不自动解决如此大范围的版本冲突、不强推 main、不覆盖云盘项目。已验证改动保存为同一仓库的独立安全分支 `codex/object-first-owner-guard-20261007`，不是新建应用或替换远端最新版本。实际提交/分支 push 结果待补记。
+本次不自动解决如此大范围的版本冲突、不强推 main、不覆盖云盘项目。已验证改动保存为同一仓库的独立安全分支 `codex/object-first-owner-guard-20261007`，不是新建应用或替换远端最新版本。
+
+实现提交：`1380768`；`git push -u origin codex/object-first-owner-guard-20261007` 已成功。分支：[GitHub 验证分支](https://github.com/xxx-hhhhhh/imageppt/tree/codex/object-first-owner-guard-20261007)。远端 main 未修改；未创建 PR。本报告随后以文档提交补记，最终 HEAD 由 git log -1 确认。
 
 下一步需要用户确认：以远端最新 main 为基线审查并迁移必要安全门禁，还是保留此次本地基线分支作为独立评估版本。本报告的 85 项测试只适用于此次本地分支，不是远端最新版的验收结果。

@@ -6,6 +6,8 @@
 
 当前主流程已替换为对象所有权优先、背景最后处理；无可靠 replacement owner 禁止删除；未知视觉保留为独立透明资产。Backend pytest 85 passed；前端 TypeScript + Vite build 通过；真实浏览器编辑、拖动、缩放、导出通过。复杂页仍存在文字残影、字体误差及大残余资产，不能宣称已完成全量高保真验收。
 
+版本整合未完成：本地基线之后远端 main 新增 172 个提交，涉及同模块重构。本次实现提交 1380768 已成功推送 codex/object-first-owner-guard-20261007 分支，未覆盖 main 或 Google Drive。需要先确认以远端最新版迁移安全门禁，才能更新现用版本。
+
 ## 1. 已完成内容
 
 - 创建统一的 Image2EditablePPT Web 项目。
