@@ -1,6 +1,7 @@
 """Restore source pale pixels damaged inside movable residual assets."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 
@@ -19,7 +20,7 @@ def restore_hidden_source_assets(source_path: Path, layout: dict, issues: list[d
              and isinstance(issue.get("bbox"), list) and len(issue["bbox"]) == 4]
     if not boxes:
         return []
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
     height, width = source.shape[:2]
@@ -44,7 +45,7 @@ def restore_hidden_source_assets(source_path: Path, layout: dict, issues: list[d
             if iw <= 0 or ih <= 0 or iw * ih > area * 30 or not _overlaps(item, box):
                 continue
             path = asset_path(asset_dir.parent, item.get("src"))
-            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
+            image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
             if image is None or image.ndim != 3:
                 continue
             left, top = max(0, round(max(ix, x1))), max(0, round(max(iy, y1)))
@@ -86,7 +87,7 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
              and isinstance(issue.get("bbox"), list) and len(issue["bbox"]) == 4]
     if not boxes:
         return []
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
     source_hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
@@ -104,7 +105,7 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
                                       for box, _ in boxes):
             continue
         path = asset_path(root, item.get("src"))
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
         if image is None or image.ndim != 3 or image.shape[2] != 4:
             continue
         rows, columns = image.shape[:2]
@@ -172,7 +173,7 @@ def repair_residual_color_damage(source_path: Path, layout: dict, issues: list[d
                     cleaned = _clean_residual_surface(cleaned, repaired[:, :, 3], local, None)
             repaired[:, :, :3] = cleaned
         target = asset_dir / f"revision_{revision_round}_{item['id']}_pale_restored.png"
-        if not cv2.imwrite(str(target), repaired):
+        if not image_io.imwrite(str(target), repaired):
             continue
         item["src"] = f"/media/assets/{project_id}/{target.name}"
         item.setdefault("metadata", {}).update({"sourcePaleRestoredPixels": count,

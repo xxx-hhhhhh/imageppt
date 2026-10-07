@@ -1,6 +1,7 @@
 """Keep visual assets complete after final text ownership has been resolved."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from uuid import uuid4
@@ -19,7 +20,7 @@ def mark_image_dominant_ocr(source_path: Path, layout: dict) -> list[str]:
     connected region. Require both source evidence and a larger movable owner;
     recognition confidence alone never changes ownership in this path.
     """
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
     marked = []
@@ -159,7 +160,7 @@ def restore_image_owned_text(source_path: Path, layout: dict, asset_dir: Path,
     The image is staged under a new name before its scene reference changes.
     Its original alpha is retained so a circular badge stays circular.
     """
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
     height, width = source.shape[:2]
@@ -185,7 +186,7 @@ def restore_image_owned_text(source_path: Path, layout: dict, asset_dir: Path,
         prior_path = _path_from_src(item.get("src"))
         if prior_path is None or not prior_path.is_file():
             continue
-        prior = cv2.imread(str(prior_path), cv2.IMREAD_UNCHANGED)
+        prior = image_io.imread(str(prior_path), cv2.IMREAD_UNCHANGED)
         if prior is None or prior.ndim != 3 or prior.shape[2] not in (3, 4):
             continue
         rgb = cv2.resize(source[y:y + h, x:x + w], (prior.shape[1], prior.shape[0]), interpolation=cv2.INTER_LINEAR)
@@ -212,7 +213,7 @@ def restore_image_owned_text(source_path: Path, layout: dict, asset_dir: Path,
                 continue
         asset_dir.mkdir(parents=True, exist_ok=True)
         path = asset_dir / f"{prefix}_{item['id']}_{uuid4().hex[:8]}.png"
-        if not cv2.imwrite(str(path), candidate):
+        if not image_io.imwrite(str(path), candidate):
             continue
         item["src"] = f"/media/assets/{project_id}/{path.name}"
         remaining_ids = [text_id for text_id in text_ids if text_id not in restored_ids]

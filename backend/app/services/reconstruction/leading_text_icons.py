@@ -1,6 +1,7 @@
 """Separate compact colored icons accidentally included in OCR text lines."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from uuid import uuid4
@@ -11,7 +12,7 @@ import numpy as np
 
 def extract_leading_text_icons(source_path: Path, layout: dict, asset_dir: Path,
                                project_id: str, page_index: int) -> int:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return 0
     height, width = source.shape[:2]
@@ -87,7 +88,7 @@ def extract_leading_text_icons(source_path: Path, layout: dict, asset_dir: Path,
         asset_dir.mkdir(parents=True, exist_ok=True)
         identifier = f"leading_icon_page_{page_index}_{uuid4().hex[:10]}"
         path = asset_dir / f"{identifier}.png"
-        if not cv2.imwrite(str(path), np.dstack((source[by1:by2, bx1:bx2], alpha))):
+        if not image_io.imwrite(str(path), np.dstack((source[by1:by2, bx1:bx2], alpha))):
             continue
         new_start = x1 + body_start
         old_x = float(text.get("x") or x1)

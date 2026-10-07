@@ -1,6 +1,7 @@
 """Local visual check for replacing source pixels with editable objects."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 import json
 from pathlib import Path
@@ -23,9 +24,9 @@ def _bounds(item: dict, width: int, height: int, *, source_text: bool = False, p
 
 
 def check_replacement_regions(source_path: Path, before_path: Path, after_path: Path, layout: dict, report_path: Path, comparison_path: Path, ghosting_before: int, ghosting_after: int) -> dict:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    before = cv2.imread(str(before_path), cv2.IMREAD_COLOR)
-    after = cv2.imread(str(after_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    before = image_io.imread(str(before_path), cv2.IMREAD_COLOR)
+    after = image_io.imread(str(after_path), cv2.IMREAD_COLOR)
     if source is None or before is None or after is None or source.shape != before.shape or source.shape != after.shape:
         raise ValueError("Replacement QA images are missing or have mismatched dimensions")
     height, width = source.shape[:2]
@@ -63,5 +64,5 @@ def check_replacement_regions(source_path: Path, before_path: Path, after_path: 
             worsened.append({"elementId": item.get("id"), "bbox": [x1, y1, x2, y2], "errorBefore": round(old_error, 2), "errorAfter": round(new_error, 2), "lostVisualPixels": lost_pixels})
     report = {"checkedRegions": checked, "ghostingBefore": ghosting_before, "ghostingAfter": ghosting_after, "worsenedRegions": worsened, "safe": ghosting_after <= ghosting_before and not worsened, "improved": ghosting_after < ghosting_before and not worsened}
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    cv2.imwrite(str(comparison_path), np.concatenate((before, after), axis=1))
+    image_io.imwrite(str(comparison_path), np.concatenate((before, after), axis=1))
     return report

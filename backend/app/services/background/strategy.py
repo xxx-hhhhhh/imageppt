@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Iterable
@@ -18,7 +19,7 @@ def restore_background(
     allow_complex_text_preservation: bool = True,
     prefer_inpaint: bool = False,
 ) -> tuple[Path, list[dict]]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(image_path)
     result = image.copy()
@@ -82,12 +83,12 @@ def restore_background(
         strategies.append(strategy)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), result)
+    image_io.imwrite(str(output_path), result)
     return output_path, strategies
 
 
 def reclean_background(background_path: Path, bboxes: Iterable[list[float]]) -> int:
-    image = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if image is None:
         return 0
     boxes = [list(map(float, bbox)) for bbox in bboxes]
@@ -96,7 +97,7 @@ def reclean_background(background_path: Path, bboxes: Iterable[list[float]]) -> 
         profile = analyze_background(image, expanded)
         _clean_region(image, expanded, profile, force_inpaint=profile["category"] not in {"solid", "gradient"})
     if boxes:
-        cv2.imwrite(str(background_path), image)
+        image_io.imwrite(str(background_path), image)
     return len(boxes)
 
 

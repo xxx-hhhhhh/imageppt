@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import math
 from pathlib import Path
@@ -81,8 +82,8 @@ def _similarity(original: np.ndarray, preview: np.ndarray) -> tuple[float, float
 
 
 def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:
-    original = cv2.imread(str(original_path), cv2.IMREAD_COLOR)
-    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    original = image_io.imread(str(original_path), cv2.IMREAD_COLOR)
+    preview = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     if original is None or preview is None:
         score = {"overall": 0.0, "textRegionScore": 0.0, "layoutScore": 0.0, "componentScore": 0.0, "colorSimilarity": 0.0, "backgroundScore": 0.0, "ghostingPenalty": 0.0, "duplicatePenalty": 0.0, "regions": []}
         return score
@@ -144,7 +145,7 @@ def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, lay
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     difference = cv2.absdiff(cv2.resize(original, (preview.shape[1], preview.shape[0])), preview)
-    cv2.imwrite(str(output_dir / "difference.png"), difference)
+    image_io.imwrite(str(output_dir / "difference.png"), difference)
     return score
 
 

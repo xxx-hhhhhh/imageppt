@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 import json
@@ -187,7 +188,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
         changed_ids.update(str(item["id"]) for item in pale_repairs)
 
     if any(issue.get("problem") in {"pageSurfaceLost", "pageSurfaceBakedIntoBackground"} for issue in target_issues):
-        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+        image = image_io.imread(str(source), cv2.IMREAD_COLOR)
         color = detect_flat_page_surface(image) if image is not None else None
         if color is not None:
             for item in candidate.get("elements", []):
@@ -214,7 +215,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
                                                         asset_prefix=f"revision_{round_number}_surface_page_{page}")
                 candidate["elements"].extend(residuals)
                 changed_ids.update(item["id"] for item in residuals)
-                cv2.imwrite(str(candidate_bg), np.full_like(image, 255))
+                image_io.imwrite(str(candidate_bg), np.full_like(image, 255))
 
     for issue in target_issues:
         item = by_id.get(str(issue.get("elementId")))
@@ -410,7 +411,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
             changed_ids.update(square_ids)
 
     prior_ids = {item["id"] for item in candidate.get("elements", [])}
-    compacted_fragments = compact_retained_fragments(cv2.imread(str(source)), candidate, root / "assets", project_id, page)
+    compacted_fragments = compact_retained_fragments(image_io.imread(str(source)), candidate, root / "assets", project_id, page)
     if compacted_fragments:
         changed_ids.update(item["id"] for item in candidate["elements"]
                            if item["id"] not in prior_ids or (item.get("metadata") or {}).get("replacementOwners"))
@@ -424,7 +425,7 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     integrity = assess_revision(root, baseline, candidate, background, candidate_bg, preview, candidate_preview,
                                 target_boxes, source_path=source)
     if (baseline.get("metadata") or {}).get("ownerGate"):
-        pixels = cv2.imread(str(source))
+        pixels = image_io.imread(str(source))
         _, before_owners = ownership_evidence(pixels, copy.deepcopy(baseline), root / "assets")
         _, after_owners = ownership_evidence(pixels, candidate, root / "assets")
         candidate.setdefault("metadata", {})["ownerGate"] = after_owners
@@ -447,8 +448,8 @@ def revise_problem_regions(store: ProjectStore, project_id: str, page: int) -> d
     (candidate_dir / "scene.json").write_text(json.dumps(archive_scene, ensure_ascii=False, indent=2), encoding="utf-8")
     score_after = run_visual_qa(source, candidate_preview, candidate_dir, candidate)
     candidate_audit = audit_objectization(source, candidate_bg, candidate_preview, candidate, candidate_dir / "objectization_debug.png")
-    previous_pixels = cv2.imread(str(preview), cv2.IMREAD_COLOR)
-    candidate_pixels = cv2.imread(str(candidate_preview), cv2.IMREAD_COLOR)
+    previous_pixels = image_io.imread(str(preview), cv2.IMREAD_COLOR)
+    candidate_pixels = image_io.imread(str(candidate_preview), cv2.IMREAD_COLOR)
     identical_preview = (previous_pixels is not None and candidate_pixels is not None
                          and np.array_equal(previous_pixels, candidate_pixels))
     # Objectization changes which local boxes QA samples. A larger sample can
@@ -753,8 +754,8 @@ def _item_overlaps_box(item: dict, box: list[float]) -> bool:
 
 
 def _background_contains_original(source_path: Path, background_path: Path, item: dict) -> bool:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if source is None or background is None or source.shape != background.shape:
         return False
     height, width = source.shape[:2]
@@ -769,8 +770,8 @@ def _background_contains_original(source_path: Path, background_path: Path, item
 
 
 def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], by_id: dict[str, dict], output: Path) -> list[dict]:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    previous = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    previous = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     if source is None or previous is None:
         return []
     height, width = source.shape[:2]
@@ -793,7 +794,7 @@ def _analyze_regions(source_path: Path, preview_path: Path, issues: list[dict], 
         previous_edges = cv2.Canny(previous_crop, 60, 160)
         pixel_difference = float(np.mean(cv2.absdiff(original_crop, previous_crop))) / 255
         edge_difference = float(np.mean(cv2.absdiff(original_edges, previous_edges))) / 255
-        cv2.imwrite(str(output / f"region_{index + 1}_source.png"), original_crop)
-        cv2.imwrite(str(output / f"region_{index + 1}_previous.png"), previous_crop)
+        image_io.imwrite(str(output / f"region_{index + 1}_source.png"), original_crop)
+        image_io.imwrite(str(output / f"region_{index + 1}_previous.png"), previous_crop)
         analysis.append({"elementId": issue.get("elementId"), "problem": issue.get("problem"), "bbox": [x1, y1, x2, y2], "pixelDifference": round(pixel_difference, 4), "edgeDifference": round(edge_difference, 4), "strategyChange": "movable_image_with_editable_text" if issue.get("problem") in {"brokenChartOrModule", "assetBakedIntoBackground"} else "editable_text_repair" if issue.get("problem") in {"missingEditableText", "ghosting", "wrongBBox", "textOverlap"} else "ownership_repair"})
     return analysis

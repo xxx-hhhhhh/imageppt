@@ -97,8 +97,9 @@ def test_background_write_failure_keeps_original_and_discards_new_assets(tmp_pat
     path = tmp_path / "background.png"
     cv2.imwrite(str(path), source)
     before = path.read_bytes()
-    write = cv2.imwrite
-    monkeypatch.setattr(cv2, "imwrite", lambda filename, pixels: False if Path(filename).name.startswith(".") else write(filename, pixels))
+    from app.utils import image_io
+    write = image_io.imwrite
+    monkeypatch.setattr(image_io, "imwrite", lambda filename, pixels: False if Path(filename).name.startswith(".") else write(filename, pixels))
     layout = {"elements": []}
     assets = tmp_path / "assets"
     assert not objectize_background_regions(path, path, layout, [{"bbox": [0, 0, 150, 80]}], assets, "demo", 1, 1)

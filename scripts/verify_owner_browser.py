@@ -1,6 +1,7 @@
 """Real upload/analysis/edit/drag/resize/save/export browser acceptance.
 
-Analysis is bounded to standard mode (one critic round), never mocked. Vision
+Analysis defaults to standard mode, never mocked. --mode maximum exercises
+the same strict conversion request as the product's default button. Vision
 uses the user's existing configuration; no settings or credentials are changed.
 """
 import argparse
@@ -16,6 +17,8 @@ from pptx import Presentation
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("image", type=Path)
+    parser.add_argument("--mode", choices=("fast", "standard", "high_quality", "maximum"), default="standard")
+    parser.add_argument("--timeout-ms", type=int, default=900000)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     errors, missing = [], []
@@ -27,8 +30,8 @@ def main():
         def bounded_analysis(route):
             parts = urlsplit(route.request.url)
             params = parse_qs(parts.query)
-            params["mode"] = ["standard"]
-            params["allow_fallback"] = ["true"]
+            params["mode"] = [args.mode]
+            params["allow_fallback"] = ["false" if args.mode in ("high_quality", "maximum") else "true"]
             route.continue_(url=urlunsplit(parts._replace(query=urlencode(params, doseq=True))))
         page.route("**/api/projects/*/analyze?*", bounded_analysis)
         page.goto("http://127.0.0.1:5173/", wait_until="domcontentloaded")
@@ -39,7 +42,7 @@ def main():
             page.locator("input[type=file]").first.set_input_files(str(args.image.resolve()))
         upload = uploaded.value.json()
         identifier = upload["project"]["id"]
-        with page.expect_response(lambda response: "/analyze" in response.url and response.request.method == "POST", timeout=240000) as analyzed:
+        with page.expect_response(lambda response: "/analyze" in response.url and response.request.method == "POST", timeout=args.timeout_ms) as analyzed:
             page.get_by_role("button", name=re.compile("AI解析")).click()
         response = analyzed.value
         assert response.ok, response.status
@@ -99,7 +102,7 @@ def main():
         assert any(edited in shape.text for slide in Presentation(pptx).slides for shape in slide.shapes if shape.has_text_frame)
         assert not errors and not missing, {"errors": errors, "missing": missing}
         page.screenshot(path=str(output / "browser_acceptance.png"), full_page=True)
-        report = {"projectId": identifier, "realUpload": True, "realAnalysis": True, "mode": "standard", "aiUsed": result.get("aiUsed"),
+        report = {"projectId": identifier, "realUpload": True, "realAnalysis": True, "mode": args.mode, "aiUsed": result.get("aiUsed"),
                   "ocrProvider": result.get("ocrProvider"), "editableText": True, "drag": True, "resize": True, "save": True,
                   "nativeTextInExport": True, "missingAssetCount": len(missing), "browserErrors": errors}
         (output / "browser_acceptance.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

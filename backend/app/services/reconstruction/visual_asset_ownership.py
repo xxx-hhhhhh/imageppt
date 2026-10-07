@@ -1,6 +1,7 @@
 """Give an extracted visual one owner across planned and residual assets."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from uuid import uuid4
@@ -14,7 +15,7 @@ from app.services.pptx.renderer import _path_from_src
 def resolve_duplicate_contour_assets(source_path: Path, layout: dict, asset_dir: Path,
                                      project_id: str) -> int:
     """Merge matching crops into one complete, transparent movable object."""
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return 0
     images = [item for item in layout.get("elements", []) if item.get("type") == "image"
@@ -27,7 +28,7 @@ def resolve_duplicate_contour_assets(source_path: Path, layout: dict, asset_dir:
         px, py, pw, ph = _box(planned)
         if min(pw, ph) <= 0:
             continue
-        planned_image = cv2.imread(str(_asset_path(planned, asset_dir)), cv2.IMREAD_UNCHANGED)
+        planned_image = image_io.imread(str(_asset_path(planned, asset_dir)), cv2.IMREAD_UNCHANGED)
         if planned_image is None or planned_image.ndim != 3 or planned_image.shape[2] not in (3, 4):
             continue
         planned_rgb = cv2.resize(planned_image[:, :, :3], (pw, ph), interpolation=cv2.INTER_LINEAR)
@@ -46,7 +47,7 @@ def resolve_duplicate_contour_assets(source_path: Path, layout: dict, asset_dir:
             left, top, right, bottom = max(px, cx), max(py, cy), min(px + pw, cx + cw), min(py + ph, cy + ch)
             if right <= left or bottom <= top:
                 continue
-            contour_image = cv2.imread(str(_asset_path(contour, asset_dir)), cv2.IMREAD_UNCHANGED)
+            contour_image = image_io.imread(str(_asset_path(contour, asset_dir)), cv2.IMREAD_UNCHANGED)
             if contour_image is None or contour_image.shape[2] != 4:
                 continue
             contour_rgb = cv2.resize(contour_image[:, :, :3], (cw, ch), interpolation=cv2.INTER_LINEAR)
@@ -74,7 +75,7 @@ def resolve_duplicate_contour_assets(source_path: Path, layout: dict, asset_dir:
             identifier = f"merged_visual_{uuid4().hex[:10]}"
             asset_dir.mkdir(parents=True, exist_ok=True)
             path = asset_dir / f"{identifier}.png"
-            if not cv2.imwrite(str(path), np.dstack((source[uy1:uy2, ux1:ux2], alpha))):
+            if not image_io.imwrite(str(path), np.dstack((source[uy1:uy2, ux1:ux2], alpha))):
                 continue
             layout.setdefault("elements", []).append({
                 "id": identifier, "type": "image", "x": ux1, "y": uy1, "width": ux2 - ux1, "height": uy2 - uy1,
@@ -110,7 +111,7 @@ def transfer_planned_visual_pixels(layout: dict, asset_dir: Path, project_id: st
     claimed = 0
     for owner in planned:
         owner_path = _asset_path(owner, asset_dir)
-        image = cv2.imread(str(owner_path), cv2.IMREAD_UNCHANGED) if owner_path.is_file() else None
+        image = image_io.imread(str(owner_path), cv2.IMREAD_UNCHANGED) if owner_path.is_file() else None
         if image is None or image.ndim != 3:
             continue
         claim = _detail_mask(image)
@@ -128,7 +129,7 @@ def transfer_planned_visual_pixels(layout: dict, asset_dir: Path, project_id: st
             key = str(item.get("id"))
             if key not in staged:
                 path = _asset_path(item, asset_dir)
-                prior = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+                prior = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
                 if prior is None or prior.ndim != 3:
                     continue
                 if prior.shape[2] == 3:
@@ -148,7 +149,7 @@ def transfer_planned_visual_pixels(layout: dict, asset_dir: Path, project_id: st
         if key not in changed_ids:
             continue
         new_path = asset_dir / f"{Path(str(item.get('id') or old_path.stem)).stem}_without_planned_{uuid4().hex[:8]}.png"
-        if not cv2.imwrite(str(new_path), rgba):
+        if not image_io.imwrite(str(new_path), rgba):
             for _, candidate in replacements:
                 candidate.unlink(missing_ok=True)
             return {"plannedVisualPixelsClearedFromOtherAssets": 0, "trimmedOverlappingAssets": 0}
@@ -167,7 +168,7 @@ def count_duplicate_planned_visual_pixels(layout: dict, asset_dir: Path) -> int:
     for owner in active:
         if (owner.get("metadata") or {}).get("reconstructionStrategySource") not in {"planner", "round_contour", "merged_contour_owner", "leading_text_icon"}:
             continue
-        image = cv2.imread(str(_asset_path(owner, asset_dir)), cv2.IMREAD_UNCHANGED)
+        image = image_io.imread(str(_asset_path(owner, asset_dir)), cv2.IMREAD_UNCHANGED)
         if image is None or image.ndim != 3:
             continue
         ox, oy, ow, oh = _box(owner)
@@ -181,7 +182,7 @@ def count_duplicate_planned_visual_pixels(layout: dict, asset_dir: Path) -> int:
             left, top, right, bottom = max(ox, ix), max(oy, iy), min(ox + ow, ix + iw), min(oy + oh, iy + ih)
             if right <= left or bottom <= top:
                 continue
-            lower = cv2.imread(str(_asset_path(other, asset_dir)), cv2.IMREAD_UNCHANGED)
+            lower = image_io.imread(str(_asset_path(other, asset_dir)), cv2.IMREAD_UNCHANGED)
             if lower is None or lower.ndim != 3:
                 continue
             alpha = lower[:, :, 3] if lower.shape[2] == 4 else np.full(lower.shape[:2], 255, np.uint8)

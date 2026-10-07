@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -201,8 +202,8 @@ class AIReconstructionPlanner:
                         alpha = _single_ellipse_alpha(covered, box)
                     if alpha is not None:
                         crop = np.dstack((crop, alpha))
-                    cv2.imwrite(str(asset_path), crop)
-                    cv2.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
+                    image_io.imwrite(str(asset_path), crop)
+                    image_io.imwrite(str(clean_dir / f"{asset_id}.png"), crop)
                     z_index = max((int(item.get("zIndex") or 0) for item in covered), default=1) + 1
                     planned_assets.append({
                         "id": asset_id,
@@ -411,7 +412,7 @@ def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dic
         mask = np.asarray(segment.get("mask") or [], dtype=np.uint8)
         if not mask.size and segment.get("alphaCrop"):
             asset_path = _path_from_src(segment["alphaCrop"])
-            asset = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED) if asset_path and asset_path.is_file() else None
+            asset = image_io.imread(str(asset_path), cv2.IMREAD_UNCHANGED) if asset_path and asset_path.is_file() else None
             if asset is not None and asset.ndim == 3 and asset.shape[2] == 4:
                 mask = asset[:, :, 3]
         if mask.ndim != 2 or not mask.size:
@@ -425,7 +426,7 @@ def _segmented_visual_modules(segments: list[dict[str, Any]], elements: list[dic
 
 
 def _contour_visual_modules(source_path: Path, elements: list[dict[str, Any]], width: int, height: int) -> list[dict[str, Any]]:
-    image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if image is None:
         return []
     edges = cv2.Canny(image, 70, 160)

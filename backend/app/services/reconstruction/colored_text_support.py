@@ -1,6 +1,7 @@
 """Extract bounded colored supports beneath editable OCR lines."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from uuid import uuid4
@@ -11,7 +12,7 @@ import numpy as np
 
 def extract_colored_text_supports(source_path: Path, layout: dict, asset_dir: Path,
                                   project_id: str, page_index: int) -> dict[str, int]:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return {"coloredTextSupports": 0, "coloredSupportPixels": 0}
     height, width = source.shape[:2]
@@ -81,7 +82,7 @@ def extract_colored_text_supports(source_path: Path, layout: dict, asset_dir: Pa
         cleaned = cv2.inpaint(crop, ink, 3, cv2.INPAINT_TELEA) if np.any(ink) else crop
         identifier = f"colored_support_page_{page_index}_{len(created) + 1:03d}"
         path = asset_dir / f"{identifier}_{uuid4().hex[:8]}.png"
-        if not cv2.imwrite(str(path), np.dstack((cleaned, alpha))):
+        if not image_io.imwrite(str(path), np.dstack((cleaned, alpha))):
             continue
         overlapping = [item for item in assets if _overlap(_box(item, width, height), support_box) > 0]
         if not _remove_replaced_pixels(overlapping, support_box, alpha, asset_dir, width, height,
@@ -120,7 +121,7 @@ def _remove_replaced_pixels(assets: list[dict], support_box: tuple[int, int, int
         if x2 <= x1 or y2 <= y1:
             continue
         path = asset_dir / Path(str(item.get("src") or "")).name
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
         if image is None or image.ndim != 3:
             continue
         if image.shape[2] == 3:
@@ -133,7 +134,7 @@ def _remove_replaced_pixels(assets: list[dict], support_box: tuple[int, int, int
             continue
         image[:, :, 3][replaced] = 0
         new_path = asset_dir / f"{Path(str(item.get('id') or path.stem)).stem}_without_{support_id}_{uuid4().hex[:8]}.png"
-        if not cv2.imwrite(str(new_path), image):
+        if not image_io.imwrite(str(new_path), image):
             for _, staged_path in staged:
                 staged_path.unlink(missing_ok=True)
             return False

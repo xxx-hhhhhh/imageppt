@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import importlib
 import importlib.util
@@ -6,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 
 from app.services.typography.analyzer import analyze_text_style
@@ -29,7 +29,7 @@ class OCRProvider:
 
 
 def _style_from_region(image_path: Path, bbox: list[float], text: str, confidence: float) -> dict[str, Any]:
-    image = cv2.imread(str(image_path))
+    image = image_io.imread(str(image_path))
     if image is None:
         return {"fontFamily": "Microsoft YaHei", "fontClass": "unknown", "fontSize": 24, "fontWeight": 400, "color": "#111827", "align": "left", "verticalAlign": "top", "role": "body_text"}
     x1, y1, x2, y2 = [max(0, int(value)) for value in bbox]

@@ -10,6 +10,7 @@ from app.services.reconstruction.owner_gate import (
 )
 from app.services.reconstruction.text_erasure import _clean
 from app.services.reconstruction.white_objectization import objectize_on_white
+from app.utils import image_io
 
 
 def test_unknown_pale_visual_gets_verified_transparent_owner(tmp_path):
@@ -45,7 +46,7 @@ def test_failed_replacement_write_never_clears_background(tmp_path, monkeypatch)
     source[5:35, 5:65] = (248, 250, 254)
     cv2.imwrite(str(path), source)
     cv2.imwrite(str(background), source)
-    monkeypatch.setattr(cv2, "imwrite", lambda *args: False)
+    monkeypatch.setattr(image_io, "imwrite", lambda *args: False)
     with pytest.raises(OSError):
         objectize_on_white(path, background, {"elements": []}, tmp_path / "assets", "project", 1)
     assert np.array_equal(cv2.imread(str(background)), source)

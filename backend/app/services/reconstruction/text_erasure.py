@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Callable
@@ -31,7 +32,7 @@ def erase_editable_text_sources(
     A complex_cleaner may later provide AI inpainting for textured assets. The
     local OpenCV cleaner remains the deterministic default and fallback.
     """
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if background is None:
         raise FileNotFoundError(background_path)
     height, width = background.shape[:2]
@@ -75,7 +76,7 @@ def erase_editable_text_sources(
             background_mask[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 0
     if clean_background:
         background = _clean(background, background_mask, complex_cleaner)
-        cv2.imwrite(str(background_path), background)
+        image_io.imwrite(str(background_path), background)
 
     cleaned_assets = 0
     for asset in layout.get("elements", []):
@@ -86,7 +87,7 @@ def erase_editable_text_sources(
         path = Path(raw_src) if Path(raw_src).is_absolute() else _path_from_src(raw_src)
         if not path or not path.is_file():
             continue
-        original = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        original = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
         if original is None or original.ndim != 3:
             continue
         ax, ay = float(asset.get("x") or 0), float(asset.get("y") or 0)
@@ -164,7 +165,7 @@ def erase_editable_text_sources(
             local_assets = owner_root / "assets"
             local_assets.mkdir(parents=True, exist_ok=True)
             output_path = local_assets / f"{copy_asset_prefix or 'text_clean'}_{asset['id']}_{uuid4().hex[:8]}.png"
-        if not cv2.imwrite(str(output_path), original):
+        if not image_io.imwrite(str(output_path), original):
             raise OSError(f"Could not write cleaned image asset: {output_path}")
         if output_path != path:
             asset["src"] = f"/media/assets/{owner_root.name}/{output_path.name}"
@@ -283,8 +284,8 @@ def _light_glyph_on_colored_surface(rgb: np.ndarray, mask: np.ndarray,
 
 def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) -> int:
     """Count editable OCR lines whose original glyph edges remain underneath."""
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if source is None or background is None:
         return 0
     height, width = source.shape[:2]
@@ -324,7 +325,7 @@ def count_text_ghosting(source_path: Path, background_path: Path, layout: dict) 
             path = _path_from_src(asset.get("src"))
             if path is None or not path.is_file():
                 continue
-            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
             if image is None or image.ndim != 3:
                 continue
             sx, sy = image.shape[1] / aw, image.shape[0] / ah

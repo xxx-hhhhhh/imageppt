@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 import statistics
@@ -94,7 +95,7 @@ class TypographyLayoutRefiner:
         if not texts:
             return refined, stats
 
-        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR) if source_path else None
+        source = image_io.imread(str(source_path), cv2.IMREAD_COLOR) if source_path else None
         for item in texts:
             self._refine_text(item, refined.get("elements", []), width, height, stats, source)
         page_changes = self._polish_page_alignment(texts, width, height)

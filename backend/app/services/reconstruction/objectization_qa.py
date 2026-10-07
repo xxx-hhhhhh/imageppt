@@ -1,6 +1,7 @@
 """Conservative post-objectization checks for complete movable modules."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from app.services.pptx.renderer import _path_from_src
 
 
 def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_dir: Path, project_id: str, target_ids: set[str] | None = None) -> dict[str, Any]:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     report: dict[str, Any] = {"checkedModules": 0, "missingBackplates": 0, "sharedBackplateCandidates": 0, "recoveredBackplates": 0, "reboundBackplates": 0, "moduleImageFallbacks": 0, "squareCutouts": 0, "repairedCutouts": 0, "roundCutoutsChecked": 0, "roundCutoutIssues": 0, "issues": []}
     if source is None:
         report["issues"].append({"problem": "sourceUnavailable"})
@@ -104,7 +105,7 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
             cv2.drawContours(alpha, [contour - np.array([[[x, y]]])], -1, 255, -1, cv2.LINE_AA)
             path = asset_dir / f"{identifier}.png"
             asset_dir.mkdir(parents=True, exist_ok=True)
-            if not cv2.imwrite(str(path), np.dstack((clean, alpha))):
+            if not image_io.imwrite(str(path), np.dstack((clean, alpha))):
                 report["issues"].append({"problem": "moduleFallbackWriteFailed", "groupId": group_id})
                 continue
             metadata.update({"reconstructionStrategy": "cutout_image", "moduleMemberIds": [item["id"] for item in foreground if item.get("id")],
@@ -120,7 +121,7 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         path = _asset_path(item, asset_dir)
         if not path.exists():
             continue
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
         if image is None or image.ndim != 3:
             continue
         is_round = (item.get("metadata") or {}).get("reconstructionStrategySource") == "round_contour"
@@ -143,7 +144,7 @@ def repair_objectized_modules(source_path: Path, layout: dict[str, Any], asset_d
         repaired_path = asset_dir / f"qa_contour_{path.stem}.png"
         rgba = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2BGRA)
         rgba[:, :, 3] = alpha if image.shape[2] == 3 or is_round else cv2.min(image[:, :, 3], alpha)
-        if not cv2.imwrite(str(repaired_path), rgba):
+        if not image_io.imwrite(str(repaired_path), rgba):
             report["issues"].append({"problem": "cutoutRepairFailed", "elementId": item.get("id")})
             continue
         item["src"] = f"/media/assets/{project_id}/{repaired_path.name}"
@@ -160,7 +161,7 @@ def _mark_image_alpha(mask: np.ndarray, item: dict, asset_dir: Path,
                       plate: tuple[int, int, int, int]) -> bool:
     """Mask only visible pixels of a transparent foreground image."""
     path = _asset_path(item, asset_dir)
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+    image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
     if image is None or image.ndim != 3 or image.shape[2] != 4:
         return False
     px, py, width, height = plate

@@ -1,6 +1,7 @@
 """Build an editable white slide from source pixels and existing scene owners."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,7 +28,7 @@ def detect_flat_page_surface(source: np.ndarray) -> np.ndarray | None:
 
 
 def objectize_on_white(source_path: Path, background_path: Path, layout: dict, asset_dir: Path, project_id: str, page_index: int) -> dict[str, int]:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         raise FileNotFoundError(source_path)
     height, width = source.shape[:2]
@@ -114,7 +115,7 @@ def objectize_on_white(source_path: Path, background_path: Path, layout: dict, a
     if page_surface is not None:
         # A verified flat page fill is already a movable native Shape.
         surface = np.full_like(source, 255)
-    if not cv2.imwrite(str(background_path), surface):
+    if not image_io.imwrite(str(background_path), surface):
         raise OSError("Verified page surface could not be saved")
     layout["backgroundUrl"] = f"/media/backgrounds/{project_id}/{background_path.name}"
     layout.setdefault("metadata", {})["reconstructionSurfaceMode"] = "white_objectized"
@@ -133,7 +134,7 @@ def _split_monolithic_source_image(source: np.ndarray, elements: list[dict], ass
         if box is None or (box[2] - box[0]) * (box[3] - box[1]) < width * height * 0.80:
             continue
         path = asset_dir / Path(str(item.get("src") or "")).name
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
         if image is None:
             continue
         if image.ndim == 3 and image.shape[2] == 4 and float(np.mean(image[:, :, 3] > 32)) < 0.95:
@@ -163,7 +164,7 @@ def _split_monolithic_source_image(source: np.ndarray, elements: list[dict], ass
         covered = occupied != 0
         for piece in pieces:
             path = Path(staging) / Path(piece["src"]).name
-            asset = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            asset = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
             if asset is None or asset.ndim != 3 or asset.shape[2] != 4:
                 return 0
             x, y = int(piece["x"]), int(piece["y"])
@@ -291,7 +292,7 @@ def _extract_round_assets(source: np.ndarray, active: list[dict], elements: list
         alpha = cv2.resize(alpha_large, (x2 - x1, y2 - y1), interpolation=cv2.INTER_AREA)
         crop = source[y1:y2, x1:x2]
         path = asset_dir / f"round_visual_page_{page_index}_{created + 1:03d}.png"
-        if not cv2.imwrite(str(path), np.dstack((crop, alpha))):
+        if not image_io.imwrite(str(path), np.dstack((crop, alpha))):
             continue
         created += 1
         elements.append({"id": path.stem, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "rotation": 0, "zIndex": 1, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "round_contour", "layerRole": "residual", "preserveWholeAsset": True, "contourQuality": round(float(circularity), 3)}})
@@ -358,7 +359,7 @@ def _occupy_text_glyphs(source: np.ndarray, occupied: np.ndarray, box: tuple[int
 def _is_text_shadow_residual(asset: dict, active: list[dict], asset_dir: Path, width: int, height: int) -> bool:
     """Discard faint OCR antialias fragments already owned by editable text."""
     path = asset_dir / Path(str(asset.get("src") or "")).name
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
     if image is None or image.ndim != 3 or image.shape[2] != 4:
         return False
     alpha = image[:, :, 3] > 32
@@ -534,7 +535,7 @@ def _occupy_existing_image(item: dict, occupied: np.ndarray, box: tuple[int, int
     path = Path(src)
     if not path.is_file():
         path = asset_dir / Path(src).name
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+    image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
     if image is None:
         return
     if image.ndim == 3 and image.shape[2] == 4:
@@ -637,7 +638,7 @@ def _extract_bordered_containers(source: np.ndarray, active: list[dict], element
             local_contour = contour - np.array([[[x, y]]])
             cv2.drawContours(alpha, [local_contour], -1, 255, -1)
             path = asset_dir / f"white_border_page_{page_index}_{assets:03d}.png"
-            cv2.imwrite(str(path), np.dstack((clean, alpha)))
+            image_io.imwrite(str(path), np.dstack((clean, alpha)))
             elements.append({"id": path.stem, "type": "image", "x": x, "y": y, "width": w, "height": h, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": {"reconstructionStrategy": "cutout_image", "reconstructionStrategySource": "white_objectization", "layerRole": "container", "groupId": group_id, "moduleMemberIds": [item["id"] for item in members if item.get("id")], "textCleaned": bool(texts), "editableTextIds": [item["id"] for item in texts if item.get("id")]}})
         if flat:
             _occupy_shape_color(source, occupied, box, _hex_bgr(fill_color))
@@ -811,7 +812,7 @@ def _extract_internal_details(source: np.ndarray, active: list[dict], elements: 
                 assets += 1
                 metadata["reconstructionStrategy"] = "cutout_image"
                 path = asset_dir / f"{detail_id}.png"
-                cv2.imwrite(str(path), np.dstack((region, region_mask)))
+                image_io.imwrite(str(path), np.dstack((region, region_mask)))
                 elements.append({"id": detail_id, "type": "image", "x": detail_box[0], "y": detail_box[1], "width": dw, "height": dh, "rotation": 0, "zIndex": z_index, "groupId": group_id, "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}, "metadata": metadata})
             occupied[detail_box[1]:detail_box[3], detail_box[0]:detail_box[2]][region_mask > 0] = 255
             for member in members:

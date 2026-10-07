@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import os
 from abc import ABC, abstractmethod
@@ -22,7 +23,7 @@ class OpenCVSegmentationProvider(SegmentationProvider):
     name = "opencv"
 
     def segment(self, image_path: Path, asset_dir: Path | None = None, project_id: str | None = None) -> list[dict[str, Any]]:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
         if image is None:
             return []
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -45,7 +46,7 @@ class OpenCVSegmentationProvider(SegmentationProvider):
                 rgba = cv2.cvtColor(image[y:y + h, x:x + w], cv2.COLOR_BGR2BGRA)
                 rgba[:, :, 3] = mask
                 path = asset_dir / f"segment_{uuid4().hex[:12]}_{index + 1:03d}.png"
-                if not cv2.imwrite(str(path), rgba):
+                if not image_io.imwrite(str(path), rgba):
                     continue
                 item["alphaCrop"] = f"/media/assets/{project_id}/{path.name}"
             objects.append(item)
@@ -69,7 +70,7 @@ class OptionalSAM2Provider(OpenCVSegmentationProvider):
             from ultralytics import SAM
             if self.model is None:
                 self.model = SAM(str(self.model_path))
-            image = cv2.imread(str(image_path))
+            image = image_io.imread(str(image_path))
             h, w = image.shape[:2]
             boxes = [[s["bbox"]["left"], s["bbox"]["top"], s["bbox"]["left"]+s["bbox"]["width"], s["bbox"]["top"]+s["bbox"]["height"]] for s in seeds]
             result = self.model.predict(source=image, bboxes=boxes, verbose=False, device=os.getenv("SAM_DEVICE", "cpu"))[0]
@@ -91,7 +92,7 @@ class OptionalSAM2Provider(OpenCVSegmentationProvider):
                     asset_dir.mkdir(parents=True, exist_ok=True)
                     path = asset_dir / f"{identifier}.png"
                     rgba = np.dstack((image[y:y+ch, x:x+cw], mask[y:y+ch, x:x+cw]))
-                    if not cv2.imwrite(str(path), rgba):
+                    if not image_io.imwrite(str(path), rgba):
                         raise OSError("SAM asset write failed")
                     item["alphaCrop"] = f"/media/assets/{project_id}/{path.name}"
                 objects.append(item)

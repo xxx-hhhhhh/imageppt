@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from io import BytesIO
@@ -22,12 +23,12 @@ class OpenCVInpaintingProvider(InpaintingProvider):
     name = "opencv"
 
     def inpaint(self, image_path: Path, mask: np.ndarray, output_path: Path) -> Path:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
         if image is None:
             raise FileNotFoundError(image_path)
         output = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), output)
+        image_io.imwrite(str(output_path), output)
         return output_path
 
 

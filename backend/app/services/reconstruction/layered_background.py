@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,7 +20,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
     The visual asset is left unchanged. Its position therefore renders exactly
     as before, while moving it no longer reveals a second copy underneath.
     """
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if background is None:
         raise FileNotFoundError(background_path)
     height, width = background.shape[:2]
@@ -72,11 +73,11 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
                 try:
                     with TemporaryDirectory(prefix="imageppt-asset-inpaint-") as workspace:
                         source_file, result_file = Path(workspace) / "source.png", Path(workspace) / "result.png"
-                        cv2.imwrite(str(source_file), background)
+                        image_io.imwrite(str(source_file), background)
                         region_mask = np.zeros((height, width), dtype=np.uint8)
                         region_mask[y1:y2, x1:x2] = owned
                         professional_provider.inpaint(source_file, region_mask, result_file)
-                        edited = cv2.imread(str(result_file), cv2.IMREAD_COLOR)
+                        edited = image_io.imread(str(result_file), cv2.IMREAD_COLOR)
                         if edited is not None and edited.shape == background.shape:
                             patch = background[y1:y2, x1:x2]
                             patch[owned > 0] = edited[y1:y2, x1:x2][owned > 0]
@@ -95,7 +96,7 @@ def separate_foreground(background_path: Path, elements: list[dict], *, professi
             patch[owned > 0] = np.median(ring, axis=0).astype(np.uint8)
     if np.any(small):
         background = cv2.inpaint(background, small, 4, cv2.INPAINT_TELEA)
-    cv2.imwrite(str(background_path), background)
+    image_io.imwrite(str(background_path), background)
     return len(regions)
 
 

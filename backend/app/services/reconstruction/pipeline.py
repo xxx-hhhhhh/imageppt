@@ -1,10 +1,10 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 import json
 import re
 import shutil
-import cv2
 from pathlib import Path
 
 from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, RECONSTRUCTION_SURFACE_MODE, SEGMENTATION_PROVIDER, VISION_PROVIDER
@@ -437,7 +437,7 @@ class ReconstructionPipeline:
             if white_objectized:
                 reconstruction_stats["initialRecoveredVisuals"] += recover_initial_missing_regions(
                     normalized_path, background_path, preview_path, layout, page_output / "assets", project_id, page_index)
-                owner_gate = ensure_visual_owners(cv2.imread(str(normalized_path)), layout,
+                owner_gate = ensure_visual_owners(image_io.imread(str(normalized_path)), layout,
                                                  page_output / "assets", project_id, page_index)
                 render_preview(background_path, layout, preview_path)
             score = run_visual_qa(normalized_path, preview_path, page_output, layout)

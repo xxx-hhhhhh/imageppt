@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import cv2
+from app.utils import image_io
 import numpy as np
 
 from app.services.reconstruction.objectization_audit import _box, _connected_glyph_blends, _visual_mask
@@ -22,7 +23,7 @@ def objectize_background_regions(source_path: Path, background_path: Path, layou
     """
     if not issues:
         return []
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if background is None:
         return []
     height, width = background.shape[:2]
@@ -73,7 +74,7 @@ def objectize_background_regions(source_path: Path, background_path: Path, layou
             if item.get("type") == "image" and float((item.get("style") or {}).get("opacity", 1)) == 1:
                 from app.services.reconstruction.revision_integrity import asset_path
                 path = asset_path(source_path.parent, item.get("src"))
-                image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path else None
+                image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path else None
                 if image is not None and image.ndim == 3:
                     image = cv2.resize(image, (x2 - x1, y2 - y1))
                     opaque = image[:, :, 3] == 255 if image.shape[2] == 4 else np.ones(mask.shape, np.bool_)
@@ -92,7 +93,7 @@ def objectize_background_regions(source_path: Path, background_path: Path, layou
     clear = duplicates.copy()
     for item in assets:
         path = asset_dir / Path(item["src"]).name
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
         x, y, w, h = [int(item[k]) for k in ("x", "y", "width", "height")]
         if image is None or image.shape != (h, w, 4):
             for staged in assets:
@@ -104,7 +105,7 @@ def objectize_background_regions(source_path: Path, background_path: Path, layou
     cleaned[clear] = 255
     staged_background = background_path.with_name(f".{background_path.stem}_{prefix}.png")
     try:
-        if not cv2.imwrite(str(staged_background), cleaned):
+        if not image_io.imwrite(str(staged_background), cleaned):
             raise OSError("Could not save staged background")
         staged_background.replace(background_path)
     except OSError:

@@ -6,6 +6,7 @@ Uncertain pixels are retained as independent transparent assets before a
 background can be cleared. No learned segmentation result authorizes deletion.
 """
 from __future__ import annotations
+from app.utils import image_io
 
 import math
 from pathlib import Path
@@ -129,7 +130,7 @@ def ownership_evidence(source: np.ndarray, layout: dict, asset_dir: Path, *, inc
         elif kind == "image":
             src = str(item.get("src") or "").split("?", 1)[0]
             path = Path(src) if Path(src).is_absolute() and not src.startswith("/media/") else asset_dir / Path(src).name
-            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+            image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
             if image is None or image.ndim != 3:
                 missing.append(str(item.get("id")))
                 continue
@@ -218,9 +219,9 @@ def ensure_visual_owners(source: np.ndarray, layout: dict, asset_dir: Path, proj
         rgba = np.dstack((source[y:y+h, x:x+w], alpha))
         identifier = f"retained_{page}_{uuid4().hex[:12]}"
         path = asset_dir / f"{identifier}.png"
-        if not cv2.imwrite(str(path), rgba):
+        if not image_io.imwrite(str(path), rgba):
             raise OSError("Replacement asset write failed; background clearing is forbidden")
-        reread = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        reread = image_io.imread(str(path), cv2.IMREAD_UNCHANGED)
         if reread is None or not np.array_equal(reread, rgba):
             raise OSError("Replacement asset verification failed; background clearing is forbidden")
         created.append({"id": identifier, "type": "image", "x": x, "y": y, "width": w, "height": h,
@@ -259,7 +260,7 @@ def compact_retained_fragments(source: np.ndarray, layout: dict, asset_dir: Path
             continue
         x1, y1, x2, y2 = box
         path = asset_dir / Path(str(item.get("src") or "")).name
-        asset = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        asset = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
         if asset is None or asset.shape != (y2-y1, x2-x1, 4):
             continue
         alpha = asset[:, :, 3]
@@ -286,7 +287,7 @@ def compact_retained_fragments(source: np.ndarray, layout: dict, asset_dir: Path
             rgba = np.dstack((source[top:top+h, left:left+w], alpha))
             identifier = f"retained_cluster_{page}_{uuid4().hex[:12]}"
             path = asset_dir / f"{identifier}.png"
-            if not cv2.imwrite(str(path), rgba) or not np.array_equal(cv2.imread(str(path), -1), rgba):
+            if not image_io.imwrite(str(path), rgba) or not np.array_equal(image_io.imread(str(path), -1), rgba):
                 raise OSError("Fragment replacement verification failed; old owners remain active")
             evidence[top:top+h, left:left+w] |= alpha
             replacements.append({"id": identifier, "type": "image", "x": left, "y": top, "width": w, "height": h,

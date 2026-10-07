@@ -1,6 +1,7 @@
 """Pixel and ownership audit for white, objectized slide reconstructions."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 from pathlib import Path
@@ -19,9 +20,9 @@ VISUAL_TYPES = {"image", "rectangle", "roundedRectangle", "ellipse", "line", "ar
 
 def audit_objectization(source_path: Path, background_path: Path, preview_path: Path, layout: dict,
                         debug_path: Path | None = None) -> dict:
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
-    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
+    preview = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     report = {"whiteBackground": False, "missingBackplates": 0, "missingVisualObjects": 0, "blankVisualOwners": 0,
               "visualMismatchRegions": 0, "visualMismatchPixels": 0, "salientVisualPixels": 0,
               "falseVisualAdditionPixels": 0, "fadedPaleSupportPixels": 0, "washedColoredAssetPixels": 0,
@@ -379,7 +380,7 @@ def audit_objectization(source_path: Path, background_path: Path, preview_path: 
                 cv2.rectangle(debug, (x1, y1), (x2 - 1, y2 - 1), (40, 40, 230), 2)
         cv2.putText(debug, "GREEN text  BLUE image  PURPLE shape  WHITE base  RED missing", (8, max(15, height - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (45, 45, 45), 1)
         debug_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(debug_path), debug)
+        image_io.imwrite(str(debug_path), debug)
     return report
 
 
@@ -387,10 +388,10 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                            project_id: str, revision_round: int, asset_prefix: str | None = None,
                            preview_path: Path | None = None) -> list[dict]:
     """Stage only reported unowned regions; leave existing objects untouched."""
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
     if source is None:
         return []
-    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR) if preview_path else None
+    preview = image_io.imread(str(preview_path), cv2.IMREAD_COLOR) if preview_path else None
     if preview is not None and preview.shape != source.shape:
         preview = None
     height, width = source.shape[:2]
@@ -467,7 +468,7 @@ def repair_missing_regions(source_path: Path, layout: dict, issues: list[dict], 
                 mask = mask[my:my + mh, mx:mx + mw]
                 common.update({"x": x1 + mx, "y": y1 + my, "width": mw, "height": mh})
             path = asset_dir / f"{identifier}.png"
-            if not cv2.imwrite(str(path), np.dstack((crop, mask))):
+            if not image_io.imwrite(str(path), np.dstack((crop, mask))):
                 continue
             common.update({"type": "image", "src": f"/media/assets/{project_id}/{path.name}", "style": {"opacity": 1}})
             metadata.update({"reconstructionStrategy": "cutout_image", "sourceMaskPixels": int(np.count_nonzero(mask))})
@@ -524,9 +525,9 @@ def recover_initial_missing_regions(source_path: Path, background_path: Path, pr
         improved = (valid and after["missingVisualPixels"] < before["missingVisualPixels"]
                     and after["visualMismatchPixels"] <= before["visualMismatchPixels"] + 24)
         if not improved and any((item.get("metadata") or {}).get("qaIssue") in {"paleAssetGap", "paleTextSupportGap"} for item in created):
-            source = cv2.imread(str(source_path))
-            previous = cv2.imread(str(preview_path))
-            current = cv2.imread(str(candidate_preview))
+            source = image_io.imread(str(source_path))
+            previous = image_io.imread(str(preview_path))
+            current = image_io.imread(str(candidate_preview))
             if source is not None and previous is not None and current is not None:
                 pale = _pale_gap_pixels(source, previous)
                 target = np.zeros(pale.shape, np.bool_)
@@ -591,8 +592,8 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                              *, target_ids: set[str] | None = None,
                              asset_prefix: str | None = None) -> list[dict]:
     """Restore bounded pale support omitted by an otherwise valid movable asset."""
-    source = cv2.imread(str(source_path))
-    preview = cv2.imread(str(preview_path))
+    source = image_io.imread(str(source_path))
+    preview = image_io.imread(str(preview_path))
     if source is None or preview is None or source.shape != preview.shape:
         return []
     height, width = source.shape[:2]
@@ -630,7 +631,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
         # moving the ribbon/card does not leave a detached pale shadow behind.
         if (owner.get("metadata") or {}).get("reconstructionStrategySource") == "residual_detection":
             prior_path = asset_dir / Path(str(owner.get("src") or "")).name
-            prior = cv2.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None
+            prior = image_io.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None
             if prior is not None and prior.ndim == 3 and prior.shape[2] == 4 and prior.shape[:2] == gap.shape:
                 merged = prior.copy()
                 selected = (gap != 0) & (merged[:, :, 3] <= 32)
@@ -639,7 +640,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                 if np.count_nonzero(selected) >= max(16, round(area * 0.004)):
                     identifier = f"{asset_prefix or f'initial_page_{page_index}'}_pale_merged_{uuid4().hex[:10]}"
                     path = asset_dir / f"{identifier}.png"
-                    if cv2.imwrite(str(path), merged):
+                    if image_io.imwrite(str(path), merged):
                         owner["src"] = f"/media/assets/{project_id}/{path.name}"
                         owner.setdefault("metadata", {}).update({"paleGapMergedPixels": int(np.count_nonzero(selected)),
                                                                  "qaIssue": "paleAssetGap"})
@@ -648,7 +649,7 @@ def _recover_pale_asset_gaps(source_path: Path, preview_path: Path, layout: dict
                         continue
         identifier = f"{asset_prefix or f'initial_page_{page_index}'}_pale_gap_{len(created) + 1:03d}"
         path = asset_dir / f"{identifier}.png"
-        if not cv2.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], gap))):
+        if not image_io.imwrite(str(path), np.dstack((source[y1:y2, x1:x2], gap))):
             continue
         item = {"id": identifier, "type": "image", "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1,
                 "rotation": 0, "zIndex": int(owner.get("zIndex") or 0) + 1, "groupId": owner.get("groupId"),
@@ -711,7 +712,7 @@ def _recover_faded_local_supports(source_path: Path, source: np.ndarray, preview
         key = str(parent.get("id"))
         prior_path = asset_dir / Path(str(parent.get("src") or "")).name
         prior = (merged_assets[key][1] if key in merged_assets else
-                 cv2.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None)
+                 image_io.imread(str(prior_path), cv2.IMREAD_UNCHANGED) if prior_path.is_file() else None)
         if (prior is not None and prior.ndim == 3 and prior.shape[2] == 4
                 and prior.shape[:2] == (py2 - py1, px2 - px1)
                 and _overlap_of_first(box, parent_box) == 1):
@@ -725,7 +726,7 @@ def _recover_faded_local_supports(source_path: Path, source: np.ndarray, preview
             continue
         identifier = f"initial_page_{page_index}_faded_support_{uuid4().hex[:10]}"
         path = asset_dir / f"{identifier}.png"
-        if not cv2.imwrite(str(path), np.dstack((source[y:y + h, x:x + w], component))):
+        if not image_io.imwrite(str(path), np.dstack((source[y:y + h, x:x + w], component))):
             continue
         item = {"id": identifier, "type": "image", "x": x, "y": y, "width": w, "height": h,
                 "rotation": 0, "zIndex": int(parent.get("zIndex") or 0) + 1,
@@ -738,7 +739,7 @@ def _recover_faded_local_supports(source_path: Path, source: np.ndarray, preview
         created.append(item)
     for parent, merged, pixels in merged_assets.values():
         path = asset_dir / f"faded_support_merged_{uuid4().hex[:12]}.png"
-        if not cv2.imwrite(str(path), merged):
+        if not image_io.imwrite(str(path), merged):
             continue
         parent["src"] = f"/media/assets/{project_id}/{path.name}"
         parent.setdefault("metadata", {}).update({"qaIssue": "paleAssetGap",
@@ -822,7 +823,7 @@ def _recover_text_support_gaps(source: np.ndarray, missing: np.ndarray, layout: 
         alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
         identifier = f"{asset_prefix or f'initial_page_{page_index}'}_text_support_{uuid4().hex[:10]}"
         path = asset_dir / f"{identifier}.png"
-        if not cv2.imwrite(str(path), np.dstack((cleaned, alpha))):
+        if not image_io.imwrite(str(path), np.dstack((cleaned, alpha))):
             continue
         parent = max(parents, key=lambda item: (_box(item, width, height)[2] - _box(item, width, height)[0]) *
                      (_box(item, width, height)[3] - _box(item, width, height)[1]))
@@ -850,7 +851,7 @@ def _visual_mask(item: dict, box: tuple[int, int, int, int], source_path: Path) 
         path = Path(src)
         if not path.is_file():
             path = source_path.parent / "assets" / Path(src).name
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
+        image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path.is_file() else None
         if image is not None and image.ndim == 3 and image.shape[2] == 4:
             alpha = cv2.resize(image[:, :, 3], (width, height), interpolation=cv2.INTER_LINEAR)
             return np.uint8(alpha > 32) * 255

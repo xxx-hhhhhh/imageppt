@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 import shutil
 from pathlib import Path
@@ -16,9 +17,9 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
     preserved as an image. A whole cleaned module is restored together when
     one of its text lines fails the check; this prevents a half-clean asset.
     """
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
-    preview = cv2.imread(str(preview_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
+    preview = image_io.imread(str(preview_path), cv2.IMREAD_COLOR)
     if source is None or background is None or preview is None:
         return {"preservedTextRegions": 0, "restoredModules": 0}
     elements = layout.get("elements", [])
@@ -48,7 +49,7 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
             if _ordinary_text(item):
                 from app.services.reconstruction.text_erasure import erase_editable_text_sources
                 erase_editable_text_sources(background_path, layout, target_text_ids={str(item["id"])})
-                background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+                background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
                 metadata["visualTextMismatch"] = True
                 _ensure_readable_text(item, preview[y1:y2, x1:x2])
                 continue
@@ -109,7 +110,7 @@ def preserve_bad_text_regions(source_path: Path, background_path: Path, preview_
                 metadata.update({"suppressRender": True, "sourceTextPreserved": True, "fallbackReason": "visual_text_mismatch"})
                 preserved += 1
     if preserved or any((item.get("metadata") or {}).get("sourceTextRecleaned") for item in elements):
-        cv2.imwrite(str(background_path), background)
+        image_io.imwrite(str(background_path), background)
     return {"preservedTextRegions": preserved, "restoredModules": restored_modules}
 
 
@@ -123,7 +124,7 @@ def _source_cutout(source: np.ndarray, box: tuple[int, int, int, int], item: dic
     asset_dir.mkdir(parents=True, exist_ok=True)
     cutout_id = f"fallback_{page}_{item['id']}"
     cutout_path = asset_dir / f"{cutout_id}.png"
-    if not cv2.imwrite(str(cutout_path), np.dstack((source[y1:y2, x1:x2], alpha))):
+    if not image_io.imwrite(str(cutout_path), np.dstack((source[y1:y2, x1:x2], alpha))):
         return None
     return {
         "id": cutout_id, "type": "image", "x": x1, "y": y1,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 import hashlib
@@ -125,7 +126,7 @@ def inspect_assets(root: Path, layout: dict) -> dict:
 
 
 def white_area_ratio(path: Path) -> float:
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         return 1.0
     return float(np.mean(np.all(image >= 245, axis=2)))
@@ -216,7 +217,7 @@ def assess_revision(root: Path, baseline: dict, candidate: dict, background_befo
 def _fragment_union_covers(root: Path, old: dict, replacements: list[dict]) -> bool:
     """A many-to-fewer asset count change needs pixel proof, not declarations."""
     path = asset_path(root, old.get("src"))
-    original = cv2.imread(str(path), -1) if path and path.is_file() else None
+    original = image_io.imread(str(path), -1) if path and path.is_file() else None
     if original is None or original.ndim != 3 or original.shape[2] != 4 or old.get("rotation", 0) or old.get("crop"):
         return False
     if original.shape[:2] != (round(float(old["height"])), round(float(old["width"]))):
@@ -226,7 +227,7 @@ def _fragment_union_covers(root: Path, old: dict, replacements: list[dict]) -> b
     evidence = np.zeros((height, width), bool)
     for replacement in replacements:
         path = asset_path(root, replacement.get("src"))
-        asset = cv2.imread(str(path), -1) if path and path.is_file() else None
+        asset = image_io.imread(str(path), -1) if path and path.is_file() else None
         if asset is None or asset.ndim != 3 or asset.shape[2] != 4 or replacement.get("rotation", 0) or replacement.get("crop"):
             return False
         ax, ay = round(float(replacement["x"])), round(float(replacement["y"]))
@@ -248,9 +249,9 @@ def _new_source_visual_loss(source_path: Path | None, preview_before: Path, prev
     """Catch a newly erased local object even when other fixes improve page totals."""
     if source_path is None:
         return 0, 0
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    before = cv2.imread(str(preview_before), cv2.IMREAD_COLOR)
-    after = cv2.imread(str(preview_after), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    before = image_io.imread(str(preview_before), cv2.IMREAD_COLOR)
+    after = image_io.imread(str(preview_after), cv2.IMREAD_COLOR)
     if source is None or before is None or after is None or source.shape != before.shape or source.shape != after.shape:
         return 0, 0
     candidate_mask = visual_candidate_mask(source)
@@ -294,9 +295,9 @@ def _whitening_matches_source(source_path: Path | None, before_path: Path, after
     """Allow removing a false colored plate when the source itself is white."""
     if source_path is None:
         return False
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    before = cv2.imread(str(before_path), cv2.IMREAD_COLOR)
-    after = cv2.imread(str(after_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    before = image_io.imread(str(before_path), cv2.IMREAD_COLOR)
+    after = image_io.imread(str(after_path), cv2.IMREAD_COLOR)
     if source is None or before is None or after is None or source.shape != before.shape or source.shape != after.shape:
         return False
     newly_white = np.all(after >= 245, axis=2) & ~np.all(before >= 245, axis=2)
@@ -312,10 +313,10 @@ def _separated_background_is_covered(background_before: Path, background_after: 
     """Allow a white base only when a new object preserves the removed pixels."""
     if not new_visuals:
         return False
-    before = cv2.imread(str(background_before), cv2.IMREAD_COLOR)
-    after = cv2.imread(str(background_after), cv2.IMREAD_COLOR)
-    old_preview = cv2.imread(str(preview_before), cv2.IMREAD_COLOR)
-    new_preview = cv2.imread(str(preview_after), cv2.IMREAD_COLOR)
+    before = image_io.imread(str(background_before), cv2.IMREAD_COLOR)
+    after = image_io.imread(str(background_after), cv2.IMREAD_COLOR)
+    old_preview = image_io.imread(str(preview_before), cv2.IMREAD_COLOR)
+    new_preview = image_io.imread(str(preview_after), cv2.IMREAD_COLOR)
     if any(image is None for image in (before, after, old_preview, new_preview)) or not all(
             image.shape == before.shape for image in (after, old_preview, new_preview)):
         return False
@@ -347,8 +348,8 @@ def _old_asset_coverage(old: dict, new: dict) -> float:
 
 
 def _outside_change_ratio(before_path: Path, after_path: Path, target_boxes: list[list[float]]) -> float:
-    before = cv2.imread(str(before_path), cv2.IMREAD_COLOR)
-    after = cv2.imread(str(after_path), cv2.IMREAD_COLOR)
+    before = image_io.imread(str(before_path), cv2.IMREAD_COLOR)
+    after = image_io.imread(str(after_path), cv2.IMREAD_COLOR)
     if before is None or after is None or before.shape != after.shape:
         return 1.0
     height, width = before.shape[:2]

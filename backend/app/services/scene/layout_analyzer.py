@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -22,7 +23,7 @@ class OpenCVLayoutProvider(LayoutProvider):
     name = "opencv"
 
     def analyze(self, image_path: Path) -> list[dict[str, Any]]:
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        image = image_io.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if image is None:
             return []
         height, width = image.shape[:2]

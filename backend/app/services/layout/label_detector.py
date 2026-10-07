@@ -6,6 +6,7 @@ count. It groups visual objects from relative geometry and containment.
 """
 
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,7 @@ def _extract_whole_badge_crop(image: np.ndarray, item: dict[str, Any], destinati
     rgba = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
     rgba[:, :, 3] = alpha
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return (x, y, w, h) if cv2.imwrite(str(destination), rgba) else None
+    return (x, y, w, h) if image_io.imwrite(str(destination), rgba) else None
 
 
 def _complex_badge(image: np.ndarray, item: dict[str, Any]) -> bool:
@@ -110,7 +111,7 @@ def _inside_shape(text: dict[str, Any], shape: dict[str, Any]) -> bool:
 
 
 def detect_label_groups(image_path: Path, image_width: int, image_height: int, ocr_results: list[Any], elements: list[dict[str, Any]], asset_dir: Path | None, project_id: str | None) -> list[dict[str, Any]]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         return elements
     detected_shapes = []

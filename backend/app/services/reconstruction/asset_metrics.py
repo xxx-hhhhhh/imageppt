@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.utils import image_io
 
 from pathlib import Path
 
@@ -13,8 +14,8 @@ from app.services.reconstruction.objectization_audit import _connected_glyph_ble
 
 def measure_movable_assets(source_path: Path, background_path: Path, layout: dict, plan: dict, *, debug_path: Path | None = None) -> dict[str, int | float]:
     """Measure independent image ownership and source pixels left beneath it."""
-    source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    background = cv2.imread(str(background_path), cv2.IMREAD_COLOR)
+    source = image_io.imread(str(source_path), cv2.IMREAD_COLOR)
+    background = image_io.imread(str(background_path), cv2.IMREAD_COLOR)
     if source is None or background is None:
         return {"movableAssetCount": 0, "backgroundResidualCount": 0, "movableVisualCoverage": 0.0}
     assets = [item for item in layout.get("elements", []) if item.get("type") == "image" and not any((item.get("metadata") or {}).get(key) for key in ("suppressed", "suppressRender", "ownedBy", "sourceTextFallback"))]
@@ -96,7 +97,7 @@ def _pixel_visual_coverage(source: np.ndarray, layout: dict, *, debug_path: Path
         tolerance = np.clip(np.max(255 - original.astype(np.int16), axis=2) * .25, 2, 24)
         if kind == "image":
             path = _path_from_src(item.get("src"))
-            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
+            image = image_io.imread(str(path), cv2.IMREAD_UNCHANGED) if path and path.is_file() else None
             if image is None or image.ndim != 3:
                 continue
             image = cv2.resize(image, (w, h))
@@ -144,7 +145,7 @@ def _pixel_visual_coverage(source: np.ndarray, layout: dict, *, debug_path: Path
         for selected, color in ((expected & owned, (70, 180, 70)), (expected & ~owned, (40, 40, 230))):
             debug[selected] = np.uint8(source[selected] * .55 + np.array(color) * .45)
         debug_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(debug_path), debug)
+        image_io.imwrite(str(debug_path), debug)
     return round(float(np.count_nonzero(expected & owned)) / pixels, 4) if pixels else 1.0
 
 

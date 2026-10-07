@@ -1,6 +1,7 @@
 """Split sparse, oversized residual crops without changing their rendered pixels."""
 
 from __future__ import annotations
+from app.utils import image_io
 
 import copy
 from pathlib import Path
@@ -26,7 +27,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
         if area < page_area * 0.15:
             continue
         original_path = asset_dir / Path(str(item.get("src") or "")).name
-        image = cv2.imread(str(original_path), cv2.IMREAD_UNCHANGED) if original_path.is_file() else None
+        image = image_io.imread(str(original_path), cv2.IMREAD_UNCHANGED) if original_path.is_file() else None
         if image is None or image.ndim != 3 or image.shape[2] != 4:
             continue
         height, width = image.shape[:2]
@@ -68,7 +69,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
             part = image[y1:y2, x1:x2].copy()
             part[:, :, 3][~island[y1:y2, x1:x2]] = 0
             path = asset_dir / f"{original_path.stem}_{revision_id}_part_{len(staged) + 1:02d}.png"
-            if not cv2.imwrite(str(path), part):
+            if not image_io.imwrite(str(path), part):
                 write_failed = True
                 break
             assigned |= island
@@ -90,7 +91,7 @@ def partition_sparse_residuals(layout: dict, asset_dir: Path, project_id: str) -
         remainder = image.copy()
         remainder[:, :, 3][assigned] = 0
         remainder_path = asset_dir / f"{original_path.stem}_{revision_id}_remainder.png"
-        if not cv2.imwrite(str(remainder_path), remainder):
+        if not image_io.imwrite(str(remainder_path), remainder):
             for path, _ in staged:
                 path.unlink(missing_ok=True)
             continue
