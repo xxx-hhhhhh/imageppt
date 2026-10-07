@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import cv2
@@ -7,8 +8,6 @@ import numpy as np
 
 from app.services.inpainting.provider import create_inpainting_provider
 from app.services.ocr.provider import OCRResult
-from app.services.background.strategy import reclean_background as reclean_with_strategy
-from app.services.background.strategy import restore_background as restore_with_strategy
 
 
 class InpaintingService:
@@ -17,32 +16,44 @@ class InpaintingService:
         self.last_strategies: list[dict] = []
         self.last_stats = {"ghostingRegionsDetected": 0, "ghostingRegionsRecleaned": 0}
 
+    def restore_owned_text(self, image_path: Path, text_mask: np.ndarray, protected_mask: np.ndarray, ledger, output_path: Path) -> Path:
+        """One local patch. Protected/unowned pixels are byte-identical afterwards."""
+        from app.services.reconstruction.object_first import read_image, write_image
+        image = read_image(image_path)
+        authorized = ledger.authorize(text_mask)
+        authorized[protected_mask > 0] = 0
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not np.any(authorized):
+            write_image(output_path, image)
+            return output_path
+        try:
+            self.provider.inpaint(image_path, authorized, output_path)
+            patched = read_image(output_path)
+        except Exception:  # noqa: BLE001 -- optional model boundary; retain protected pixels
+            self.warnings.append("Local inpaint unavailable; using one OpenCV ink-only patch")
+            patched = cv2.inpaint(image, authorized, 3, cv2.INPAINT_TELEA)
+        patched[authorized == 0] = image[authorized == 0]
+        write_image(output_path, patched)
+        self.last_strategies = [{"strategy": self.provider.name, "mask": "tight-text-only", "authorizedPixels": int(np.count_nonzero(authorized)), "protectedPixels": int(np.count_nonzero(protected_mask)), "passes": 1}]
+        return output_path
+
     def create_mask(self, image_path: Path, regions: list[OCRResult]) -> np.ndarray:
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            raise FileNotFoundError(image_path)
-        mask = np.zeros_like(image, dtype=np.uint8)
+        from app.services.reconstruction.object_first import read_image, tight_text_mask
+        image = read_image(image_path)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
         for region in regions:
             x1, y1, x2, y2 = region.bbox
-            pad_x = max(2, int((x2 - x1) * 0.06))
-            pad_y = max(2, int((y2 - y1) * 0.25))
-            points = [max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y)), min(image.shape[1] - 1, int(x2 + pad_x)), min(image.shape[0] - 1, int(y2 + pad_y))]
-            cv2.rectangle(mask, (points[0], points[1]), (points[2], points[3]), 255, -1)
-        if regions:
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.dilate(mask, kernel, iterations=1)
+            mask |= tight_text_mask(image, {"x": x1, "y": y1, "width": x2-x1, "height": y2-y1})
         return mask
 
     def restore_background(self, image_path: Path, regions: list[OCRResult], output_path: Path, preserve_regions: list[list[float]] | None = None) -> Path:
-        restored, self.last_strategies = restore_with_strategy(image_path, regions, output_path, preserve_regions)
-        self.last_stats = {
-            "ghostingRegionsDetected": sum(1 for item in self.last_strategies if item.get("ghostingDetected")),
-            "ghostingRegionsRecleaned": sum(1 for item in self.last_strategies if item.get("ghostingRecleaned")),
-        }
-        return restored
+        # Legacy caller supplied no ownership proof. Deny destructive processing.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image_path, output_path)
+        self.warnings.append("Background deletion denied: replacement ownership required")
+        self.last_strategies = []
+        return output_path
 
     def reclean_background(self, background_path: Path, bboxes: list[list[float]]) -> int:
-        count = reclean_with_strategy(background_path, bboxes)
-        self.last_stats["ghostingRegionsDetected"] += count
-        self.last_stats["ghostingRegionsRecleaned"] += count
-        return count
+        self.warnings.append("Repeated bbox inpaint denied; revise owned objects instead")
+        return 0

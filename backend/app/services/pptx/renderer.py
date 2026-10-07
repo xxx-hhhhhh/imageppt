@@ -105,6 +105,8 @@ class PPTXRenderer:
         style = element.get("style") or {}
         if strategy in {"transparent_image", "local_image", "background_image"}:
             image_path = _path_from_src(element.get("src"))
+            if element.get("owner") in {"movable_image", "background"} and (not image_path or not image_path.is_file()):
+                raise ValueError("Required scene asset missing; export cancelled instead of dropping visual content")
             if image_path and image_path.exists():
                 picture = slide.shapes.add_picture(str(image_path), x, y, width=width, height=height)
                 crop = element.get("crop") or {}
@@ -129,7 +131,7 @@ class PPTXRenderer:
             paragraph.line_spacing = float(style.get("lineSpacing", 1.12))
             run = paragraph.add_run()
             lines = element.get("lines") or []
-            text = "\n".join(str(line.get("text", "")) for line in lines) if lines else (element.get("text") or "")
+            text = (element.get("text") or "") if element.get("owner") == "editable_text" else "\n".join(str(line.get("text", "")) for line in lines) if lines else (element.get("text") or "")
             fit = fit_textbox(
                 text,
                 float(element.get("width", 1)),
@@ -171,8 +173,11 @@ class PPTXRenderer:
             shape.fill.transparency = max(0, min(100, int((1 - float(style.get("opacity", 1))) * 100)))
         except Exception:
             pass
-        shape.line.color.rgb = _rgb(style.get("stroke"), "#17365D")
-        shape.line.width = Pt(max(0.5, float(style.get("strokeWidth", 1))))
+        if float(style.get("strokeWidth", 1)) <= 0:
+            shape.line.fill.background()
+        else:
+            shape.line.color.rgb = _rgb(style.get("stroke"), "#17365D")
+            shape.line.width = Pt(float(style.get("strokeWidth", 1)) * sx * 72)
 
 
 def _default_strategy(kind: str | None) -> str:

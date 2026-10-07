@@ -207,7 +207,7 @@ def get_slide(project_id: str, page: int) -> LayoutJSON:
 def update_slide(project_id: str, page: int, layout: LayoutJSON) -> LayoutJSON:
     _get_project(project_id)
     store.save_slide(project_id, page, layout.model_dump(mode="json"))
-    return layout
+    return LayoutJSON.model_validate(store.get_slide(project_id, page))
 
 
 @app.post("/api/projects/{project_id}/export/pptx")

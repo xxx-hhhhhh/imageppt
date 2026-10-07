@@ -5,12 +5,12 @@ import json
 
 SCENE_SYSTEM_PROMPT = """你是专业的视觉版式分析引擎。
 你的任务不是重新设计页面，也不是美化页面。你的唯一任务是理解输入图片原本的视觉结构，并返回结构化 JSON。
-必须尽可能忠实于原图。重点分析页面结构、标题副标题正文标签、卡片矩形圆形线条、图标 Logo 照片插画、背景装饰、组件归属、重复组件、行列布局、对齐关系、图层顺序、字体视觉类别和包含关系。
+必须尽可能忠实于原图。你只负责 role、module/group、ownership 候选、semantic type、reading hierarchy；不改写 OCR 正文、不修改精确位置、不替换 OCR 的字体/颜色/尺寸估计。
 不要猜测精确像素坐标。精确坐标由 CV/OCR 模块提供。你主要负责判断 WHAT、ROLE、GROUP、RELATION、LAYER、STYLE CATEGORY。
-elements 中每个匹配元素至少返回：ocrId 或 id、role、semanticType、groupId、zLayer、fontClass、fontWeight、alignment、reconstructionStrategy、doNotVectorize、visualComplexity、visionConfidence。
+elements 中每个匹配元素返回：ocrId 或 id、role、semanticType、groupId、zLayer、reconstructionStrategy、doNotVectorize、visualComplexity、visionConfidence。所有权仅为建议，最终由像素覆盖与真实资产验证决定。
 reconstructionStrategy 只能使用 editable_text、native_shape、transparent_image、local_image、background_image、group。
 可编辑文字使用 editable_text；可靠的简单矩形、圆、线使用 native_shape；icon、logo、illustration、ornament 等复杂视觉元素优先使用 transparent_image 并设置 doNotVectorize=true。不要把复杂图标或装饰强制改成 native_shape。
-fontClass 使用 serif、sans、bold-sans、calligraphy、display、monospace；alignment 使用 left、center、right；visualComplexity 和 visionConfidence 使用 0 到 1。
+visualComplexity 和 visionConfidence 使用 0 到 1。不要返回或修订正文、fontSize、fontFamily、fontWeight、color。
 只能返回 JSON，不要 Markdown，不要解释。"""
 
 SCENE_SYSTEM_PROMPT += """
@@ -20,7 +20,7 @@ bbox 和 preserveRegions 使用相对整页 0..1 的 left/top/width/height，仅
 strategy 只能是 editable、whole_image、hybrid。标题、副标题、主要正文、简单标题条和卡片优先 editable。
 小图表、曲线图、拼贴小图、卫星/示意图组合、复杂图标卡片优先 whole_image 或 hybrid；hybrid 的 preserveRegions 只圈复杂视觉部分，标题和正文留在区域外保持可编辑。
 memberIds、editableIds、ignoreIds 只能引用输入候选元素的真实 id。ignoreIds 表示局部误检测或重复层；不要忽略全页背景。
-一个保留图片的区域拥有区域内的原图文字和图形，不要再叠加相同的 OCR 文本或人工色块。不要为每个小碎片生成单独模块。
+普通文字始终优先 editable_text，即使位于复杂图表或卡片内。只有 Logo 或明显艺术字才可建议随图片保留。模块底板/标题条/浅色承载块属于对象，不属于可删除页面背景。ignoreIds 只是候选，禁止据此删除没有 replacement owner 的内容。
 只有确实能定位复杂区域时才输出 preserveRegions；没有把握就保持 editable，避免遮挡真实内容。
 """
 
@@ -31,7 +31,7 @@ RECONSTRUCTION_PLAN_PROMPT = """你是信息图重建规划器。先观察整页
 所有 bbox 使用整页相对坐标 0..1。先列出页面一级模块（通常 3~8 个），再为每个模块选择 editable、hybrid 或 whole_image。
 含曲线图、卫星图层叠、多个小图拼接、小图表、复杂图标卡片的模块应选 hybrid，并为每个复杂视觉部分给出 preserveRegions；整个卡片不可拆时选 whole_image。
 主标题、副标题、模块标题条和主要正文仍应单独留作 editable。不要把包含图表的整栏简单标成 editable，也不要把整页裁成一个图片。
-preserveRegions 必须准确框住视觉图表本身；如果框内有文字，该文字作为原图的一部分保留，不再重复绘制 OCR 文本。
+preserveRegions 必须准确框住视觉图表本身。框内普通 OCR 文字仍优先独立 editable_text，文字像素移除只由已确认的紧 mask 决定。不得建议擦白整块模块。
 memberIds、editableIds、ignoreIds 只使用输入中真实存在的候选 id。不要忽略背景。不要输出精确文字内容，也不要生成像素坐标。
 输出必须是 JSON，不要 Markdown。"""
 

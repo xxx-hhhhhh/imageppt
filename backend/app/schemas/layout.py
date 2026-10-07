@@ -50,6 +50,15 @@ class LayoutElement(BaseModel):
     groupId: str | None = None
     role: str | None = None
     componentType: str | None = None
+    owner: Literal["editable_text", "native_shape", "movable_image", "background", "intentional_ignore"] | None = None
+    bbox: dict[str, float] | None = None
+    mask: str | None = None
+    contour: list[list[list[float]]] | None = None
+    parent: str | None = None
+    source: str | None = None
+    editable: bool | None = None
+    assetPath: str | None = None
+    reconstructionStrategy: str | None = None
 
 
 class SlideSize(BaseModel):
@@ -63,8 +72,11 @@ class LayoutJSON(BaseModel):
     slide: SlideSize
     source: str | None = None
     backgroundUrl: str | None = None
+    previewUrl: str | None = None
     coordinateSystem: str = "source-pixels-left-top"
     elements: list[LayoutElement] = Field(default_factory=list)
+    sceneVersion: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectInfo(BaseModel):

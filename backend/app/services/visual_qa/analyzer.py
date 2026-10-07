@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 from app.services.pptx.renderer import _default_strategy, _path_from_src
 
 
-def _font(style: dict[str, Any], size_scale: float = 0.75) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _font(style: dict[str, Any], size_scale: float = 1.0) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     size = max(8, int(float(style.get("fontSize", 20)) * size_scale))
     family = style.get("fontFamily", "Microsoft YaHei")
     candidates = [
@@ -28,7 +28,7 @@ def _font(style: dict[str, Any], size_scale: float = 0.75) -> ImageFont.FreeType
     return ImageFont.load_default()
 
 
-def render_preview(background_path: Path, layout: dict[str, Any], output_path: Path) -> Path:
+def render_preview(background_path: Path, layout: dict[str, Any], output_path: Path, output_root: Path | None = None) -> Path:
     base = Image.open(background_path).convert("RGBA") if background_path.exists() else Image.new("RGBA", (int(layout["slide"]["width"]), int(layout["slide"]["height"])), "white")
     draw = ImageDraw.Draw(base, "RGBA")
     for element in sorted(layout.get("elements", []), key=lambda item: item.get("zIndex", 0)):
@@ -43,7 +43,11 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
         w, h = max(1.0, float(element.get("width", 1))), max(1.0, float(element.get("height", 1)))
         style = element.get("style") or {}
         if strategy in {"transparent_image", "local_image", "background_image"}:
-            image_path = _path_from_src(element.get("src"))
+            if output_root is not None:
+                from app.services.scene.ownership import resolve_asset
+                image_path = resolve_asset(element.get("src"), output_root)
+            else:
+                image_path = _path_from_src(element.get("src"))
             if image_path and image_path.exists():
                 with Image.open(image_path) as source:
                     asset = source.convert("RGBA").resize((max(1, int(round(w))), max(1, int(round(h)))), Image.Resampling.LANCZOS)

@@ -33,7 +33,7 @@ backend/tests/tmp_debug.png
 .paddlex/
 .paddleocr/
 .cache/
-models/
+/models/
 *.onnx
 *.pt
 *.pdparams

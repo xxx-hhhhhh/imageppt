@@ -7,9 +7,11 @@ Image2EditablePPT 是一个 Windows 优先的图片转对象级可编辑 PowerPo
 目标流程：
 
 ```text
-图片 → 预处理 → OCR → 版面分析 → OCR mask → 背景修复 → Layout JSON
-     → Qwen3-VL-Flash 页面理解 → Fusion Scene Graph → React/Fabric 编辑器
-     → 保存 Layout JSON → PPTX Renderer → Visual QA/Critic → editable.pptx
+图片 → OCR + 可选 Qwen 页面语义 → SAM2/CV 分割
+     → 对象所有权校验 → 统一 Layout/Scene Graph
+     → 紧文字 mask 单次局部修补 → 透明图片 / 原生形状 / 可编辑文字
+     → 最后生成页面底板 → React/Fabric 编辑 → PPTX
+继续优化 → 对象级候选快照 → Preservation QA → 改善则提交，否则回滚
 ```
 
 项目不会把整张原图当成唯一 PPT 背景来伪装成可编辑结果。导出时会写入清理后的背景图、原生文本框、可编辑 PowerPoint Shape，以及复杂图片/插图的独立图片对象。
@@ -29,6 +31,10 @@ Image2EditablePPT 是一个 Windows 优先的图片转对象级可编辑 PowerPo
 - Layout JSON 保存
 - 对象级 PPTX 导出
 - Structural / OCR coverage / Layout validation，输出 `validation.json`
+
+Object First 重构说明见 [docs/OBJECT_FIRST.md](docs/OBJECT_FIRST.md)，实测与限制见 [docs/OBJECT_FIRST_REPORT.md](docs/OBJECT_FIRST_REPORT.md)。没有可靠 replacement owner 的视觉像素不允许被删除；未知内容保留为独立透明残余资产。可选 SAM2 使用外部模型路径，缺失时明确降级 CV，而不是冒充 SAM。
+
+安装可选分割依赖：`python -m pip install -r backend/requirements-segmentation.txt`。将官方 SAM2 权重放在 Drive 外，并通过 `SAM_MODEL_PATH` 指定，或放入 `%LOCALAPPDATA%/Image2EditablePPT/models/sam2.1_t.pt`。Ultralytics 有 AGPL/商业授权要求，部署前见 LICENSE_NOTES.md。
 
 ## 3. 系统架构
 
@@ -76,7 +82,7 @@ Image2EditablePPT/
 
 ## 8.1 Qwen3-VL-Flash 配置
 
-复制 `.env.example` 为 `.env`，只设置用户自己的 Alibaba Cloud Model Studio Workspace 配置：
+优先使用网页“AI 设置”，密钥只保存在 Drive 外的本地设置目录。也可通过当前进程的环境变量设置自己的 Alibaba Cloud Model Studio 配置；不要把真实 Key 写入项目的 .env：
 
 ```env
 VISION_PROVIDER=qwen
@@ -90,7 +96,7 @@ QWEN_MAX_RETRIES=2
 
 不要把真实 Key 写入 README、源码、日志或 Google Drive 文件。没有 Key 时，系统自动回退到 OCR + OpenCV。连接状态可通过 `GET /api/vision/status` 查看，连接测试使用 `POST /api/vision/test`。
 
-网页顶部的“AI设置 / API Key”可以选择自动免费、Gemini 2.5 Flash、Gemini 2.5 Flash-Lite、Qwen3-VL-Flash、OpenRouter Free、自定义 OpenAI-compatible 或本地模式，并分别填写、保存和测试各 Provider。API Key 只保存到 Windows `%LOCALAPPDATA%/Image2EditablePPT/settings.json`，不会写入项目目录；接口只返回掩码后的 Key。自动免费模式按已配置且允许自动使用的 Provider 路由，并记录每页实际使用模型和 fallback 次数。
+网页顶部“AI设置 / API Key”支持当前 Qwen3-VL-Flash 与本地模式，保留连接测试和 LaMa 状态。API Key 只保存到 Windows `%LOCALAPPDATA%/Image2EditablePPT/settings.json`，不会写入项目目录；接口只返回掩码后的 Key。
 
 ## 9. 使用方法
 

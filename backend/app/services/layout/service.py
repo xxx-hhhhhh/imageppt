@@ -13,6 +13,11 @@ class LayoutService:
     def __init__(self) -> None:
         self.last_stats = {"textBlocksMerged": 0, "singleLinePreserved": 0, "wholeBadgeAssets": 0, "duplicateElementsRemoved": 0, "badgeForegroundTransparentExtractions": 0, "badgeSyntheticBackgroundsSuppressed": 0, "duplicateBadgeLayersRemoved": 0}
 
+    def build_object_candidates(self, image_path: Path, width: int, height: int, ocr_results: list[OCRResult], background_url: str | None, asset_dir: Path | None) -> tuple[dict, list[OCRResult]]:
+        """Unmodified OCR IDs plus shape proposals. No crops, merging or suppression."""
+        elements = detect_text_elements(ocr_results) + detect_simple_shapes(image_path, ocr_results)
+        return {"version": "1.2", "slide": {"width": width, "height": height}, "source": image_path.name, "elements": elements}, ocr_results
+
     def analyze(self, image_path: Path, background_url: str | None = None, asset_dir: Path | None = None) -> tuple[dict, list[OCRResult]]:
         from PIL import Image
         with Image.open(image_path) as image:

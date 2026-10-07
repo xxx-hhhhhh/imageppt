@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AISettingsModal } from '../components/AISettingsModal';
 import { EditorCanvas } from '../editor/EditorCanvas';
 import { PageList } from '../components/PageList';
@@ -25,7 +25,7 @@ export function EditorPage() {
   }, [project?.id, slides.length]);
   const page = slides[activePage];
   const handle = async (operation: () => Promise<void>) => { try { setError(''); await operation(); } catch (err) { setError(err instanceof Error ? err.message : '操作失败'); } };
-  const saveCurrent = (next: LayoutJSON) => { updateActive(() => next); };
+  const saveCurrent = useCallback((next: LayoutJSON) => { updateActive(() => next); }, [updateActive]);
   const exportPpt = async () => { const url = await exportProject(); window.open(url, '_blank'); };
   const comparisonFile = viewMode === 'original' ? 'original.png' : 'difference.png';
 

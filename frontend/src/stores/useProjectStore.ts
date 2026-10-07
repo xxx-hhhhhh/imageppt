@@ -54,18 +54,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   analyze: async () => {
     const project = get().project;
     if (!project) return;
-    set({ busy: true, message: '正在进行 OCR、版面分析和背景修复…' });
+    set({ busy: true, message: get().slides.length ? '正在评估对象级候选版本，退化会自动回滚…' : '正在识别文字、提取视觉对象并验证所有权…' });
+    try {
+    // Protect manual edits before requesting a non-destructive revision.
+    for (const [index, slide] of get().slides.entries()) await saveSlide(project.id, index + 1, slide);
     const result = await analyzeProject(project.id, get().conversionMode);
     const aiLabel = result.aiUsed ? `AI：${result.visionModel || result.visionProvider || '视觉模型'}` : 'AI：基础模式';
     const fallbackLabel = result.fallbackCount ? ` · 已自动切换 ${result.fallbackCount} 次` : '';
     set({ project: result.project, slides: result.slides, activePage: 0, busy: false, message: result.warnings.length ? `OCR：${result.ocrProvider || result.provider} · ${aiLabel}${fallbackLabel} · ${result.warnings[0]}` : `OCR：${result.ocrProvider || result.provider} · ${aiLabel}${fallbackLabel}` });
+    } finally { set({ busy: false }); }
   },
   setConversionMode: (conversionMode) => set({ conversionMode }),
   persistPage: async (page, layout) => {
     const project = get().project;
     if (!project) return;
-    await saveSlide(project.id, page + 1, layout);
-    set((state) => ({ slides: state.slides.map((item, index) => index === page ? layout : item) }));
+    const saved = await saveSlide(project.id, page + 1, layout);
+    // A response to an earlier save must not overwrite edits made while it was pending.
+    set((state) => ({ slides: state.slides.map((item, index) => index === page && item === layout ? saved : item) }));
   },
   updateActive: (updater) => set((state) => ({ slides: state.slides.map((item, index) => index === state.activePage ? updater(clone(item)) : item) })),
   setSelection: (selectedIds) => set({ selectedIds }),
@@ -120,8 +125,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const project = get().project;
     if (!project) throw new Error('项目尚未创建');
     set({ busy: true, message: '正在生成对象级可编辑 PPTX…' });
-    const result = await exportPptx(project.id);
-    set({ busy: false, message: 'PPTX 导出完成' });
-    return result.downloadUrl;
+    try {
+      for (const [index, slide] of get().slides.entries()) await saveSlide(project.id, index + 1, slide);
+      const result = await exportPptx(project.id);
+      set({ message: 'PPTX 导出完成' });
+      return result.downloadUrl;
+    } finally { set({ busy: false }); }
   },
 }));

@@ -6,9 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
+from app.services.ocr.provider import OCRResult
 
 from app.services.reconstruction import pipeline as pipeline_module
+from app.services.reconstruction import revisions as revisions_module
 from app.services.reconstruction.pipeline import ReconstructionPipeline
 from app.services.reconstruction.router import ReconstructionRouter
 
@@ -30,7 +32,7 @@ class FakeOCR:
     warnings: list[str] = []
 
     def recognize(self, image_path: Path) -> list:
-        return []
+        return [OCRResult("OCR original text", [10, 12, 170, 42], 0.95, {"fontSize": 20, "color": "#111111", "fontWeight": 400})]
 
 
 class FakeInpainting:
@@ -163,6 +165,11 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool
     image_path = tmp_path / ("ai.png" if ai_enabled else "local.png")
     fixture_path = Path(__file__).parent / "assets" / "component_component_0001.png"
     shutil.copy2(fixture_path, image_path)
+    with Image.open(image_path) as original:
+        test_image = original.convert("RGB").resize((320, 180))
+    ImageDraw.Draw(test_image).rectangle((10, 12, 170, 42), fill="white")
+    ImageDraw.Draw(test_image).text((12, 14), "OCR original text", fill="#111111")
+    test_image.save(image_path)
     output_root = tmp_path / "outputs"
 
     def fake_preprocess(source: Path, destination: Path) -> tuple[int, int]:
@@ -182,6 +189,7 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool
     monkeypatch.setattr(pipeline_module, "preprocess_image", fake_preprocess)
     monkeypatch.setattr(pipeline_module, "render_preview", fake_render_preview)
     monkeypatch.setattr(pipeline_module, "run_visual_qa", lambda *args, **kwargs: {"overall": 1.0})
+    monkeypatch.setattr(revisions_module, "run_visual_qa", lambda *args, **kwargs: {"overall": 1.0})
     monkeypatch.setattr(pipeline_module, "PPTXRenderer", lambda: FakePPTXRenderer(output_root))
 
     pipeline = object.__new__(ReconstructionPipeline)
@@ -216,25 +224,20 @@ def _run_pipeline(monkeypatch, tmp_path: Path, ai_enabled: bool, with_plan: bool
 
 def test_standard_mode_applies_qwen_strategy_and_one_critic_round(monkeypatch, tmp_path: Path) -> None:
     slides, report, debug = _run_pipeline(monkeypatch, tmp_path, True)
-    element = slides[0]["elements"][0]
+    element = next(item for item in slides[0]["elements"] if item["type"] == "text")
     assert element["text"] == "OCR original text"
     assert element["role"] == "main_title"
     assert element["groupId"] == "hero"
-    assert element["visionConfidence"] == 0.92
+    assert element["owner"] == "editable_text"
     assert element["metadata"]["reconstructionStrategy"] == "editable_text"
-    assert element["style"]["fontClass"] == "serif"
-    assert element["style"]["fontRole"] == "main_title"
-    assert element["style"]["fontWeight"] == 700
+    assert element["style"]["fontWeight"] == 400  # OCR style, no VLM rewrite
     assert 0 <= element["x"] <= slides[0]["slide"]["width"] - element["width"]
-    assert element["style"]["refinedFontSize"] == element["style"]["fontSize"]
-    assert abs(element["style"]["fontSizeAdjustment"]) <= element["style"]["estimatedFontSize"] * 0.15
+    assert element["metadata"]["rawOCRBBox"] == [10, 12, 170, 42]
     assert report["aiUsed"] is True
-    assert report["visionMatchedElements"] == 1
-    assert report["aiStrategiesApplied"] == 1
     assert report["criticRounds"] == 1
-    assert report["criticAdjustmentsApplied"] == 1
-    assert report["typographyRefined"] is True
-    assert report["fontRoleAssignments"] == 1
+    assert report["criticAdjustmentsApplied"] == 0  # unchanged QA -> rollback
+    assert report["typographyRefined"] is False
+    assert slides[0]["metadata"]["lastRevision"]["status"] == "rolled_back"
     assert debug == {
         "provider": "qwen",
         "model": "qwen3-vl-flash",
@@ -261,14 +264,11 @@ def test_local_mode_reports_no_ai_strategy_or_critic_round(monkeypatch, tmp_path
     assert debug["rawResponseAvailable"] is False
 
 
-def test_main_pipeline_applies_page_plan_and_reports_owned_region(monkeypatch, tmp_path: Path) -> None:
+def test_main_pipeline_does_not_allow_vlm_module_plan_to_suppress_ocr(monkeypatch, tmp_path: Path) -> None:
     slides, report, _ = _run_pipeline(monkeypatch, tmp_path, True, with_plan=True)
     elements = {item["id"]: item for item in slides[0]["elements"]}
-    assert report["plannedModules"] == 1
-    assert report["wholeImageRegions"] == 1
-    assert report["plannerSuppressedElements"] >= 1
-    assert elements["chart_fragment"]["metadata"]["suppressed"] is True
-    asset = next(item for item in elements.values() if item["id"].startswith("planner_page_1_region_"))
-    assert asset["metadata"]["reconstructionStrategy"] == "local_image"
-    assert asset["groupId"] == "chart_panel"
+    assert report["plannedModules"] == 0
+    assert report["plannerSuppressedElements"] == 0
+    assert all(not item.get("metadata", {}).get("suppressed") for item in elements.values())
+    assert any(item["owner"] == "movable_image" for item in elements.values())
     assert elements["text_001"]["text"] == "OCR original text"

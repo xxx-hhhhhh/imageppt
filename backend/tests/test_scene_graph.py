@@ -15,7 +15,7 @@ def test_fixture_catalog_has_twelve_distinct_families(tmp_path: Path) -> None:
     assert len({path.stem for path in fixtures}) == 12
 
 
-def test_scene_graph_and_provider_fallback(tmp_path: Path) -> None:
+def test_scene_graph_and_provider_fallback(tmp_path: Path, monkeypatch) -> None:
     image = generate(tmp_path / "fixtures")[1]
     analyzer = SceneAnalyzer("auto", "none")
     layout = {"slide": {"width": 960, "height": 540}, "elements": [{"id": "shape", "type": "roundedRectangle", "x": 30, "y": 40, "width": 200, "height": 100, "rotation": 0, "zIndex": 5, "style": {"fill": "#DCE6F1"}}]}
@@ -25,6 +25,7 @@ def test_scene_graph_and_provider_fallback(tmp_path: Path) -> None:
     assert refined["elements"][0]["bbox"]["left"] >= 0
     assert analyzer.layout_provider.name in {"opencv", "pp-structure-v3"}
     assert isinstance(warnings, list)
+    monkeypatch.setenv("SAM_MODEL_PATH", str(tmp_path / "missing-model.pt"))
     segmentation, _ = create_segmentation_provider("auto")
     assert segmentation.name == "opencv"
     vlm, _ = create_vlm_provider("none")

@@ -27,12 +27,14 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
         "layout": {"outOfBounds": [], "invalidNumbers": [], "heavyOverlaps": []},
         "warnings": [],
     }
+    exported_pages: list[list[str]] = []
     try:
         with zipfile.ZipFile(pptx_path) as archive:
             report["structural"]["zipReadable"] = archive.testzip() is None
         presentation = Presentation(str(pptx_path))
         report["structural"]["slideCount"] = len(presentation.slides)
         for slide in presentation.slides:
+            exported_pages.append([shape.text for shape in slide.shapes if getattr(shape, "has_text_frame", False) and shape.text.strip()])
             for shape in slide.shapes:
                 if getattr(shape, "has_text_frame", False) and shape.text.strip():
                     report["structural"]["textCount"] += 1
@@ -40,7 +42,7 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
                     report["structural"]["imageCount"] += 1
                 else:
                     report["structural"]["shapeCount"] += 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- malformed external PPTX is a validation failure
         report["valid"] = False
         report["warnings"].append(f"PPTX reopen failed: {exc}")
 
@@ -52,7 +54,9 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
         width = layout["slide"]["width"]
         height = layout["slide"]["height"]
         elements = layout.get("elements", [])
-        page_coverage = {"page": page_index, "recognizedText": 0, "exportedText": 0, "ratio": 1.0}
+        exported = exported_pages[page_index - 1] if page_index <= len(exported_pages) else []
+        normalized_export = ["".join(text.split()) for text in exported]
+        page_coverage = {"page": page_index, "recognizedText": 0, "exportedText": len(exported), "matchedText": 0, "missingTextIds": [], "ratio": 1.0}
         for element in elements:
             values = [element.get(key, 0) for key in ("x", "y", "width", "height", "rotation")]
             if any(not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in values):
@@ -60,8 +64,15 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
                 report["valid"] = False
             if element.get("type") != "background" and (element["x"] < -2 or element["y"] < -2 or element["x"] + element["width"] > width + 2 or element["y"] + element["height"] > height + 2):
                 report["layout"]["outOfBounds"].append({"page": page_index, "id": element.get("id")})
-            if element.get("type") == "text":
+            metadata = element.get("metadata") or {}
+            if element.get("type") == "text" and not any(metadata.get(key) for key in ("suppressed", "suppressRender", "ownedBy")):
                 page_coverage["recognizedText"] += 1
+                expected = "".join(str(element.get("text") or "").split())
+                if expected in normalized_export:
+                    page_coverage["matchedText"] += 1
+                    normalized_export.remove(expected)
+                else:
+                    page_coverage["missingTextIds"].append(element.get("id"))
         for left_index, left in enumerate(elements):
             if left.get("type") in {"background", "group"}:
                 continue
@@ -75,7 +86,11 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
                 ratio = _overlap(left, right)
                 if ratio > 0.92 and left.get("type") != "text" and right.get("type") != "text":
                     report["layout"]["heavyOverlaps"].append({"page": page_index, "left": left.get("id"), "right": right.get("id"), "ratio": round(ratio, 3)})
-        page_coverage["exportedText"] = page_coverage["recognizedText"]
+        if page_coverage["recognizedText"]:
+            page_coverage["ratio"] = round(page_coverage["matchedText"] / page_coverage["recognizedText"], 4)
+        if page_coverage["missingTextIds"]:
+            report["valid"] = False
+            report["warnings"].append(f"Page {page_index} has missing native text in reopened PPTX")
         report["ocrCoverage"].append(page_coverage)
     if report["layout"]["invalidNumbers"]:
         report["valid"] = False

@@ -1,25 +1,34 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import shutil
+import uuid
 from pathlib import Path
 
-from app.config import CONVERSION_MODE, INPAINT_PROVIDER, LAYOUT_PROVIDER, OCR_PROVIDER, OUTPUTS_DIR, SEGMENTATION_PROVIDER, VISION_PROVIDER
-from app.services.fusion.adjustment_validator import apply_safe_adjustments
+from app.config import (
+    CONVERSION_MODE,
+    INPAINT_PROVIDER,
+    LAYOUT_PROVIDER,
+    OCR_PROVIDER,
+    OUTPUTS_DIR,
+    SEGMENTATION_PROVIDER,
+    VISION_PROVIDER,
+)
 from app.models.project_store import ProjectStore
 from app.services.inpainting.service import InpaintingService
 from app.services.layout.service import LayoutService
 from app.services.ocr.service import OCRService
 from app.services.pptx import PPTXRenderer
+from app.services.preprocessing.service import preprocess_image
+from app.services.reconstruction.object_first import ObjectFirstBuilder
+from app.services.reconstruction.revisions import RevisionManager
+from app.services.scene.ownership import canonicalize, resolve_asset, scene_view
 from app.services.scene.scene_analyzer import SceneAnalyzer
 from app.services.segmentation.segmentation_provider import create_segmentation_provider
-from app.services.preprocessing.service import preprocess_image
 from app.services.visual_qa.analyzer import render_preview, run_visual_qa
-from app.services.reconstruction.router import ReconstructionRouter
-from app.services.reconstruction.planner import AIReconstructionPlanner
-from app.services.refinement import TypographyLayoutRefiner
 
 
 class ReconstructionPipeline:
@@ -28,9 +37,6 @@ class ReconstructionPipeline:
         self.layout_service = LayoutService()
         self.scene_analyzer = SceneAnalyzer(LAYOUT_PROVIDER, VISION_PROVIDER)
         self.segmentation_provider, self.segmentation_warnings = create_segmentation_provider(SEGMENTATION_PROVIDER)
-        self.reconstruction_router = ReconstructionRouter()
-        self.reconstruction_planner = AIReconstructionPlanner()
-        self.typography_layout_refiner = TypographyLayoutRefiner()
 
     def _write_json(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,42 +144,56 @@ class ReconstructionPipeline:
             "plannerSnappedRegions": 0,
             "plannerCvVisualRegions": 0,
         }
-        typography_layout_refiner = getattr(self, "typography_layout_refiner", None) or TypographyLayoutRefiner()
         for page_index, image in enumerate(record.get("images", []), start=1):
             source_path = Path(image["path"])
             page_output = project_output
+            fingerprint = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            previous = None
+            if hasattr(self.store, "get_slide"):
+                try:
+                    previous = self.store.get_slide(project_id, page_index)
+                except FileNotFoundError:
+                    pass
+            if previous and previous.get("sceneVersion") == "3.0":
+                if (previous.get("metadata") or {}).get("sourceFingerprint") != fingerprint:
+                    # Page order/source mismatch cannot authorize replacement of
+                    # a manually edited graph with a newly generated page.
+                    warnings.append(f"Page {page_index}: source mismatch; existing owned objects retained without regeneration")
+                    slides.append(previous)
+                    continue
+                # Repeated optimize is an object-only revision, never page regeneration.
+                previous = self._revise_existing(project_id, page_index, source_path, previous, conversion_mode)
+                routing = self.scene_analyzer.vision_routing
+                reconstruction_stats["aiUsed"] |= bool(routing.get("aiUsed"))
+                if routing.get("usedProvider") == "qwen":
+                    reconstruction_stats["visionProvider"] = "qwen"
+                    reconstruction_stats["visionModel"] = routing.get("usedModel")
+                self.store.save_slide(project_id, page_index, previous)
+                slides.append(previous)
+                continue
             normalized_path = page_output / "normalized" / f"page_{page_index}.png"
             width, height = preprocess_image(source_path, normalized_path)
             original_path = page_output / "original.png" if page_index == 1 else page_output / f"original_{page_index}.png"
             shutil.copy2(normalized_path, original_path)
             regions = ocr.recognize(normalized_path)
-            background_path = page_output / "backgrounds" / f"page_{page_index}.png"
+            background_path = page_output / "backgrounds" / f"page_{page_index}_{uuid.uuid4().hex[:12]}.png"
             background_url = f"/media/backgrounds/{project_id}/{background_path.name}"
-            layout, _ = self.layout_service.build_layout(normalized_path, width, height, regions, background_url, page_output / "assets")
-            preserve_regions = [
-                [float(item.get("x", 0)), float(item.get("y", 0)), float(item.get("x", 0)) + float(item.get("width", 0)), float(item.get("y", 0)) + float(item.get("height", 0))]
-                for item in layout.get("elements", [])
-                if (item.get("metadata") or {}).get("preserveAsImage")
-            ]
-            segmentation = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
-            scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, segmentation, enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            candidate_builder = getattr(self.layout_service, "build_object_candidates", self.layout_service.build_layout)
+            layout, _ = candidate_builder(normalized_path, width, height, regions, background_url, page_output / "assets")
+            scene_raw, scene_warnings = self.scene_analyzer.analyze(normalized_path, layout, regions, [], enable_vision=conversion_mode != "fast", mode="fast" if conversion_mode == "fast" else "high" if conversion_mode in {"high_quality", "maximum"} else "standard")
+            if hasattr(self.segmentation_provider, "set_prompt_regions"):
+                self.segmentation_provider.set_prompt_regions((scene_raw.get("vision") or {}).get("regions") or [])
+            segmentation = self.segmentation_provider.segment(normalized_path, page_output / "assets", project_id)
+            scene_raw["segmentation"] = segmentation
             self._write_json(project_output / "vision_debug.json", self._vision_debug_payload())
-            scene_refined = self.scene_analyzer.refine(copy.deepcopy(scene_raw))
-            planner = getattr(self, "reconstruction_planner", None) or AIReconstructionPlanner()
-            planner_stats = planner.apply(scene_refined, normalized_path, page_output / "assets", project_id, page_index)
-            for key, value in planner_stats.items():
-                reconstruction_stats[key] += value
-            for item in scene_refined.get("elements", []):
-                if (item.get("metadata") or {}).get("reconstructionStrategySource") == "planner" and item.get("type") == "image":
-                    box = item["bbox"]
-                    preserve_regions.append([box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]])
-            inpainting.restore_background(normalized_path, regions, background_path, preserve_regions=preserve_regions)
-            _apply_preserved_text_ownership(layout, inpainting.last_strategies)
+            # CV/VLM candidates cannot suppress pixels. The final owner graph is built
+            # from OCR ink + verified geometry + segmentation + exact residual assets.
+            layout = ObjectFirstBuilder(OUTPUTS_DIR).build(normalized_path, layout, scene_raw, regions, segmentation, project_id, page_index, background_path, inpainting)
+            scene_refined = scene_view(layout)
             for key in ("textBlocksMerged", "wholeBadgeAssets", "duplicateElementsRemoved", "badgeForegroundTransparentExtractions", "badgeSyntheticBackgroundsSuppressed", "duplicateBadgeLayersRemoved"):
                 reconstruction_stats[key] += int(getattr(self.layout_service, "last_stats", {}).get(key, 0))
             for key in ("ghostingRegionsDetected", "ghostingRegionsRecleaned"):
                 reconstruction_stats[key] += int(getattr(inpainting, "last_stats", {}).get(key, 0))
-            self.reconstruction_router.apply(scene_refined.get("elements", []))
             routing = self.scene_analyzer.vision_routing
             reconstruction_stats["aiUsed"] = reconstruction_stats["aiUsed"] or bool(routing.get("aiUsed"))
             if routing.get("usedProvider") == "qwen":
@@ -187,12 +207,16 @@ class ReconstructionPipeline:
                 for item in scene_refined.get("elements", [])
                 if (item.get("metadata") or {}).get("reconstructionStrategySource") == "vision"
             )
-            layout = self._apply_refined_scene(layout, scene_refined)
-            layout, typography_stats = typography_layout_refiner.refine(layout)
+            # Typography heuristics must not move/resize OCR geometry before extraction.
+            typography_stats = {"typographyRefined": False, "fontRoleAssignments": 0, "fontFamilyAdjustments": 0, "fontSizeAdjustments": 0, "textPositionAdjustments": 0, "textboxResizeAdjustments": 0, "singleLinePreserved": 0, "pageAlignmentAdjustments": 0}
             reconstruction_stats["typographyRefined"] = bool(reconstruction_stats["typographyRefined"]) or bool(typography_stats["typographyRefined"])
             for key in ("fontRoleAssignments", "fontFamilyAdjustments", "fontSizeAdjustments", "textPositionAdjustments", "textboxResizeAdjustments", "singleLinePreserved", "pageAlignmentAdjustments"):
                 reconstruction_stats[key] += int(typography_stats[key])
             layout.setdefault("metadata", {}).update({"conversionMode": conversion_mode, "sceneProvider": self.scene_analyzer.layout_provider.name, "layoutProvider": self.scene_analyzer.layout_provider.name, "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider", "none"), "visionModel": routing.get("usedModel"), "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name, "backgroundStrategies": inpainting.last_strategies, "typographyLayoutRefinement": typography_stats, "reconstructionPlan": scene_refined.get("reconstructionPlan", {})})
+            layout["metadata"]["sourceFingerprint"] = fingerprint
+            layout["metadata"]["sourceImagePath"] = str(normalized_path.resolve())
+            manager = RevisionManager(OUTPUTS_DIR, project_id, page_index)
+            _, score = manager.snapshot(layout, normalized_path, background_path, "committed")
             self._write_json(page_output / "scene_raw.json" if page_index == 1 else page_output / f"scene_raw_{page_index}.json", scene_raw)
             self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
             self._write_json(page_output / "routing.json" if page_index == 1 else page_output / f"routing_{page_index}.json", routing)
@@ -203,24 +227,23 @@ class ReconstructionPipeline:
             critic_reports: list[dict] = []
             if critic_rounds and routing.get("usedProvider") not in {None, "none", "local"}:
                 for round_index in range(critic_rounds):
-                    critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
+                    try:
+                        critic = self.scene_analyzer.vision_provider.critique_reconstruction(normalized_path, preview_path, scene_refined)
+                    except Exception:  # noqa: BLE001 -- optional critic must not destroy the graph
+                        critic = {"issues": []}
+                        warnings.append("Visual critic unavailable; unchanged candidate will roll back")
                     critic_reports.append(critic)
-                    ghost_boxes = _critic_ghosting_boxes(critic, layout)
-                    if ghost_boxes:
-                        recleaned = inpainting.reclean_background(background_path, ghost_boxes)
-                        reconstruction_stats["ghostingRegionsDetected"] += recleaned
-                        reconstruction_stats["ghostingRegionsRecleaned"] += recleaned
-                    scene_refined = apply_safe_adjustments(scene_refined, critic)
+                    layout, score, decision = manager.revise(layout, normalized_path, background_path, critic, score)
+                    scene_refined = scene_view(layout)
                     reconstruction_stats["criticRounds"] += 1
-                    reconstruction_stats["criticAdjustmentsApplied"] += len((scene_refined.get("criticAdjustments") or {}).get("applied", []))
-                    layout = self._apply_refined_scene(layout, scene_refined)
-                    layout, _ = typography_layout_refiner.refine(layout)
+                    reconstruction_stats["criticAdjustmentsApplied"] += len((layout.get("metadata", {}).get("criticAdjustments") or {}).get("applied", [])) if decision["accepted"] else 0
                     render_preview(background_path, layout, preview_path)
                     self._write_json(page_output / f"visual_critic_{round_index + 1}.json", critic)
             if critic_reports:
                 self._write_json(page_output / "visual_critic.json", {"rounds": critic_reports})
                 self._write_json(page_output / "scene_refined.json" if page_index == 1 else page_output / f"scene_refined_{page_index}.json", scene_refined)
-            score = run_visual_qa(normalized_path, preview_path, page_output, layout)
+            score.update(run_visual_qa(normalized_path, preview_path, page_output, layout))
+            layout["metadata"]["preservationQA"] = score
             self._write_json(page_output / "visual_score.json" if page_index == 1 else page_output / f"visual_score_{page_index}.json", score)
             self._write_json(page_output / "visual_validation.json" if page_index == 1 else page_output / f"visual_validation_{page_index}.json", score)
             warnings.extend(scene_warnings)
@@ -272,7 +295,34 @@ class ReconstructionPipeline:
             })
         warnings.extend(ocr.warnings)
         warnings.extend(inpainting.warnings)
+        warnings.extend(getattr(self.segmentation_provider, "warnings", []))
         return slides, ocr.provider_name, sorted(set(warnings))
+
+    def _revise_existing(self, project_id: str, page: int, source: Path, layout: dict, mode: str) -> dict:
+        background = resolve_asset(layout.get("backgroundUrl"), OUTPUTS_DIR)
+        if not background or not background.is_file():
+            raise ValueError("Previous revision background missing; original project retained")
+        original = Path((layout.get("metadata") or {}).get("sourceImagePath") or OUTPUTS_DIR / project_id / "normalized" / f"page_{page}.png")
+        if not original.is_file():
+            original = source
+        manager = RevisionManager(OUTPUTS_DIR, project_id, page)
+        previous, qa = manager.snapshot(layout, original, background, "baseline")
+        critic = {"issues": []}
+        if mode != "fast":
+            try:
+                critic = self.scene_analyzer.vision_provider.critique_reconstruction(original, previous / "preview.png", scene_view(layout))
+                critic["aiUsed"] = critic.get("aiUsed", critic.get("provider") == "qwen")
+                critic["model"] = critic.get("model") or getattr(self.scene_analyzer.vision_provider, "model_name", None)
+            except Exception as exc:  # noqa: BLE001 -- record failure; empty candidate rolls back
+                layout["metadata"]["revisionWarning"] = f"Critic unavailable ({type(exc).__name__}); original objects retained"
+        layout, qa, _decision = manager.revise(layout, original, background, critic, qa)
+        layout["metadata"]["preservationQA"] = qa
+        self.scene_analyzer.vision_routing = {"usedProvider": critic.get("provider", "local"), "usedModel": critic.get("model"), "aiUsed": bool(critic.get("aiUsed")), "requestedProvider": "qwen", "fallbackCount": 0}
+        root = OUTPUTS_DIR / project_id
+        self._write_json(root / ("scene_refined.json" if page == 1 else f"scene_refined_{page}.json"), scene_view(layout))
+        self._write_json(root / ("visual_validation.json" if page == 1 else f"visual_validation_{page}.json"), qa)
+        render_preview(background, layout, root / ("reconstructed_preview.png" if page == 1 else f"reconstructed_preview_{page}.png"))
+        return canonicalize(layout)
 
 
 def _redact_debug_text(value: object) -> str:
@@ -282,51 +332,3 @@ def _redact_debug_text(value: object) -> str:
     message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", message)
     message = re.sub(r"://[^/@\s]+@", "://[redacted]@", message)
     return message[:1000]
-
-
-def _critic_ghosting_boxes(critic: dict, layout: dict) -> list[list[float]]:
-    by_id = {str(item.get("id")): item for item in layout.get("elements", [])}
-    boxes: list[list[float]] = []
-    for issue in critic.get("issues", []) if isinstance(critic, dict) else []:
-        problem = str(issue.get("problem") or "").lower()
-        ghosting = bool(issue.get("oldTextGhosting")) or problem == "oldtextghosting"
-        if not ghosting:
-            continue
-        element = by_id.get(str(issue.get("elementId") or issue.get("element_id") or ""))
-        if not element or element.get("type") != "text":
-            continue
-        metadata = element.get("metadata") or {}
-        raw = metadata.get("rawOCRBBox")
-        if isinstance(raw, list) and len(raw) == 4:
-            boxes.append([float(value) for value in raw])
-        else:
-            x, y = float(element.get("x", 0)), float(element.get("y", 0))
-            boxes.append([x, y, x + float(element.get("width", 0)), y + float(element.get("height", 0))])
-    return boxes
-
-
-def _apply_preserved_text_ownership(layout: dict, strategies: list[dict]) -> None:
-    preserved = [item.get("bbox") for item in strategies if item.get("sourceContentPreserved") and item.get("reconstructionStrategy") == "preserve_complex_text"]
-    for element in layout.get("elements", []):
-        if element.get("type") != "text":
-            continue
-        metadata = element.setdefault("metadata", {})
-        raw = metadata.get("rawOCRBBox")
-        if not isinstance(raw, list) or len(raw) != 4:
-            continue
-        if any(_bbox_overlap_ratio(raw, bbox) >= 0.55 for bbox in preserved if isinstance(bbox, list) and len(bbox) == 4):
-            metadata.update({
-                "preserveAsImage": True,
-                "sourceContentPreserved": True,
-                "willReconstruct": False,
-                "suppressRender": True,
-                "reconstructionStrategy": "group",
-                "reconstructionStrategySource": "background-preservation",
-            })
-
-
-def _bbox_overlap_ratio(left: list[float], right: list[float]) -> float:
-    lx1, ly1, lx2, ly2 = map(float, left)
-    rx1, ry1, rx2, ry2 = map(float, right)
-    overlap = max(0.0, min(lx2, rx2) - max(lx1, rx1)) * max(0.0, min(ly2, ry2) - max(ly1, ry1))
-    return overlap / max(1.0, (lx2 - lx1) * (ly2 - ly1))

@@ -1,5 +1,11 @@
 # 开发报告
 
+## 当前版本：2026-10-07 Object First 重构
+
+当前实现、文件清单、真实回归结果与尚未完成的高保真问题见 [docs/OBJECT_FIRST_REPORT.md](docs/OBJECT_FIRST_REPORT.md)。下文保留最初阶段历史报告，旧的 bbox 背景清洗描述、依赖状态与 2 项测试结果不代表当前版本。
+
+当前主流程已替换为对象所有权优先、背景最后处理；无可靠 replacement owner 禁止删除；未知视觉保留为独立透明资产。Backend pytest 85 passed；前端 TypeScript + Vite build 通过；真实浏览器编辑、拖动、缩放、导出通过。复杂页仍存在文字残影、字体误差及大残余资产，不能宣称已完成全量高保真验收。
+
 ## 1. 已完成内容
 
 - 创建统一的 Image2EditablePPT Web 项目。

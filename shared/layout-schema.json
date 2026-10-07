@@ -16,7 +16,10 @@
     },
     "source": { "type": "string" },
     "backgroundUrl": { "type": ["string", "null"] },
+    "previewUrl": { "type": ["string", "null"] },
     "coordinateSystem": { "type": "string" },
+    "sceneVersion": { "type": ["string", "null"] },
+    "metadata": { "type": "object" },
     "elements": {
       "type": "array",
       "items": {
@@ -37,6 +40,15 @@
           "groupId": { "type": ["string", "null"] },
           "role": { "type": ["string", "null"] },
           "componentType": { "type": ["string", "null"] },
+          "owner": { "enum": ["editable_text", "native_shape", "movable_image", "background", "intentional_ignore", null] },
+          "bbox": { "type": ["object", "null"] },
+          "mask": { "type": ["string", "null"] },
+          "contour": { "type": ["array", "null"] },
+          "parent": { "type": ["string", "null"] },
+          "source": { "type": ["string", "null"] },
+          "assetPath": { "type": ["string", "null"] },
+          "editable": { "type": ["boolean", "null"] },
+          "reconstructionStrategy": { "type": ["string", "null"] },
           "metadata": { "type": "object" },
           "style": { "type": "object" }
         }
