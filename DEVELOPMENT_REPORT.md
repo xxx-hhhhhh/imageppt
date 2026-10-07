@@ -152,3 +152,25 @@ Windows setup/start/test 保持 PowerShell。Python venv、SAM 权重、前端 n
 
 下一阶段优先：OCR 字体/行高/位置一致性、文字与复杂图片的双重归属解除、按模块的分割提示和残余合并、LaMa 在线回归、PowerPoint/WPS 实际渲染对比。避免通过减白/加白掩盖这些问题。
 
+## 2026-10-07 Windows 中文路径阻断修复
+
+用户反馈真实 Drive 项目连续四次解析 HTTP 500。复现发现上传、Pillow 预处理、Qwen 页面计划均正常；同一 normalized PNG 存在且可由 Pillow/字节解码读取，但 Windows OpenCV 4.10.0 的 `cv2.imread(filename)` 在 `G:\我的云端硬盘\图片PPT\...` 返回 None，`objectize_on_white` 随后抛 FileNotFoundError。API 捕获为笼统的“页面重建失败，请重试”。此前英文 checkout 完整回归通过与 Drive 启动健康检查，未覆盖 Drive 中文路径完整解析，验收范围存在遗漏。
+
+新增 `backend/app/utils/image_io.py`，采用 Python 文件系统 I/O + OpenCV imdecode/imencode；统一替换 34 个后台模块中 164 个文件读写调用。未 monkey-patch 全局 OpenCV；图像仍采用原 BGR/BGRA、灰度、alpha、16-bit 与 codec 参数。读不到/写不了文件仍返回 None/False，Owner 门禁在资产写入/重读失败时继续拒绝清理，未关闭安全验证。
+
+新增 `test_image_io.py`：中文/空格/emoji 路径、PNG 颜色/alpha/16-bit、JPEG 参数、灰度、缺失/空/损坏文件、写入失败，以及模拟原 OpenCV filename API 全部失效后的真实对象化流程；增加静态检查防止后台再次绕过统一 I/O。既有写入失败测试改为在新 I/O 边界注入故障。浏览器验收脚本增加可选 maximum 模式与可配置等待时间，明确区分此前 standard 验收。
+
+已同步修复源文件并从 Drive 重启实际后台。保留所有用户上传、项目和持久化 Qwen/LaMa 配置；源码覆盖前备份于 `C:\Users\lenovo\AppData\Local\Image2EditablePPT\source-backups\unicode-fix-20261007-160056`。不复制 API Key、模型、venv 或 node_modules。
+
+实际复跑失败项目 `73ab92f7f89b481087140e559b5a0925` 的原图，保持 `mode=maximum&page=1&allow_fallback=false`：HTTP 200，268.7 秒；真实 PaddleOCR + Qwen + SAM2，生成 `slides/page_1.json`、预览与 `editable.pptx`（6,215,132 bytes）。PPT 重开检查：1 页、86 个原生文本、3 个原生 shape、146 个独立图片对象（含页面底板）。Owner gate：unownedPixelCount=0、missingAssetCount=0、missingVisualCount=0；editableTextCoverage=94.95%，visualAreaPreserved=100%。证据为本机 `outputs/integration-runtime/unicode_recovery.json`，真实产物在该 Drive 项目输出目录。
+
+该原项目尚未由用户确认页面，直接 POST export 返回 409“请先逐页确认全部重建结果”，属于既有导出门禁。未将用户项目自动标为通过。重建已实际完成且自动 PPT 文件已生成；浏览器全流程验收在独立测试项目执行。
+
+自动验证：Backend 394 passed、2 个依赖弃用警告；新文件 lint 与后台致命错误检查通过；TypeScript/Vite production build 通过。最高质量重建文件生成阻断已解决，文字重影、字体与位置的高保真问题仍属于前节列出的限制。
+
+Drive 实际浏览器完整验收也通过：独立项目 `2d04cec73cbc41139cdd2566db06e229` 上传同一张失败原图，真实 `maximum/allow_fallback=false` 请求，PaddleOCR + Qwen + SAM2 → 双击改字、字号颜色、拖动缩放 → 保存 → 确认本页 → POST 导出与 GET 下载均 HTTP 200。下载 PPT 重开确认修改后的文字为原生文本，无浏览器错误或资产 404；截图已人工检查。证据在该 Drive 项目的 `browser_acceptance.json`、`browser_before_edit.png`、`browser_after_edit.png`、`browser_acceptance.pptx`。本次不再用英文路径或 standard 模式替代 Drive 最高质量验收。
+
+PowerPoint 以只读方式实际打开用户失败项目重建后的 Drive `editable.pptx`，确认 1 页、86 文本、3 shape、146 图片；中文路径与原生对象可用。修复后运行日志的 findDecoder 中文路径警告数量为 0。
+
+实现 commit `cd223d0763991dcab86d3ffaac623857cedf292e`，仍在 `codex/object-first-main-integration`；验收记录追加提交。用户原项目没有自动标为通过，原图及既有上传均保留。源码与报告继续保存于同一 Google Drive 项目。
+
