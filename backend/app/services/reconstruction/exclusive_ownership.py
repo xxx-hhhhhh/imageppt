@@ -106,8 +106,13 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             continue
         hints = semantic.get(item["id"]) or {}
         diagnostics = {}
-        candidate = _text_candidate(source, item, hints, diagnostics)
-        if candidate is not None and not np.any(ink & candidate[1]):
+        from app.services.reconstruction.mixed_text import restore_text_candidates
+        candidates = restore_text_candidates(source,item,hints,diagnostics)
+        restored_ids=[]
+        editable_characters=0
+        for candidate in candidates:
+            if np.any(ink & candidate[1]):
+                continue
             element, mask, fill = candidate
             element["role"] = hints.get("role") or element.get("role")
             element["groupId"] = hints.get("groupId")
@@ -118,11 +123,13 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             # in dense text. The card itself is never an authorized erase mask.
             cleaned[mask] = fill[mask]
             element["metadata"]["textRepairStrategy"] = "owner_gated_measured_local_paper"
-            decision = "editable_text"
-        else:
-            decision = "movable_image"
+            restored_ids.append(element['id'])
+            editable_characters += len(str(element.get('text') or ''))
+        decision = "editable_text" if restored_ids else "movable_image"
         text_decisions.append({"id": item["id"], "text": item.get("text"), "bbox": list(box_of(item, w, h) or ()),
-                               "decision": decision, "reason": diagnostics.get("reason"), "evidence": diagnostics})
+                               "decision": decision,"editableSpanIds":restored_ids,
+                               "editableCharacterCount":editable_characters,"sourceCharacterCount":len(str(item.get('text') or '')),
+                               "reason": diagnostics.get("reason"), "evidence": diagnostics})
 
     # Native geometry needs pixel evidence, not a VLM label or guessed colour.
     # Only fully uniform, axis-aligned rectangles pass this first safety gate.

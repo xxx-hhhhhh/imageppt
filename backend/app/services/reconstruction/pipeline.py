@@ -182,18 +182,24 @@ class ReconstructionPipeline:
             raise ValueError(f"Candidate loses or changes {outside_text_changed} non-text pixels; no commit allowed")
         detected = len(layout["metadata"]["ownershipAudit"]["textDecisions"])
         editable = sum(e.get("owner") == "editable_text" for e in layout["elements"])
+        decisions = layout["metadata"]["ownershipAudit"]["textDecisions"]
+        editable_lines = sum(d.get('editableCharacterCount',0)==d.get('sourceCharacterCount',1) for d in decisions)
+        source_chars = sum(d.get('sourceCharacterCount',0) for d in decisions)
+        editable_chars = sum(d.get('editableCharacterCount',0) for d in decisions)
         reliable_ocr = sum(e.get("type") == "text" and float(e.get("confidence") or 0)>=.9 for e in ocr_layout["elements"])
         if reliable_ocr and not editable:
             raise ReconstructionQualityError("检测到了可靠文字，但尚未生成原生文本框。候选已保留，当前结果没有被覆盖；本次不能标记为可编辑重建成功。")
         score = run_visual_qa(normalized, preview, candidate, layout)
-        score.update({"editableTextCoverage": editable/max(1,detected), "detectedTextCount": detected,
+        score.update({"editableTextCoverage": editable_lines/max(1,detected), "detectedTextCount": detected,
             "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
-            "editableTextCount": editable, "nonEditableTextCount": detected-editable, "objectExtractionCoverage": 1,
+            "editableTextCount": editable_lines, "nativeTextBoxCount":editable,
+            "editableCharacterCoverage":editable_chars/max(1,source_chars),
+            "nonEditableTextCount": detected-editable_lines, "objectExtractionCoverage": 1,
             "movableVisualCoverage": 1, "visualAreaPreserved": 1, "nonTextChangedPixelCount": outside_text_changed,
             "missingVisualCount": 0, "missingAssetCount": 0, "ghostingCount": 0, "duplicateCount": 0,
             "backgroundResidualCount": 0, "shapeCount": sum(e.get("owner") == "native_shape" for e in layout["elements"]),
             "preservationChecks":preservation,"reliableOCRTextCount":reliable_ocr,
-            "nativeReliableTextCoverage":editable/max(1,reliable_ocr),
+            "nativeReliableTextCoverage":min(1,editable_lines/max(1,reliable_ocr)),
             "imageAssetCount": audit["activeImageCount"], "rasterNativeDuplicateTextCount": 0,
             "revisionRounds": 0, "revisionRound": 0, "revisionStatus": "automatic_revisions_paused",
             "issuesAfter": [], "stagnationReason": "ownership_audit_pause",

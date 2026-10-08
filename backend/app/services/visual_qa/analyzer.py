@@ -55,7 +55,12 @@ def render_preview(background_path: Path, layout: dict[str, Any], output_path: P
                 draw = ImageDraw.Draw(base, "RGBA")
             continue
         if strategy == "editable_text":
-            draw.multiline_text((x, y), element.get("text") or "", font=_font(style), fill=style.get("color", "#111827"), spacing=max(0, int(float(style.get("lineSpacing", 1.1)) * 4)), align=style.get("align", "left"))
+            if metadata.get("fontMatchingVersion")==2 and '\n' not in (element.get('text') or ''):
+                from app.services.typography.font_raster import paint_measured_text
+                paint_measured_text(base,element)
+                draw = ImageDraw.Draw(base,'RGBA')
+            else:
+                draw.multiline_text((x, y), element.get("text") or "", font=_font(style), fill=style.get("color", "#111827"), spacing=max(0, int(float(style.get("lineSpacing", 1.1)) * 4)), align=style.get("align", "left"))
         elif strategy == "native_shape" and kind in {"rectangle", "roundedRectangle"}:
             fill = style.get("fill", "#DCE6F1")
             outline = style.get("stroke", fill)

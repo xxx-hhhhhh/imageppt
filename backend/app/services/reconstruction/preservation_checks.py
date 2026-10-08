@@ -53,12 +53,16 @@ def inspect_preservation(source_path: Path, layout: dict, root: Path, preview_pa
         band = cv2.dilate(band.astype(np.uint8),np.ones((5,5),np.uint8))>0
         x,y = round(e["x"]),round(e["y"])
         visual_edges[y:y+band.shape[0],x:x+band.shape[1]] |= band
-    new_glyph_canvas = Image.new("L",(w,h))
+    new_glyph_canvas = Image.new("RGBA",(w,h))
     draw = ImageDraw.Draw(new_glyph_canvas)
     for e in local["elements"]:
         if e.get("type") == "text":
-            draw.multiline_text((e["x"],e["y"]),str(e.get("text") or ""),font=_font(e.get("style",{})),fill=255)
-    new_glyphs = np.asarray(new_glyph_canvas)>0
+            if (e.get('metadata') or {}).get('fontMatchingVersion')==2:
+                from app.services.typography.font_raster import paint_measured_text
+                paint_measured_text(new_glyph_canvas,e,'#FFFFFF')
+            else:
+                draw.multiline_text((e["x"],e["y"]),str(e.get("text") or ""),font=_font(e.get("style",{})),fill='white')
+    new_glyphs = np.asarray(new_glyph_canvas)[:,:,3]>0
     blank = {**local,"elements":[e for e in local["elements"] if e.get("type") != "text"]}
     raster_path = root / "editable_text_removed_preview.png"
     background = root / "backgrounds" / next(e["src"].split("/")[-1] for e in local["elements"] if e["type"] == "background")

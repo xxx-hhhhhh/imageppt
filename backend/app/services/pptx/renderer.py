@@ -50,17 +50,17 @@ def _set_font_family(font: Any, family: str) -> None:
     font.name = family
     # python-pptx's public API sets the latin face; Chinese text uses the East
     # Asian face in PowerPoint, so set both on the underlying run properties.
-    try:
-        rpr = font._element.get_or_add_rPr()
-        for tag in ("a:latin", "a:ea"):
-            node = rpr.find(f"{{http://schemas.openxmlformats.org/drawingml/2006/main}}{tag.split(':')[1]}")
-            if node is None:
-                from pptx.oxml.xmlchemy import OxmlElement
-                node = OxmlElement(tag)
-                rpr.append(node)
-            node.set("typeface", family)
-    except Exception:
-        pass
+    # Font._element IS a:rPr, not a run. Calling get_or_add_rPr() on it
+    # raised AttributeError and the old broad catch silently omitted East Asian
+    # faces. PowerPoint/WPS then substituted the theme font for Chinese text.
+    rpr = font._element
+    for tag in ("a:latin", "a:ea", "a:cs"):
+        node = rpr.find(f"{{http://schemas.openxmlformats.org/drawingml/2006/main}}{tag.split(':')[1]}")
+        if node is None:
+            from pptx.oxml.xmlchemy import OxmlElement
+            node = OxmlElement(tag)
+            rpr.append(node)
+        node.set("typeface", family)
 
 
 def font_px_to_pt(font_size_px: float, pixels_to_inches: float) -> float:
@@ -167,6 +167,9 @@ class PPTXRenderer:
             font.bold = int(style.get("fontWeight", 400)) >= 600
             font.italic = style.get("fontStyle", "normal") == "italic"
             font.color.rgb = _rgb(style.get("color"))
+            if style.get('letterSpacing'):
+                # DrawingML spc is hundredths of a point; CSS/Layout use pixels.
+                font._element.set('spc',str(round(float(style['letterSpacing'])*sx*72*100)))
             return
         if strategy != "native_shape":
             return

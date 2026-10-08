@@ -7,12 +7,11 @@ best editable substitute; it must not turn all normal text into screenshots.
 from __future__ import annotations
 
 import copy
-from functools import lru_cache
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from app.services.typography.font_raster import font_face, glyph_raster
 
 
 def measured_surface(patch: np.ndarray, border: int = 4) -> tuple[np.ndarray, dict] | None:
@@ -43,45 +42,66 @@ def measured_surface(patch: np.ndarray, border: int = 4) -> tuple[np.ndarray, di
     return surface,{"backgroundError95":round(error95,3),"backgroundInlierRatio":round(inliers,3),"backgroundModel":"robust_quadratic_colour_field"}
 
 
-@lru_cache(maxsize=512)
-def _load_font(filename: str, size: int):
-    return ImageFont.truetype(str(Path("C:/Windows/Fonts") / filename),size)
-
-
-def _fit_font(text: str, mask: np.ndarray, preferred: str) -> dict | None:
+def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndarray | None=None) -> dict | None:
     ys,xs = np.where(mask)
     th,tw = int(ys.max()-ys.min()+1),int(xs.max()-xs.min()+1)
     target = mask[ys.min():ys.max()+1,xs.min():xs.max()+1]
-    choices = [("SimSun","simsun.ttc",400),("Microsoft YaHei","msyh.ttc",400),
-               ("Microsoft YaHei","msyhbd.ttc",700),("Arial","arial.ttf",400),("Arial","arialbd.ttf",700),
+    soft_target = np.clip(source_alpha[ys.min():ys.max()+1,xs.min():xs.max()+1],0,1) if source_alpha is not None else target.astype(float)
+    choices = [("SimSun","simsun.ttc",400),("SimSun","simsun.ttc",700),
+               ("Microsoft YaHei","msyh.ttc",400),("Microsoft YaHei","msyhbd.ttc",700),
+               ("SimHei","simhei.ttf",400),("FangSong","simfang.ttf",400),
+               ("Arial","arial.ttf",400),("Arial","arialbd.ttf",700),
+               ("Times New Roman","times.ttf",400),("Times New Roman","timesbd.ttf",700),
                ("KaiTi","simkai.ttf",400)]
     choices.sort(key=lambda item: item[0] != preferred)
     best = None
     for family,filename,weight in choices:
         if not (Path("C:/Windows/Fonts") / filename).is_file():
             continue
-        for size in range(max(8,round(th*.85)),min(150,round(th*1.5))+1):
-            font = _load_font(filename,size)
+        # Latin-only files otherwise score their missing-CJK square glyphs.
+        if any('\u2e80' <= c <= '\u9fff' for c in text) and family in ('Arial','Times New Roman'):
+            continue
+        import unicodedata
+        punctuation=all(unicodedata.category(c).startswith('P') for c in text)
+        for size in range(max(8,round(th*.85)),min(150,round(th*(4.5 if punctuation else 1.5)))+1):
+            font = font_face(filename,size)
             bbox = font.getbbox(text)
             fw,fh = bbox[2]-bbox[0],bbox[3]-bbox[1]
-            if not fw or not fh or abs(fw-tw)/max(1,tw) > .15 or abs(fh-th)/max(1,th) > .18:
+            # Font bbox width includes advance whitespace (especially Chinese
+            # punctuation). Compare real ink below, not that whitespace.
+            if not fw or not fh or abs(fh-th)/max(1,th) > .3 or (not punctuation and abs(fw-tw)/max(1,tw) > .25):
                 continue
-            canvas = Image.new("L",(fw+8,fh+8))
-            ImageDraw.Draw(canvas).text((4-bbox[0],4-bbox[1]),text,font=font,fill=255)
-            raw = np.asarray(canvas)>24
-            py,px = np.where(raw)
-            if not len(px):
-                continue
-            cropped = raw[py.min():py.max()+1,px.min():px.max()+1]
-            normalized = cv2.resize(cropped.astype(np.uint8),(tw,th),interpolation=cv2.INTER_NEAREST)>0
-            union = np.count_nonzero(target|normalized)
-            similarity = np.count_nonzero(target&normalized)/max(1,union)
+            stroke = size/48 if filename=='simsun.ttc' and weight==700 else 0
+            raster,offset = glyph_raster(text,filename,size,stroke)
+            spacing=0.
+            if len(text)>1:
+                spacing=(tw-raster.shape[1])/(len(text)-1)
+                if abs(spacing)>size*.15:
+                    continue
+                if abs(spacing)>.15:
+                    raster,offset=glyph_raster(text,filename,size,stroke,spacing)
+                else:
+                    spacing=0.
+            cropped = raster>127
+            normalized_alpha = cv2.resize(raster.astype(float)/255,(tw,th),interpolation=cv2.INTER_AREA)
+            normalized = normalized_alpha>.5
+            target_core = soft_target>.5
+            union = np.count_nonzero(target_core|normalized)
+            similarity = np.count_nonzero(target_core&normalized)/max(1,union)
             dimension_error = abs(cropped.shape[1]-tw)/tw+abs(cropped.shape[0]-th)/th
-            rank = similarity-dimension_error*.8
+            if dimension_error>.19:
+                continue
+            # Binary low-threshold ink rewards fat strokes. Compare calibrated
+            # antialias alpha and ink density too, so normal serif is not silently
+            # changed into YaHei Bold merely for a few extra matching pixels.
+            alpha_error = float(np.mean(np.abs(soft_target-normalized_alpha)))
+            density_error = abs(float(target_core.mean())-float(normalized.mean()))
+            rank = similarity-alpha_error*.7-density_error*1.2-dimension_error*.45
             if best is None or rank > best[0]:
                 best = (rank,{"fontFamily":family,"fontFile":filename,"fontSize":size,"fontWeight":weight,
+                              "fontStrokeWidth":stroke,"letterSpacing":round(spacing,4),"fontAlphaError":round(alpha_error,4),"fontDensityError":round(density_error,4),
                               "fontMaskSimilarity":round(float(similarity),4),"fontDimensionError":round(float(dimension_error),4),
-                              "fontInkOffset":[int(bbox[0]+px.min()-4),int(bbox[1]+py.min()-4)],
+                              "fontInkOffset":list(offset),
                               "fontInkSize":[int(cropped.shape[1]),int(cropped.shape[0])]})
     if best is None:
         return None
@@ -99,7 +119,7 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
         return None
     h,w = source.shape[:2]
     x,y,iw,ih = (float(item.get(k,0)) for k in ("x","y","width","height"))
-    if not all(np.isfinite(v) for v in (x,y,iw,ih)) or min(iw,ih)<7:
+    if not all(np.isfinite(v) for v in (x,y,iw,ih)) or min(iw,ih)<3:
         return None
     pad = 6
     x1,y1,x2,y2 = max(0,round(x)-pad),max(0,round(y)-pad),min(w,round(x+iw)+pad),min(h,round(y+ih)+pad)
@@ -163,7 +183,7 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
         report["reason"] = "glyphs_cross_source_boundary"
         return None
     report["reason"] = "font_layout_does_not_fit"
-    fit = _fit_font(text,glyphs,item.get("style",{}).get("fontFamily","Microsoft YaHei"))
+    fit = _fit_font(text,glyphs,item.get("style",{}).get("fontFamily","Microsoft YaHei"),np.where(core,alpha,0))
     if fit is None:
         return None
     ys,xs = np.where(glyphs)
@@ -175,9 +195,9 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     element.update(type="text",owner="editable_text",editable=True,source="ocr",x=tx,y=ty,width=width,height=height)
     fg = np.clip(np.rint(fg),0,255).astype(np.uint8)
     element["style"] = {**element.get("style",{}),"fontFamily":fit["fontFamily"],"fontFile":fit["fontFile"],"fontSize":fit["fontSize"],
-                        "fontWeight":fit["fontWeight"],"color":"#"+"".join(f"{v:02X}" for v in fg[::-1]),"align":"left","verticalAlign":"top"}
+                        "fontWeight":fit["fontWeight"],"fontStrokeWidth":fit["fontStrokeWidth"],"letterSpacing":fit["letterSpacing"],"color":"#"+"".join(f"{v:02X}" for v in fg[::-1]),"align":"left","verticalAlign":"top"}
     element["metadata"] = {"reconstructionStrategy":"editable_text","exclusiveFontVerified":True,
-                           "nativeTextMeasured":True,"fontMeasurement":fit,"textErasureEvidence":evidence,
+                           "nativeTextMeasured":True,"fontMatchingVersion":2,"fontMeasurement":fit,"textErasureEvidence":evidence,
                            "rawOCRBBox":[round(x),round(y),round(x+iw),round(y+ih)],"originalLineCount":1}
     mask = np.zeros((h,w),bool)
     mask[y1:y2,x1:x2] = ink

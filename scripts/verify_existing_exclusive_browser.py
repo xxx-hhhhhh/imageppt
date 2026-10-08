@@ -70,14 +70,29 @@ def main():
           const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
           useProjectStore.setState({slides:[layout],selectedIds:[]});
         }""",layout)
-        image = min((e for e in layout["elements"] if e.get("owner") == "movable_image" and e['width']*e['height']>1500), key=lambda e: e["width"]*e["height"])
+        # A paper carrier can sit behind editable text. Clicking its centre
+        # correctly selects the text, not the carrier. Pick a real hit-tested
+        # image point rather than interpreting that expected behaviour as failure.
+        hit = page.evaluate("""() => {
+          for (const n of document.querySelectorAll('.visual-image')) {
+            const b=n.getBoundingClientRect(); if(b.width*b.height<1500) continue;
+            for(let y=1;y<8;y++) for(let x=1;x<8;x++) {
+              const px=b.x+b.width*x/8, py=b.y+b.height*y/8;
+              const top=document.elementFromPoint(px,py)?.closest('[data-element-id]');
+              if(top===n) return {id:n.dataset.elementId,x:px,y:py};
+            }
+          }
+          return null;
+        }""")
+        assert hit, 'No independently selectable image'
+        image = next(e for e in layout['elements'] if e['id']==hit['id'])
         node = page.locator(f'[data-element-id="{image["id"]}"]')
         expect(node).to_be_visible()
         bounds = node.bounding_box()
         assert bounds
-        page.mouse.move(bounds["x"]+bounds["width"]/2, bounds["y"]+bounds["height"]/2)
+        page.mouse.move(hit['x'],hit['y'])
         page.mouse.down()
-        page.mouse.move(bounds["x"]+bounds["width"]/2+30, bounds["y"]+bounds["height"]/2+20, steps=8)
+        page.mouse.move(hit['x']+30,hit['y']+20, steps=8)
         page.mouse.up()
         expect(node).not_to_have_css("left", f'{image["x"]}px')
         handle = node.locator(".resize-handle")
