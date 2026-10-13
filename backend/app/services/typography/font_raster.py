@@ -10,15 +10,22 @@ FONT_DIR = Path('C:/Windows/Fonts')
 
 
 @lru_cache(maxsize=1024)
-def font_face(filename: str,size: int):
+def font_face(filename: str,size: int,weight: int=400):
     if Path(filename).name != filename:
         raise ValueError('Font must be an installed face name')
-    return ImageFont.truetype(str(FONT_DIR/filename),size)
+    font = ImageFont.truetype(str(FONT_DIR/filename),size)
+    if filename in {'NotoSansSC-VF.ttf', 'NotoSerifSC-VF.ttf'}:
+        axes = font.get_variation_axes()
+        font.set_variation_by_axes([
+            max(axis['minimum'], min(axis['maximum'], weight))
+            if axis['name'] == b'Weight' else axis['default'] for axis in axes
+        ])
+    return font
 
 
-def glyph_raster(text: str,filename: str,size: int,stroke: float=0,spacing: float=0) -> tuple[np.ndarray,tuple[int,int]]:
+def glyph_raster(text: str,filename: str,size: int,stroke: float=0,spacing: float=0,weight: int=400) -> tuple[np.ndarray,tuple[int,int]]:
     scale = 4 if stroke or spacing else 1
-    font = font_face(filename,size*scale)
+    font = font_face(filename,size*scale,weight)
     bbox = font.getbbox(text)
     pad = max(8,round(stroke*scale)+4)
     image = Image.new('L',(max(1,bbox[2]-bbox[0]+round(spacing*scale*max(0,len(text)-1)))+pad*2,bbox[3]-bbox[1]+pad*2))
@@ -51,12 +58,14 @@ def paint_measured_text(base: Image.Image,element: dict,color: str | None=None) 
            'SimHei':'simhei.ttf','黑体':'simhei.ttf','FangSong':'simfang.ttf','仿宋':'simfang.ttf',
            'Microsoft YaHei':'msyhbd.ttc' if weight>=600 else 'msyh.ttc',
            'DengXian':'Dengb.ttf' if weight>=600 else 'Deng.ttf',
+           'Noto Sans SC':'NotoSansSC-VF.ttf',
+           'Noto Serif SC':'NotoSerifSC-VF.ttf',
            'Arial':'arialbd.ttf' if weight>=600 else 'arial.ttf',
            'Times New Roman':'timesbd.ttf' if weight>=600 else 'times.ttf'}
     filename=faces.get(family,style.get('fontFile','msyh.ttc'))
     size=round(style['fontSize'])
     stroke=size/48 if filename=='simsun.ttc' and weight>=600 else 0
-    alpha,offset = glyph_raster(str(element.get('text') or ''),filename,size,stroke,float(style.get('letterSpacing',0)))
+    alpha,offset = glyph_raster(str(element.get('text') or ''),filename,size,stroke,float(style.get('letterSpacing',0)),weight)
     layer = Image.new('RGBA',(alpha.shape[1],alpha.shape[0]),color or style.get('color','#111827'))
     layer.putalpha(Image.fromarray(alpha))
     x,y = round(element['x']+offset[0]),round(element['y']+offset[1])

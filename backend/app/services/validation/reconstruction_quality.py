@@ -21,6 +21,18 @@ def reconstruction_quality(layout: dict, raster_audit: dict, preservation: dict)
         issues.append({'problem':'largeRasterCarrier','sourceAreaRatio':round(largest,4)})
     if partial:
         issues.append({'problem':'fragmentedEditableLines','count':partial})
+    native = [e for e in elements if e.get('owner')=='editable_text']
+    approximate = []
+    tight = []
+    for element in native:
+        fit = element.get('metadata',{}).get('fontMeasurement',{})
+        if fit and (fit.get('fontMaskSimilarity',1)<.55 or fit.get('fontAlphaError',0)>.22):
+            approximate.append(element['id'])
+        style = element.get('style',{})
+        if style.get('letterSpacing',0)<-.055*max(1,style.get('fontSize',1)):
+            tight.append(element['id'])
+    issues.extend({'elementId':i,'problem':'approximateFontNeedsVisualReview'} for i in approximate)
+    issues.extend({'elementId':i,'problem':'excessiveNegativeTracking'} for i in tight)
     return {
         'qualityStatus':'partial_editable' if unresolved or largest>.3 else 'requires_visual_review',
         'detectedTextCount':len(decisions),'editableTextCount':complete,
@@ -35,6 +47,8 @@ def reconstruction_quality(layout: dict, raster_audit: dict, preservation: dict)
         'ghostingCount':raster_audit.get('rasterNativeDuplicateTextCount'),
         'duplicateCount':None,'rasterNativeDuplicateTextCount':raster_audit.get('rasterNativeDuplicateTextCount'),
         'imageAssetCount':len(image_nodes),'shapeCount':sum(e.get('owner')=='native_shape' for e in elements),
+        'fontApproximationWarningCount':len(approximate),'aggressiveTrackingCount':len(tight),
+        'recoveredVisualPixelCount':sum(e.get('metadata',{}).get('recoveredVisualPixelCount',0) for e in elements),
         'issuesAfter':issues,
         'metricScope':'Character coverage from authoritative OCR; missing assets and old-ink ghosts measured. Pixel ownership is NOT semantic extraction completeness. Unknown metrics are null; PowerPoint rendering needs separate review.',
     }

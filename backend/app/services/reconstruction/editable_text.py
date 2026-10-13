@@ -11,6 +11,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
 from app.services.typography.font_raster import font_face, glyph_raster
 
 
@@ -53,6 +54,8 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
     choices = [("SimSun","simsun.ttc",400),("SimSun","simsun.ttc",700),
                ("Microsoft YaHei","msyh.ttc",400),("Microsoft YaHei","msyhbd.ttc",700),
                ("DengXian","Deng.ttf",400),("DengXian","Dengb.ttf",700),
+               ("Noto Sans SC","NotoSansSC-VF.ttf",400),("Noto Sans SC","NotoSansSC-VF.ttf",700),
+               ("Noto Serif SC","NotoSerifSC-VF.ttf",400),("Noto Serif SC","NotoSerifSC-VF.ttf",700),
                ("SimHei","simhei.ttf",400),("FangSong","simfang.ttf",400),
                ("Arial","arial.ttf",400),("Arial","arialbd.ttf",700),
                ("Times New Roman","times.ttf",400),("Times New Roman","timesbd.ttf",700),
@@ -66,9 +69,9 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
         if any('\u2e80' <= c <= '\u9fff' for c in text) and family in ('Arial','Times New Roman'):
             continue
         import unicodedata
-        punctuation=all(unicodedata.category(c).startswith('P') for c in text)
+        punctuation=all(c.isspace() or unicodedata.category(c).startswith(('P','S')) for c in text)
         for size in range(max(8,round(th*.85)),min(150,round(th*(4.5 if punctuation else 1.5)))+1):
-            font = font_face(filename,size)
+            font = font_face(filename,size,weight)
             bbox = font.getbbox(text)
             fw,fh = bbox[2]-bbox[0],bbox[3]-bbox[1]
             # Font bbox width includes advance whitespace (especially Chinese
@@ -76,20 +79,31 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
             if not fw or not fh or abs(fh-th)/max(1,th) > .3 or (not punctuation and abs(fw-tw)/max(1,tw) > .25):
                 continue
             stroke = size/48 if filename=='simsun.ttc' and weight==700 else 0
-            raster,offset = glyph_raster(text,filename,size,stroke)
+            raster,offset = glyph_raster(text,filename,size,stroke,weight=weight)
             spacing=0.
             if len(text)>1:
                 spacing=(tw-raster.shape[1])/(len(text)-1)
-                if abs(spacing)>size*.15:
+                # Do not squeeze a wide substitute until adjacent glyphs collide.
+                # Positive tracking is common in headings; negative tracking
+                # needs a much tighter limit and is never a width-scale proxy.
+                if spacing < -size*.055 or spacing > size*.15:
                     continue
                 if abs(spacing)>.15:
-                    raster,offset=glyph_raster(text,filename,size,stroke,spacing)
+                    raster,offset=glyph_raster(text,filename,size,stroke,spacing,weight)
                 else:
                     spacing=0.
             cropped = raster>127
-            normalized_alpha = cv2.resize(raster.astype(float)/255,(tw,th),interpolation=cv2.INTER_AREA)
+            # Score the physical glyphs that will actually be exported. Resizing
+            # every candidate to the target used to reward undersized fonts and
+            # then export their *unscaled* glyphs, visibly changing the heading.
+            ch,cw = raster.shape
+            canvas_h,canvas_w = max(th,ch),max(tw,cw)
+            normalized_alpha = np.zeros((canvas_h,canvas_w),float)
+            normalized_alpha[:ch,:cw] = raster.astype(float)/255
+            actual_target = np.zeros_like(normalized_alpha)
+            actual_target[:th,:tw] = soft_target
             normalized = normalized_alpha>.5
-            target_core = soft_target>.5
+            target_core = actual_target>.5
             union = np.count_nonzero(target_core|normalized)
             similarity = np.count_nonzero(target_core&normalized)/max(1,union)
             if similarity < .35:
@@ -100,9 +114,9 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
             # Binary low-threshold ink rewards fat strokes. Compare calibrated
             # antialias alpha and ink density too, so normal serif is not silently
             # changed into YaHei Bold merely for a few extra matching pixels.
-            alpha_error = float(np.mean(np.abs(soft_target-normalized_alpha)))
+            alpha_error = float(np.mean(np.abs(actual_target-normalized_alpha)))
             density_error = abs(float(target_core.mean())-float(normalized.mean()))
-            rank = similarity-alpha_error*.7-density_error*1.2-dimension_error*.45
+            rank = similarity-alpha_error*.7-density_error*1.2-dimension_error*.7-abs(min(0,spacing))/size*.3
             if best is None or rank > best[0]:
                 best = (rank,{"fontFamily":family,"fontFile":filename,"fontSize":size,"fontWeight":weight,
                               "fontStrokeWidth":stroke,"letterSpacing":round(spacing,4),"fontAlphaError":round(alpha_error,4),"fontDensityError":round(density_error,4),

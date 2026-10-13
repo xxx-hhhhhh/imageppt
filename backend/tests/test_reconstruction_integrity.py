@@ -31,7 +31,7 @@ def test_ordinary_latin_line_is_not_split_into_glyph_height_spans(tmp_path):
 def test_partial_mixed_line_is_atomic(monkeypatch):
     import app.services.reconstruction.mixed_text as mixed
     item = {'id':'a','text':'whole'}
-    monkeypatch.setattr(mixed,'mixed_spans',lambda *_:[{'id':'b','text':'w'},{'id':'c','text':'hole'}])
+    monkeypatch.setattr(mixed,'mixed_spans',lambda *_,**__:[{'id':'b','text':'w'},{'id':'c','text':'hole'}])
     def restore(source,entry,*args):
         if entry['id']=='b':
             return {'text':'w','metadata':{}},np.ones((2,2),bool),source
