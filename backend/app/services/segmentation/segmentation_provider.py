@@ -21,6 +21,18 @@ class SegmentationProvider(ABC):
 
 class OpenCVSegmentationProvider(SegmentationProvider):
     name = "opencv"
+    text_regions: list[dict] = []
+
+    def _text_dominated(self, x: int, y: int, w: int, h: int) -> bool:
+        covered = np.zeros((h,w),bool)
+        for item in self.text_regions:
+            if float(item.get('confidence') or 0)<.9:
+                continue
+            left,top = max(x,round(item['x'])),max(y,round(item['y']))
+            right,bottom = min(x+w,round(item['x']+item['width'])),min(y+h,round(item['y']+item['height']))
+            if right>left and bottom>top:
+                covered[top-y:bottom-y,left-x:right-x] = True
+        return float(covered.mean())>.65
 
     def segment(self, image_path: Path, asset_dir: Path | None = None, project_id: str | None = None) -> list[dict[str, Any]]:
         image = image_io.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -30,13 +42,23 @@ class OpenCVSegmentationProvider(SegmentationProvider):
         foreground = cv2.Canny(gray, 80, 180)
         kernel = np.ones((5, 5), np.uint8)
         foreground = cv2.dilate(foreground, kernel, iterations=1)
-        contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # External-only contours stop at the card boundary and never propose
+        # the illustration/chart INSIDE that card to SAM.
+        contours, _ = cv2.findContours(foreground, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         height, width = image.shape[:2]
         objects: list[dict[str, Any]] = []
-        for index, contour in enumerate(sorted(contours, key=cv2.contourArea, reverse=True)[:30]):
+        boxes = []
+        for index, contour in enumerate(sorted(contours, key=cv2.contourArea, reverse=True)):
             x, y, w, h = cv2.boundingRect(contour)
-            if w * h < width * height * 0.01 or w < 16 or h < 16 or w > width * 0.92 or h > height * 0.92:
+            if w*h < width*height*.0015 or min(w,h)<24 or max(w/h,h/w)>10 or w>width*.92 or h>height*.92:
                 continue
+            if self._text_dominated(x,y,w,h):
+                continue  # OCR glyphs are not independent visual-object prompts.
+            if any((max(0,min(x+w,bx+bw)-max(x,bx))*max(0,min(y+h,by+bh)-max(y,by))) /
+                   max(1,w*h+bw*bh-max(0,min(x+w,bx+bw)-max(x,bx))*max(0,min(y+h,by+bh)-max(y,by)))>.88
+                   for bx,by,bw,bh in boxes):
+                continue
+            boxes.append((x,y,w,h))
             mask = np.zeros((h, w), np.uint8)
             shifted = contour - np.array([[x, y]])
             cv2.drawContours(mask, [shifted], -1, 255, -1)
@@ -50,6 +72,8 @@ class OpenCVSegmentationProvider(SegmentationProvider):
                     continue
                 item["alphaCrop"] = f"/media/assets/{project_id}/{path.name}"
             objects.append(item)
+            if len(objects)>=64:
+                break
         return objects
 
 
@@ -77,6 +101,7 @@ class OptionalSAM2Provider(OpenCVSegmentationProvider):
             if result.masks is None:
                 raise ValueError("No segmentation masks")
             objects = []
+            accepted_masks = []
             for raw in result.masks.data.cpu().numpy():
                 mask = np.uint8(cv2.resize(raw.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST) > .5)*255
                 if np.count_nonzero(mask) < 4:
@@ -84,6 +109,13 @@ class OptionalSAM2Provider(OpenCVSegmentationProvider):
                 x, y, cw, ch = cv2.boundingRect(mask)
                 if cw*ch >= w*h*.92:
                     continue  # A near-page mask is not an independent object.
+                if self._text_dominated(x,y,cw,ch):
+                    continue
+                binary = mask>0
+                if any(np.count_nonzero(binary & existing)/max(1,np.count_nonzero(binary | existing))>.80
+                       for existing in accepted_masks):
+                    continue  # Different nested CV prompts can return ONE SAM object.
+                accepted_masks.append(binary)
                 identifier = f"sam2_{uuid4().hex[:12]}"
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 item = {"id": identifier, "bbox": {"left": x, "top": y, "width": cw, "height": ch},

@@ -25,7 +25,7 @@ def box_of(item: dict, width: int, height: int) -> tuple[int, int, int, int] | N
     if isinstance(box, dict):
         x, y = box.get("left", 0), box.get("top", 0)
         vals = [x, y, x + box.get("width", 0), y + box.get("height", 0)]
-        if max(abs(float(v)) for v in vals) <= 1.01:
+        if max(abs(float(v)) for v in (x,y,box.get('width',0),box.get('height',0))) <= 1.01:
             vals = [vals[0]*width, vals[1]*height, vals[2]*width, vals[3]*height]
     elif isinstance(box, (list, tuple)) and len(box) == 4:
         vals = box
@@ -108,11 +108,29 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         diagnostics = {}
         from app.services.reconstruction.mixed_text import restore_text_candidates
         candidates = restore_text_candidates(source,item,hints,diagnostics)
+        # Validate the WHOLE OCR line before registering any span. Adjacent
+        # glyph repair halos may overlap only when their measured paper agrees.
+        pending = ink.copy()
+        pending_fill = cleaned.copy()
+        prepared = []
+        for element, mask, fill in candidates:
+            overlap = pending & mask
+            if overlap.any() and np.max(np.abs(pending_fill[overlap].astype(float)-fill[overlap]))>7:
+                diagnostics['reason'] = 'conflicting_text_owner_retained'
+                prepared = []
+                break
+            mask = mask & ~pending
+            if not mask.any():
+                diagnostics['reason'] = 'duplicate_ocr_owner_retained'
+                prepared = []
+                break
+            prepared.append((element,mask,fill))
+            pending |= mask
+            pending_fill[mask] = fill[mask]
+        candidates = prepared
         restored_ids=[]
         editable_characters=0
         for candidate in candidates:
-            if np.any(ink & candidate[1]):
-                continue
             element, mask, fill = candidate
             element["role"] = hints.get("role") or element.get("role")
             element["groupId"] = hints.get("groupId")
@@ -141,18 +159,28 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         if not box:
             continue
         x1,y1,x2,y2 = box
-        patch = source[y1:y2,x1:x2]
+        patch = cleaned[y1:y2,x1:x2]
         color = patch[0,0]
-        if not np.all(patch == color) or np.any(labels[y1:y2,x1:x2]):
+        if not np.all(patch == color) or np.any((labels>0)[y1:y2,x1:x2] & ~ink[y1:y2,x1:x2]):
             continue
         mask = np.zeros((h,w), bool)
-        mask[y1:y2,x1:x2] = True
+        mask[y1:y2,x1:x2] = labels[y1:y2,x1:x2]==0
+        if not mask.any():
+            continue
         shape = {"id": item["id"], "type": "rectangle", "x": x1, "y": y1, "width": x2-x1, "height": y2-y1,
                  "rotation": 0, "zIndex": 1, "role": "verified_flat_carrier", "confidence": 1,
                  "style": {"fill": "#"+"".join(f"{v:02X}" for v in color[::-1]),
                            "stroke": "#"+"".join(f"{v:02X}" for v in color[::-1]), "strokeWidth": 0, "opacity": 1},
                  "metadata": {"reconstructionStrategy": "native_shape", "exclusiveGeometryVerified": True}}
+        substrate = ink[y1:y2,x1:x2] & ~substrate_claimed[y1:y2,x1:x2]
+        paper_path = mask_dir / f"{item['id']}_paper.png"
+        paper_mask = np.zeros((y2-y1,x2-x1,4),np.uint8)
+        paper_mask[:,:,3] = substrate.astype(np.uint8)*255
+        _save_exact(paper_path,paper_mask)
+        shape['metadata'].update(paperSubstrateMask=str(paper_path.relative_to(output)).replace('\\','/'),
+                                 paperSubstrateBBox=[x1,y1,x2,y2],cleanSubstratePixels=int(substrate.sum()))
         register(shape, mask, "native_shape", "cv_exact_uniform_rectangle")
+        substrate_claimed[y1:y2,x1:x2] |= substrate
 
     def image_owner(mask: np.ndarray, role: str, hint: str, parent: str | None = None,
                     seed: tuple[tuple[int,int,int,int],np.ndarray,dict] | None = None) -> None:
@@ -240,13 +268,20 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         image_owner(mask, "segmented_visual", segment.get("source", "opencv_segment"),seed=refined)
 
     modules = ((scene.get("vision") or {}).get("reconstructionPlan") or {}).get("modules") or []
+    # The VLM plan is a TREE. Previously only root modules were read, so a
+    # whole grid claimed all its children's pixels before they could be moved.
+    def descendants(items, parent=None):
+        for item in items:
+            yield {**item, 'parentModule':parent}
+            yield from descendants(item.get('children') or [], item.get('moduleId') or item.get('id'))
+
     proposals = []
-    for module in modules:
+    for module in descendants(modules):
         box = box_of(module, w, h)
         if box and (box[2]-box[0])*(box[3]-box[1]) < .8*w*h:
             proposals.append((module, box))
-    # Whole carriers first: nested labels cannot cut a header into fragments.
-    proposals.sort(key=lambda pair: (pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]), reverse=True)
+    # Leaf objects precede carriers. Large parents own only residual substrate.
+    proposals.sort(key=lambda pair: (pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]))
     for module, (x1, y1, x2, y2) in proposals:
         mask = np.zeros((h, w), bool)
         mask[y1:y2, x1:x2] = True

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,14 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
         "layout": {"outOfBounds": [], "invalidNumbers": [], "heavyOverlaps": []},
         "warnings": [],
     }
+    actual_pages = []
     try:
         with zipfile.ZipFile(pptx_path) as archive:
             report["structural"]["zipReadable"] = archive.testzip() is None
         presentation = Presentation(str(pptx_path))
         report["structural"]["slideCount"] = len(presentation.slides)
         for slide in presentation.slides:
+            actual_pages.append(Counter(shape.text for shape in slide.shapes if getattr(shape,'has_text_frame',False) and shape.text.strip()))
             for shape in slide.shapes:
                 if getattr(shape, "has_text_frame", False) and shape.text.strip():
                     report["structural"]["textCount"] += 1
@@ -52,7 +55,22 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
         width = layout["slide"]["width"]
         height = layout["slide"]["height"]
         elements = layout.get("elements", [])
-        page_coverage = {"page": page_index, "recognizedText": 0, "exportedText": 0, "ratio": 1.0}
+        expected = Counter(str(e.get('text') or '') for e in elements if e.get('type')=='text' and str(e.get('text') or '').strip()
+                           and not any((e.get('metadata') or {}).get(k) for k in ('suppressed','suppressRender','ownedBy')))
+        actual = actual_pages[page_index-1] if page_index<=len(actual_pages) else Counter()
+        matched = sum((expected & actual).values())
+        page_coverage = {"page": page_index, "recognizedText": sum(expected.values()), "exportedText": sum(actual.values()),
+                         "ratio":matched/max(1,sum(expected.values())) if expected else 1.0,
+                         "scope":"Layout-to-reopened-PPT text integrity; not OCR recognition coverage",
+                         "missingText":list((expected-actual).elements()),'unexpectedText':list((actual-expected).elements())}
+        if expected != actual:
+            report['valid'] = False
+            report['warnings'].append(f'Page {page_index}: reopened PPT text differs from Layout JSON')
+        decisions = layout.get('metadata',{}).get('ownershipAudit',{}).get('textDecisions')
+        if decisions is not None:
+            full = sum(d.get('editableCharacterCount',0)==d.get('sourceCharacterCount',1) for d in decisions)
+            page_coverage['sourceOcrCoverageAtReconstruction'] = {'recognizedLines':len(decisions),'fullyEditableLines':full,
+                                                               'ratio':full/max(1,len(decisions))}
         for element in elements:
             values = [element.get(key, 0) for key in ("x", "y", "width", "height", "rotation")]
             if any(not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in values):
@@ -60,8 +78,6 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
                 report["valid"] = False
             if element.get("type") != "background" and (element["x"] < -2 or element["y"] < -2 or element["x"] + element["width"] > width + 2 or element["y"] + element["height"] > height + 2):
                 report["layout"]["outOfBounds"].append({"page": page_index, "id": element.get("id")})
-            if element.get("type") == "text":
-                page_coverage["recognizedText"] += 1
         for left_index, left in enumerate(elements):
             if left.get("type") in {"background", "group"}:
                 continue
@@ -75,7 +91,6 @@ def validate_pptx(pptx_path: Path, layouts: list[dict[str, Any]]) -> dict[str, A
                 ratio = _overlap(left, right)
                 if ratio > 0.92 and left.get("type") != "text" and right.get("type") != "text":
                     report["layout"]["heavyOverlaps"].append({"page": page_index, "left": left.get("id"), "right": right.get("id"), "ratio": round(ratio, 3)})
-        page_coverage["exportedText"] = page_coverage["recognizedText"]
         report["ocrCoverage"].append(page_coverage)
     if report["layout"]["invalidNumbers"]:
         report["valid"] = False

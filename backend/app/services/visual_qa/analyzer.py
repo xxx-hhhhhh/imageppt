@@ -85,9 +85,14 @@ def _similarity(original: np.ndarray, preview: np.ndarray) -> tuple[float, float
     edge = 1.0 - float(np.mean(cv2.absdiff(original_edges, preview_edges))) / 255.0
     gray_a = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
     gray_b = cv2.cvtColor(preview, cv2.COLOR_BGR2GRAY)
-    mse = float(np.mean((gray_a.astype(np.float32) - gray_b.astype(np.float32)) ** 2))
-    ssim_like = 1.0 / (1.0 + mse / (255.0 ** 2))
-    return pixel, edge, ssim_like
+    a,b = gray_a.astype(np.float64),gray_b.astype(np.float64)
+    mu_a,mu_b = cv2.GaussianBlur(a,(11,11),1.5),cv2.GaussianBlur(b,(11,11),1.5)
+    var_a = np.maximum(0,cv2.GaussianBlur(a*a,(11,11),1.5)-mu_a*mu_a)
+    var_b = np.maximum(0,cv2.GaussianBlur(b*b,(11,11),1.5)-mu_b*mu_b)
+    covariance = cv2.GaussianBlur(a*b,(11,11),1.5)-mu_a*mu_b
+    c1,c2 = (255*.01)**2,(255*.03)**2
+    ssim = ((2*mu_a*mu_b+c1)*(2*covariance+c2))/((mu_a*mu_a+mu_b*mu_b+c1)*(var_a+var_b+c2))
+    return pixel, edge, float(np.mean(ssim))
 
 
 def run_visual_qa(original_path: Path, preview_path: Path, output_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:

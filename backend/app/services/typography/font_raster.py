@@ -50,6 +50,7 @@ def paint_measured_text(base: Image.Image,element: dict,color: str | None=None) 
     faces={'SimSun':'simsun.ttc','宋体':'simsun.ttc','KaiTi':'simkai.ttf','楷体':'simkai.ttf',
            'SimHei':'simhei.ttf','黑体':'simhei.ttf','FangSong':'simfang.ttf','仿宋':'simfang.ttf',
            'Microsoft YaHei':'msyhbd.ttc' if weight>=600 else 'msyh.ttc',
+           'DengXian':'Dengb.ttf' if weight>=600 else 'Deng.ttf',
            'Arial':'arialbd.ttf' if weight>=600 else 'arial.ttf',
            'Times New Roman':'timesbd.ttf' if weight>=600 else 'times.ttf'}
     filename=faces.get(family,style.get('fontFile','msyh.ttc'))

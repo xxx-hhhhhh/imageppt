@@ -73,8 +73,12 @@ def main():
         # A paper carrier can sit behind editable text. Clicking its centre
         # correctly selects the text, not the carrier. Pick a real hit-tested
         # image point rather than interpreting that expected behaviour as failure.
-        hit = page.evaluate("""() => {
+        hit = page.evaluate("""layout => {
           for (const n of document.querySelectorAll('.visual-image')) {
+            const item=layout.elements.find(e=>e.id===n.dataset.elementId);
+            // A page-width substrate is correctly clamped at x=0. Exercise a
+            // genuine independent object with room to move on both axes.
+            if(!item || item.width>layout.slide.width*.55 || item.height>layout.slide.height*.65) continue;
             const b=n.getBoundingClientRect(); if(b.width*b.height<1500) continue;
             for(let y=1;y<8;y++) for(let x=1;x<8;x++) {
               const px=b.x+b.width*x/8, py=b.y+b.height*y/8;
@@ -83,7 +87,7 @@ def main():
             }
           }
           return null;
-        }""")
+        }""",layout)
         assert hit, 'No independently selectable image'
         image = next(e for e in layout['elements'] if e['id']==hit['id'])
         node = page.locator(f'[data-element-id="{image["id"]}"]')

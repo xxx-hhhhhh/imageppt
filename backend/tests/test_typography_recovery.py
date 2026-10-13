@@ -65,8 +65,9 @@ def test_mixed_size_preserves_every_ocr_character_and_tail(tmp_path):
     source=imread(path)
     spans=mixed_spans(source,item)
     assert ''.join(s['text'] for s in spans)==text
-    candidates=restore_text_candidates(source,item)
-    assert ''.join(c[0]['text'] for c in candidates)==text
+    diagnostics={}
+    candidates=restore_text_candidates(source,item,diagnostics=diagnostics)
+    assert ''.join(c[0]['text'] for c in candidates)==text, diagnostics
     assert max(c[0]['style']['fontSize'] for c in candidates)>min(c[0]['style']['fontSize'] for c in candidates)*1.3
     assert all(c[0]['metadata']['sourceOcrIds']==['ocr'] for c in candidates)
     # Masks must be exclusive: a partial span never erases another one.
@@ -103,3 +104,17 @@ def test_manual_family_edit_overrides_old_measurement_file():
     changed=Image.new('RGBA',(240,100))
     paint_measured_text(changed,item)
     assert not np.array_equal(np.asarray(first),np.asarray(changed))
+
+
+def test_ppt_exports_measured_simsun_stroke_as_editable_text(tmp_path):
+    item={'id':'t','type':'text','text':'加粗原生文字','x':10,'y':10,'width':300,'height':50,
+          'style':{'fontFamily':'SimSun','fontWeight':700,'fontSize':36,'color':'#17365D'},
+          'metadata':{'exclusiveFontVerified':True,'fontMatchingVersion':2}}
+    path,report=PPTXRenderer().render_project('stroke',[{'slide':{'width':800,'height':450},'elements':[item]}],output_dir=tmp_path)
+    assert report['valid']
+    shape=Presentation(path).slides[0].shapes[0]
+    assert shape.has_text_frame and shape.text==item['text']
+    run=shape.text_frame.paragraphs[0].runs[0]
+    outline=run.font._element.find(qn('a:ln'))
+    assert int(outline.get('w'))==round((36/48)*2*(13.333/800)*914400)
+    assert outline.find(qn('a:solidFill')).find(qn('a:srgbClr')).get('val')=='17365D'

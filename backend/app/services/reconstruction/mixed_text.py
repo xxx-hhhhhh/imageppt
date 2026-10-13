@@ -10,6 +10,7 @@ import unicodedata
 import numpy as np
 
 from app.services.reconstruction.editable_text import measured_surface, restore_text_candidate
+from app.services.typography.font_raster import font_face
 
 
 def _kind(char):
@@ -78,10 +79,17 @@ def mixed_spans(source: np.ndarray,item: dict) -> list[dict]:
         return []
     boxes = match[1]
     sizes=[]
+    # Capitals, x-height, ascenders and punctuation have different ink heights
+    # at ONE font size. Normalize by the measured glyph, not a fixed .70.
+    reference = font_face('msyh.ttc',100)
     for (_,char),(left,top,right,bottom) in zip(chars,boxes):
-        sizes.append((bottom-top)/(.93 if _kind(char)=='han' else .70) if _kind(char)!='punct' else None)
+        glyph_box = reference.getbbox(char)
+        nominal_height = max(1,glyph_box[3]-glyph_box[1])/100
+        if char.isdigit():
+            nominal_height = .70
+        sizes.append((bottom-top)/nominal_height if _kind(char)!='punct' else None)
     known = [s for s in sizes if s]
-    if not known or max(known)/min(known)<1.28:
+    if not known or max(known)/min(known)<1.4:
         return []
     for i,size in enumerate(sizes):
         if size is None:
@@ -112,6 +120,11 @@ def mixed_spans(source: np.ndarray,item: dict) -> list[dict]:
 
 def restore_text_candidates(source,item,hints=None,diagnostics=None):
     report=diagnostics if diagnostics is not None else {}
+    # Prefer one reliable editable line. Character-level partitioning is a
+    # fallback for a genuine size discontinuity, never the default for Latin.
+    candidate=restore_text_candidate(source,item,hints,report)
+    if candidate is not None:
+        return [candidate]
     children=mixed_spans(source,item)
     if children:
         candidates=[]
@@ -121,13 +134,14 @@ def restore_text_candidates(source,item,hints=None,diagnostics=None):
             candidate=restore_text_candidate(source,child,hints,evidence)
             reasons.append({'id':child['id'],'text':child['text'],'reason':evidence.get('reason')})
             if candidate is None:
-                # Do not lose the rest of a line because ONE size is uncertain.
-                continue
+                # Atomic OCR line: incomplete span recovery must not leave a
+                # sentence alternating between pictures and editable letters.
+                report.update(reason='incomplete_mixed_line_retained',spans=reasons)
+                return []
             element,mask,fill=candidate
-            element['metadata'].update(child['metadata'])
+            element['metadata'].update(child.get('metadata',{}))
             candidates.append((element,mask,fill))
         report.update(reason='mixed_typography_spans',spans=reasons)
         if candidates:
             return candidates
-    candidate=restore_text_candidate(source,item,hints,report)
-    return [candidate] if candidate else []
+    return []

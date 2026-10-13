@@ -145,6 +145,7 @@ class ReconstructionPipeline:
         ocr_layout["elements"].extend(detect_simple_shapes(normalized, regions))
         if hasattr(self.scene_analyzer.vision_provider, "strict"):
             self.scene_analyzer.vision_provider.strict = conversion_mode != "fast" and not allow_fallback
+        self.segmentation_provider.text_regions = [e for e in ocr_layout['elements'] if e.get('type')=='text']
         segments = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized, candidate / "assets", project_id)
         scene, scene_warnings = self.scene_analyzer.analyze(normalized, ocr_layout, regions, segments,
             enable_vision=conversion_mode != "fast", mode="high" if conversion_mode in {"maximum", "high_quality"} else conversion_mode)
@@ -194,17 +195,19 @@ class ReconstructionPipeline:
             "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
             "editableTextCount": editable_lines, "nativeTextBoxCount":editable,
             "editableCharacterCoverage":editable_chars/max(1,source_chars),
-            "nonEditableTextCount": detected-editable_lines, "objectExtractionCoverage": 1,
-            "movableVisualCoverage": 1, "visualAreaPreserved": 1, "nonTextChangedPixelCount": outside_text_changed,
-            "missingVisualCount": 0, "missingAssetCount": 0, "ghostingCount": 0, "duplicateCount": 0,
-            "backgroundResidualCount": 0, "shapeCount": sum(e.get("owner") == "native_shape" for e in layout["elements"]),
+            "nonEditableTextCount": detected-editable_lines, "nonTextChangedPixelCount": outside_text_changed,
             "preservationChecks":preservation,"reliableOCRTextCount":reliable_ocr,
             "nativeReliableTextCoverage":min(1,editable_lines/max(1,reliable_ocr)),
             "imageAssetCount": audit["activeImageCount"], "rasterNativeDuplicateTextCount": 0,
             "revisionRounds": 0, "revisionRound": 0, "revisionStatus": "automatic_revisions_paused",
-            "issuesAfter": [], "stagnationReason": "ownership_audit_pause",
+            "stagnationReason": "ownership_audit_pause",
             "semanticObjectCoverage":None,
             "metricScope": "source-pixel ownership and glyph-local repairs; semantic extraction completeness is not implied; font substitution/verified antialias edges explicit; PowerPoint render separate"})
+        from app.services.validation.reconstruction_quality import reconstruction_quality
+        score.update(reconstruction_quality(layout,audit,preservation))
+        score['issuesAfter'] = score.get('issues',[]) + score['issuesAfter']
+        score['visualSimilarityScore'] = score.get('overall')
+        score['overall'] = min(float(score.get('overall') or 0),score['editableCharacterCoverage'])
         self._write_json(candidate / "visual_score.json", score)
         self._write_json(candidate / "visual_validation.json", score)
         self._write_json(candidate / f"scene_final_{page}.json", layout)
@@ -213,6 +216,8 @@ class ReconstructionPipeline:
         if page > len(prior_slides):
             candidate_slides.append(preview_layout)
         output_path, validation = PPTXRenderer().render_project(project_id, candidate_slides, output_dir=candidate)
+        if not validation['valid']:
+            raise ReconstructionQualityError('PPTX 重新打开后的内容与 Layout 不一致；候选保留，未覆盖上一版本。')
         # Freeze the prior working artifacts. Never delete an old asset.
         if (root / "slides" / f"page_{page}.json").is_file():
             archive = root / "snapshots" / token
@@ -255,7 +260,7 @@ class ReconstructionPipeline:
             shutil.copy2(candidate / "validation.json", root / "validation.json")
             shutil.copy2(output_path, root / "output.pptx")
             warnings = list(ocr.warnings) + scene_warnings + list(getattr(self.segmentation_provider, "warnings", []))
-            warnings.append(f"自动优化已暂停；{detected-editable}/{detected} 条文字保留在可移动图片中，避免不可靠替换造成重影。")
+            warnings.append(f"自动优化已暂停；{detected-editable_lines}/{detected} 条文字尚未完整转为可编辑文本。当前为部分可编辑结果，需人工检查字体与图片拆分。")
             self._write_json(root / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode,
                 "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
                 "aiUsed": bool(routing.get("aiUsed")), "routing": routing, "criticRounds": 0,

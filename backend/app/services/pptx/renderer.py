@@ -65,7 +65,7 @@ def _set_font_family(font: Any, family: str) -> None:
 
 def font_px_to_pt(font_size_px: float, pixels_to_inches: float) -> float:
     """Convert the one stored pixel-space estimate exactly once at export."""
-    return max(5.0, float(font_size_px) * float(pixels_to_inches) * 72.0)
+    return max(1.0, float(font_size_px) * float(pixels_to_inches) * 72.0)
 
 
 class PPTXRenderer:
@@ -167,6 +167,21 @@ class PPTXRenderer:
             font.bold = int(style.get("fontWeight", 400)) >= 600
             font.italic = style.get("fontStyle", "normal") == "italic"
             font.color.rgb = _rgb(style.get("color"))
+            if metadata.get('fontMatchingVersion')==2 and style.get('fontFamily') in {'SimSun','宋体'} and int(style.get('fontWeight',400))>=600:
+                # The measured raster uses regular SimSun + a calibrated stroke.
+                # PPT's synthetic bold is NOT the same outline and was visibly
+                # thinner. Emit the same stroke as native editable text outline.
+                from pptx.oxml.xmlchemy import OxmlElement
+                stroke_px=float(fit['fontSize'])/48
+                font.bold=False
+                outline=OxmlElement('a:ln')
+                outline.set('w',str(round(stroke_px*2*sx*914400)))
+                solid=OxmlElement('a:solidFill')
+                color=OxmlElement('a:srgbClr')
+                color.set('val',str(_rgb(style.get('color'))))
+                solid.append(color)
+                outline.append(solid)
+                font._element.insert(0,outline)
             if style.get('letterSpacing'):
                 # DrawingML spc is hundredths of a point; CSS/Layout use pixels.
                 font._element.set('spc',str(round(float(style['letterSpacing'])*sx*72*100)))

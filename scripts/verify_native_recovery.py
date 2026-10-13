@@ -32,9 +32,10 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("recorded_project",type=Path)
     parser.add_argument("--output-root",type=Path)
+    parser.add_argument('--refresh-segmentation',action='store_true')
     args=parser.parse_args()
     previous=args.recorded_project.resolve()
-    candidate=next((previous / "candidates").iterdir())
+    candidate=next((previous / "candidates").iterdir()) if (previous/'candidates').is_dir() else previous
     store=ProjectStore(args.output_root or ROOT / "outputs")
     record=store.create("Real evidence - native text / coherent visual regression")
     root=store.root / record["id"]
@@ -43,11 +44,20 @@ def main():
     ocr=json.loads((candidate / "ocr_layout.json").read_text(encoding="utf-8"))
     scene=json.loads((candidate / "scene_raw.json").read_text(encoding="utf-8"))
     source=previous / "original.png"
+    if args.refresh_segmentation:
+        from app.services.segmentation.segmentation_provider import create_segmentation_provider
+        provider,_ = create_segmentation_provider('sam2')
+        provider.text_regions = [e for e in ocr['elements'] if e.get('type')=='text']
+        scene['segmentation'] = provider.segment(source,root/'assets',record['id'])
+        print(json.dumps({'segmentationProvider':provider.name,'segments':len(scene['segmentation'])}),flush=True)
+    (root/'ocr_layout.json').write_text(json.dumps(ocr,ensure_ascii=False,indent=2),encoding='utf-8')
+    (root/'scene_raw.json').write_text(json.dumps(scene,ensure_ascii=False,indent=2),encoding='utf-8')
     layout=build_exclusive_scene(source,ocr,scene,scene.get("segmentation",[]),root,record["id"],1)
     original=json.loads((previous / "slides/page_1.json").read_text(encoding="utf-8"))
     for key in ("ocrProvider","visionProvider","visionModel","segmentationProvider","conversionMode"):
         layout["metadata"][key]=original["metadata"].get(key)
     layout["metadata"]["recordedProviderSourceProject"]=previous.name
+    (root/'scene_final_1.json').write_text(json.dumps(layout,ensure_ascii=False,indent=2),encoding='utf-8')
     local=copy.deepcopy(layout)
     for e in local["elements"]:
         if e.get("src"):
@@ -63,6 +73,10 @@ def main():
                   "editableTextCoverage":native/max(1,len(layout["metadata"]["ownershipAudit"]["textDecisions"])),
                   "visionProvider":layout["metadata"].get("visionProvider"),"visionModel":layout["metadata"].get("visionModel"),
                   "preservationChecks":preservation,"nativeTextCount":native})
+    from app.services.validation.reconstruction_quality import reconstruction_quality
+    score.update(reconstruction_quality(layout,audit,preservation))
+    score['visualSimilarityScore'] = score['overall']
+    score['overall'] = min(score['overall'],score['editableCharacterCoverage'])
     (root / "visual_score.json").write_text(json.dumps(score,ensure_ascii=False,indent=2),encoding="utf-8")
     report={"projectId":record["id"],"recordedRealProject":previous.name,"newApiCalls":0,"nativeTextCount":native,
             "movableImageCount":images,"audit":audit,"preservation":preservation,

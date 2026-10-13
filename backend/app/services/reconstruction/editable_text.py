@@ -26,7 +26,10 @@ def measured_surface(patch: np.ndarray, border: int = 4) -> tuple[np.ndarray, di
     ring[:,:border] = ring[:,-border:] = True
     coordinates = terms[ring]
     pixels = patch[ring].astype(float)
-    keep = np.ones(len(pixels),bool)
+    # Start from the dominant paper instead of fitting neighbouring glyphs /
+    # underline colours as if they were background samples.
+    distance = np.max(np.abs(pixels-np.median(pixels,axis=0)),axis=1)
+    keep = distance <= max(12.,float(np.quantile(distance,.7)))
     for _ in range(5):
         if keep.sum() < len(keep)*.55:
             return None
@@ -49,6 +52,7 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
     soft_target = np.clip(source_alpha[ys.min():ys.max()+1,xs.min():xs.max()+1],0,1) if source_alpha is not None else target.astype(float)
     choices = [("SimSun","simsun.ttc",400),("SimSun","simsun.ttc",700),
                ("Microsoft YaHei","msyh.ttc",400),("Microsoft YaHei","msyhbd.ttc",700),
+               ("DengXian","Deng.ttf",400),("DengXian","Dengb.ttf",700),
                ("SimHei","simhei.ttf",400),("FangSong","simfang.ttf",400),
                ("Arial","arial.ttf",400),("Arial","arialbd.ttf",700),
                ("Times New Roman","times.ttf",400),("Times New Roman","timesbd.ttf",700),
@@ -88,6 +92,8 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
             target_core = soft_target>.5
             union = np.count_nonzero(target_core|normalized)
             similarity = np.count_nonzero(target_core&normalized)/max(1,union)
+            if similarity < .35:
+                continue
             dimension_error = abs(cropped.shape[1]-tw)/tw+abs(cropped.shape[0]-th)/th
             if dimension_error>.19:
                 continue
@@ -155,7 +161,28 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     count,labels,stats,_ = cv2.connectedComponentsWithStats(seed.astype(np.uint8),8)
     glyphs = np.zeros(seed.shape,bool)
     rejected_line = False
+    excluded_bullet = set()
+    components = sorted(range(1,count),key=lambda n:stats[n,0])
+    if components and text[0].isalnum():
+        tall_left = min((stats[n,0] for n in components if stats[n,3]>.6*ih),default=0)
+        leading = [n for n in components if stats[n,0]+stats[n,2]<tall_left]
+        if leading:
+            cx,cy = min(stats[n,0] for n in leading),min(stats[n,1] for n in leading)
+            cw = max(stats[n,0]+stats[n,2] for n in leading)-cx
+            ch = max(stats[n,1]+stats[n,3] for n in leading)-cy
+            area = sum(stats[n,4] for n in leading)
+        else:
+            cx=cy=cw=ch=area=0
+        gap = tall_left-cx-cw
+        # OCR often includes a list bullet in its bbox but omits it from text.
+        # Keep that visual outside the glyph owner; never invent a character.
+        if (.2*ih<ch<.55*ih and .65<cw/max(1,ch)<1.4
+                and area/max(1,cw*ch)>.25 and gap>ih*.2
+                and abs(cy+ch/2-(y-y1+ih/2))<ih*.22):
+            excluded_bullet = set(leading)
     for number in range(1,count):
+        if number in excluded_bullet:
+            continue
         _,_,cw,ch,area = stats[number]
         if cw>iw*.65 and ch<max(3,ih*.15):
             rejected_line = True  # Grid/axis rules are not glyphs.
@@ -199,6 +226,10 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     element["metadata"] = {"reconstructionStrategy":"editable_text","exclusiveFontVerified":True,
                            "nativeTextMeasured":True,"fontMatchingVersion":2,"fontMeasurement":fit,"textErasureEvidence":evidence,
                            "rawOCRBBox":[round(x),round(y),round(x+iw),round(y+ih)],"originalLineCount":1}
+    if excluded_bullet:
+        element['metadata']['originalOCRBBox'] = element['metadata']['rawOCRBBox'][:]
+        element['metadata']['rawOCRBBox'][0] = int(x1+xs.min())
+        element['metadata']['excludedLeadingBullet'] = True
     mask = np.zeros((h,w),bool)
     mask[y1:y2,x1:x2] = ink
     fill = source.copy()
