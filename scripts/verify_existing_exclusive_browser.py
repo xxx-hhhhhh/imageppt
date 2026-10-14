@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("project_id")
     parser.add_argument("--output-root",type=Path)
+    parser.add_argument('--text-id',action='append',default=[],help='Verify every editable span belonging to these OCR ids')
     args = parser.parse_args()
     output = (args.output_root or Path(__file__).resolve().parents[1] / "outputs") / args.project_id
     errors, missing = [], []
@@ -59,17 +60,29 @@ def main():
           return count;
         }""",text)
         assert duplicate_pixels==0, 'Fabric paints a second native text copy'
-        node = page.locator(f'[data-element-id="{text["id"]}"]')
-        node.dblclick()
-        expect(node.locator('[data-text-content]')).to_have_attribute('contenteditable','true')
-        page.keyboard.press('Control+A')
-        page.keyboard.insert_text('单一文字层回归')
-        page.get_by_label('字号',exact=True).click()
-        expect(page.get_by_role('textbox',name='内容',exact=True)).to_have_value('单一文字层回归')
-        page.evaluate("""async layout => {
-          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
-          useProjectStore.setState({slides:[layout],selectedIds:[]});
-        }""",layout)
+        selected=[text]
+        if args.text_id:
+            decisions={d['id']:d for d in layout['metadata']['ownershipAudit']['textDecisions']}
+            ids=[]
+            for identifier in args.text_id:
+                decision=decisions[identifier]
+                assert decision['decision']=='editable_text', f'{identifier} still raster'
+                assert decision['editableCharacterCount']==decision['sourceCharacterCount']
+                ids.extend(decision['editableSpanIds'])
+            selected=[next(e for e in layout['elements'] if e['id']==identifier) for identifier in ids]
+        for item in selected:
+            node = page.locator(f'[data-element-id="{item["id"]}"]')
+            node.dblclick()
+            expect(node.locator('[data-text-content]')).to_have_attribute('contenteditable','true')
+            page.keyboard.press('Control+A')
+            page.keyboard.insert_text('单一文字层回归')
+            page.get_by_label('字号',exact=True).click()
+            expect(page.get_by_role('textbox',name='内容',exact=True)).to_have_value('单一文字层回归')
+            page.evaluate("""async layout => {
+              const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+              useProjectStore.setState({slides:[layout],selectedIds:[]});
+            }""",layout)
+            expect(node.locator('[data-text-content]')).to_have_text(item['text'])
         # A paper carrier can sit behind editable text. Clicking its centre
         # correctly selects the text, not the carrier. Pick a real hit-tested
         # image point rather than interpreting that expected behaviour as failure.
@@ -119,6 +132,7 @@ def main():
         assert not errors and not missing, {"errors":errors,"missing":missing}
         result = {"projectId": args.project_id,"realSavedApiLayout":True,"imageDrag":True,"imageResize":True,"nativeSingleLineRendering":True,
                   "domTextEditing":True,"fabricDuplicateTextPixelCount":duplicate_pixels,
+                  "verifiedOcrLineIds":args.text_id,"editedTextSpanIds":[e['id'] for e in selected],
                   "missingAssets":missing,"browserErrors":errors,"nativeTextCount":sum(e.get('owner') == 'editable_text' for e in layout['elements']),
                   "originalResultFilesModified":False,"automaticRevisionCalls":0}
         (output / "exclusive_browser.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")

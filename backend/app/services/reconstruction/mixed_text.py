@@ -11,14 +11,15 @@ import unicodedata
 import numpy as np
 
 from app.services.reconstruction.editable_text import (
-    measured_surface,
+    measured_text_surface,
     restore_text_candidate,
+    without_untranscribed_bullet,
 )
 from app.services.typography.font_raster import font_face
 
 
 def _kind(char):
-    if unicodedata.category(char).startswith('P'):
+    if unicodedata.category(char).startswith(('P','S')):
         return 'punct'
     return 'han' if '\u2e80'<=char<='\u9fff' else 'latin'
 
@@ -36,7 +37,7 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
         return []
     ax,ay,bx,by = max(0,x-6),max(0,y-6),min(source.shape[1],x+w+6),min(source.shape[0],y+h+6)
     patch = source[ay:by,ax:bx]
-    measured = measured_surface(patch)
+    measured = measured_text_surface(patch)
     if measured is None:
         return []
     paper,_ = measured
@@ -48,6 +49,7 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
     direction = fg-paper
     alpha = np.sum((pixels-paper)*direction,axis=2)/np.maximum(1,np.sum(direction*direction,axis=2))
     ink = (alpha>.4)[y-ay:y+h-ay,x-ax:x+w-ax]
+    ink,_ = without_untranscribed_bullet(ink,text,h)
     used = ink.any(axis=0)
     starts = np.where(used & ~np.r_[False,used[:-1]])[0]
     ends = np.where(used & ~np.r_[used[1:],False])[0]+1
@@ -57,7 +59,10 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
     # DP joins disconnected strokes (e.g. 门/川) rather than treating each
     # projection island as another character. All OCR chars must align in order.
     states = {(0,0):(0.,[])}
+    reference = font_face('msyh.ttc',100)
     for index,(_,char) in enumerate(chars):
+        reference_box = reference.getmask(char).getbbox() or reference.getbbox(char)
+        reference_ratio = (reference_box[2]-reference_box[0])/max(1,reference_box[3]-reference_box[1])
         for (number,start),(cost,path) in list(states.items()):
             if number!=index:
                 continue
@@ -70,8 +75,10 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
                 width,height = right-left,bottom-top
                 kind = _kind(char)
                 ratio = width/max(1,height)
-                ideal = .94 if kind=='han' else .62 if kind=='latin' else .45
-                limits = (.48,1.45) if kind=='han' else (.14,1.08) if kind=='latin' else (.08,1.3)
+                # 一 / em dash / quotes are not square Han glyphs. Use their
+                # real ink aspect, with the old broad bounds for normal glyphs.
+                ideal = reference_ratio if reference_ratio>1.45 or kind=='punct' else .94 if kind=='han' else .62
+                limits = (ideal*.3,ideal*2) if reference_ratio>1.45 else (.48,1.45) if kind=='han' else (.14,1.08) if kind=='latin' else (ideal*.45,ideal*1.8)
                 if not limits[0]<=ratio<=limits[1]:
                     continue
                 score = cost+math.log(max(.01,ratio)/ideal)**2+(end-start-1)*.03
@@ -85,13 +92,12 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
     sizes=[]
     # Capitals, x-height, ascenders and punctuation have different ink heights
     # at ONE font size. Normalize by the measured glyph, not a fixed .70.
-    reference = font_face('msyh.ttc',100)
     for (_,char),(left,top,right,bottom) in zip(chars,boxes):
-        glyph_box = reference.getbbox(char)
+        glyph_box = reference.getmask(char).getbbox() or reference.getbbox(char)
         nominal_height = max(1,glyph_box[3]-glyph_box[1])/100
         if char.isdigit():
             nominal_height = .70
-        sizes.append((bottom-top)/nominal_height if _kind(char)!='punct' else None)
+        sizes.append((bottom-top)/nominal_height if _kind(char)!='punct' and nominal_height>.45 else None)
     known = [s for s in sizes if s]
     if not known or (max(known)/min(known)<1.4 and not typography_runs):
         return []
@@ -106,9 +112,12 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
             # Keep punctuation with its word; a colon starts a new text run.
             # Script transitions and real source sizes use measured positions,
             # not one squeezed font across Chinese + English + a heading label.
-            boundary = bool(i and _kind(char) != 'punct' and (
-                previous in ':：' or (_kind(previous) != 'punct' and _kind(previous) != _kind(char))
-                or abs(math.log(size/np.median([sizes[j] for j in groups[-1]]))) > math.log(1.22)))
+            gap = boxes[i][0]-boxes[i-1][2] if i else 0
+            boundary = bool(i and (previous in ':：' or (gap>max(6,size*.4) and len(chars)-i>2)
+                or (_kind(char) != 'punct' and (
+                    (_kind(previous) != 'punct' and _kind(previous) != _kind(char))
+                    or abs(math.log(size/np.median([sizes[j] for j in groups[-1]]))) > math.log(1.22)
+                    or (len(groups[-1])>=8 and len(chars)-i>2)))))
         else:
             boundary = bool(i and (_kind(chars[i][1])=='punct' or _kind(chars[i-1][1])=='punct' or abs(math.log(size/np.median([sizes[j] for j in groups[-1]])))>math.log(1.22)))
         if not groups or boundary:
@@ -142,34 +151,44 @@ def restore_text_candidates(source,item,hints=None,diagnostics=None):
     needs_runs = whole is None or fit.get('fontAlphaError',0)>.22 or fit.get('letterSpacing',0)<-.03*fit.get('fontSize',1)
     if whole is not None and not needs_runs:
         return [whole]
-    colon = _colon_candidates(source,item,hints)
+    paper_reference=_line_paper(source,item)
+    options=[]
+    colon = _colon_candidates(source,item,hints,paper_reference)
     if colon:
-        score = _run_error(colon)
-        if whole is None or score+.025 < _run_error([whole]):
-            report.update(reason='measured_label_value_typography',editableRunCount=len(colon))
-            return colon
-    children=mixed_spans(source,item) or mixed_spans(source,item,typography_runs=True)
-    if children:
+        options.append((colon,{'reason':'measured_label_value_typography','editableRunCount':len(colon)}))
+    seen=set()
+    for typography_runs in (False,True):
+        children=mixed_spans(source,item,typography_runs=typography_runs)
+        signature=tuple(child['text'] for child in children)
+        if not children or signature in seen:
+            continue
+        seen.add(signature)
         candidates=[]
         reasons=[]
         for child in children:
             evidence={}
-            candidate=restore_text_candidate(source,child,hints,evidence)
+            candidate=(restore_text_candidate(source,child,hints,evidence,paper_reference=paper_reference)
+                       if paper_reference is not None else restore_text_candidate(source,child,hints,evidence))
             reasons.append({'id':child['id'],'text':child['text'],'reason':evidence.get('reason')})
             if candidate is None:
                 # Atomic OCR line: incomplete span recovery must not leave a
                 # sentence alternating between pictures and editable letters.
                 report.update(reason='whole_line_preserved_after_run_rejection' if whole else 'incomplete_mixed_line_retained',spans=reasons)
-                return [whole] if whole is not None else []
+                break
             element,mask,fill=candidate
             element['metadata'].update(child.get('metadata',{}))
             candidates.append((element,mask,fill))
-        if candidates:
-            if whole is not None and _run_error(candidates)+.025>=_run_error([whole]):
-                report.update(reason='whole_line_fit_better_than_runs')
-                return [whole]
-            report.update(reason='mixed_typography_spans',spans=reasons)
+        if len(candidates)==len(children):
+            options.append((candidates,{'reason':'mixed_typography_spans','spans':reasons}))
+    if options:
+        # A colon split may still contain a long, poorly matched tail. Compare
+        # complete measured alternatives instead of accepting the first one.
+        candidates,evidence=min(options,key=lambda option:_run_error(option[0])+.004*(len(option[0])-1))
+        if whole is None or _run_error(candidates)+.025 < _run_error([whole]):
+            report.update(evidence)
             return candidates
+    if whole is not None:
+        report.update(reason='whole_line_fit_better_than_runs')
     return [whole] if whole is not None else []
 
 
@@ -184,7 +203,21 @@ def _run_error(candidates):
     return total/max(1,count)
 
 
-def _colon_candidates(source,item,hints):
+def _line_paper(source,item):
+    if not all(k in item for k in ('x','y','width','height')):
+        return None
+    values=[float(item[k]) for k in ('x','y','width','height')]
+    if not all(np.isfinite(v) for v in values) or min(values[2:])<3:
+        return None
+    x,y,w,h=map(round,values)
+    ax,ay,bx,by=max(0,x-6),max(0,y-6),min(source.shape[1],x+w+6),min(source.shape[0],y+h+6)
+    if bx<=ax or by<=ay:
+        return None
+    model=measured_text_surface(source[ay:by,ax:bx])
+    return (ax,ay,*model) if model is not None else None
+
+
+def _colon_candidates(source,item,hints,paper_reference=None):
     """Measure label/value runs even when Latin letters touch in projection.
 
     OCR remains authoritative. A punctuation boundary only proposes a split;
@@ -199,7 +232,7 @@ def _colon_candidates(source,item,hints):
         return []
     ax,ay,bx,by=max(0,x-6),max(0,y-6),min(source.shape[1],x+w+6),min(source.shape[0],y+h+6)
     patch=source[ay:by,ax:bx]
-    model=measured_surface(patch)
+    model=measured_text_surface(patch)
     if model is None:
         return []
     contrast=np.max(np.abs(patch.astype(float)-model[0].astype(float)),axis=2)
@@ -221,7 +254,7 @@ def _colon_candidates(source,item,hints):
             child.update(id=f"{item['id']}_run_{index+1}",text=body,
                          x=x+left+int(xx.min()),y=y+int(yy.min()),
                          width=int(xx.max()-xx.min()+1),height=int(yy.max()-yy.min()+1),lines=[])
-            candidate=restore_text_candidate(source,child,hints,{})
+            candidate=restore_text_candidate(source,child,hints,{},paper_reference=paper_reference)
             if candidate is None:
                 break
             candidate[0]['metadata'].update(sourceOcrIds=[item['id']],sourceCharRange=[start,start+len(body)],mixedTypography=True)

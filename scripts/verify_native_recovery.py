@@ -10,6 +10,7 @@ import copy
 import json
 import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 
 from pptx import Presentation
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("recorded_project",type=Path)
     parser.add_argument("--output-root",type=Path)
     parser.add_argument('--refresh-segmentation',action='store_true')
+    parser.add_argument('--require-text-id',action='append',default=[],help='Saved OCR ids that must be fully editable')
     args=parser.parse_args()
     previous=args.recorded_project.resolve()
     candidate=next((previous / "candidates").iterdir()) if (previous/'candidates').is_dir() else previous
@@ -45,7 +47,9 @@ def main():
     scene=json.loads((candidate / "scene_raw.json").read_text(encoding="utf-8"))
     source=previous / "original.png"
     if args.refresh_segmentation:
-        from app.services.segmentation.segmentation_provider import create_segmentation_provider
+        from app.services.segmentation.segmentation_provider import (
+            create_segmentation_provider,
+        )
         provider,_ = create_segmentation_provider('sam2')
         provider.text_regions = [e for e in ocr['elements'] if e.get('type')=='text']
         scene['segmentation'] = provider.segment(source,root/'assets',record['id'])
@@ -94,6 +98,27 @@ def main():
     pptx,_=PPTXRenderer().render_project(record["id"],[local],output_dir=root)
     deck=Presentation(pptx)
     assert sum(s.has_text_frame and bool(s.text) for s in deck.slides[0].shapes)==native
+    expected=[e for e in layout['elements'] if e.get('owner')=='editable_text']
+    actual=[s.text for s in deck.slides[0].shapes if s.has_text_frame and s.text]
+    assert Counter(actual)==Counter(e['text'] for e in expected), 'PPT native text differs from authoritative layout'
+    by_id={e['id']:e for e in expected}
+    decisions=layout['metadata']['ownershipAudit']['textDecisions']
+    complete=[]
+    for decision in decisions:
+        if decision['decision']!='editable_text':
+            continue
+        body=''.join(by_id[i]['text'] for i in decision['editableSpanIds'])
+        assert body==decision['text'], f"Partial/misordered OCR line: {decision['id']}"
+        complete.append(decision['id'])
+    assert set(args.require_text_id)<=set(complete), 'Required OCR line still retained as image'
+    previous_complete={d['id'] for d in original.get('metadata',{}).get('ownershipAudit',{}).get('textDecisions',[])
+                       if d.get('decision')=='editable_text'}
+    text_report={'allNativePptStringsMatchLayout':True,'completeOcrLineIds':complete,
+                 'requiredOcrLineIds':args.require_text_id,'regressedOcrLineIds':sorted(previous_complete-set(complete)),
+                 'editableCharacterCoverage':score['editableCharacterCoverage'],
+                 'editableTextCount':score['editableTextCount'],'detectedTextCount':score['detectedTextCount']}
+    (root/'text_recovery_verification.json').write_text(json.dumps(text_report,ensure_ascii=False,indent=2),encoding='utf-8')
+    print(json.dumps(text_report,ensure_ascii=False),flush=True)
     # Export a genuine blank-text diagnostic: retained old glyphs will show here.
     blank=copy.deepcopy(local)
     blank["elements"]=[e for e in blank["elements"] if e.get("type")!="text"]

@@ -15,7 +15,7 @@ import numpy as np
 from app.services.typography.font_raster import font_face, glyph_raster
 
 
-def measured_surface(patch: np.ndarray, border: int = 4) -> tuple[np.ndarray, dict] | None:
+def measured_surface(patch: np.ndarray, border: int = 4, *, extrapolate: int = 0) -> tuple[np.ndarray, dict] | None:
     """Robust low-order colour field from surrounding paper, never a white fill."""
     h,w = patch.shape[:2]
     if min(h,w) < border*2+3:
@@ -42,8 +42,66 @@ def measured_surface(patch: np.ndarray, border: int = 4) -> tuple[np.ndarray, di
     inliers = float(keep.mean())
     if error95 > 7 or inliers < .7:
         return None
+    if extrapolate:
+        # Evaluate the SAME fitted field outside a small sampling inset. Do not
+        # resize the surface: that would move the gradient underneath the ink.
+        ey,ex = np.mgrid[-extrapolate:h+extrapolate, -extrapolate:w+extrapolate]
+        ex,ey = ex*2/(w-1)-1,ey*2/(h-1)-1
+        terms = np.stack((np.ones_like(ex),ex,ey,ex*ey,ex*ex,ey*ey),axis=-1)
     surface = np.clip(np.rint(terms@coeff),0,255).astype(np.uint8)
     return surface,{"backgroundError95":round(error95,3),"backgroundInlierRatio":round(inliers,3),"backgroundModel":"robust_quadratic_colour_field"}
+
+
+def measured_text_surface(patch: np.ndarray) -> tuple[np.ndarray, dict] | None:
+    """Use nearby paper when the outer OCR halo crosses a card edge/underline.
+
+    Callers supply the existing six-pixel padded OCR crop. Only the sampling
+    ring changes; the repair still requires verified glyphs and a font owner.
+    Keep the stricter generic surface estimator unchanged for visual assets.
+    """
+    model = measured_surface(patch)
+    if model is not None:
+        return model
+    for inset in (4, 3, 2):
+        if min(patch.shape[:2])-2*inset < 11:
+            continue
+        model = measured_surface(patch[inset:-inset,inset:-inset],border=2,extrapolate=inset)
+        if model is not None:
+            paper,evidence = model
+            return paper,{**evidence,"backgroundSamplingInset":inset,
+                          "backgroundSamplingPolicy":"local_ocr_ring_same_quality_gates"}
+    return None
+
+
+def without_untranscribed_bullet(ink: np.ndarray, text: str, height: float) -> tuple[np.ndarray, bool]:
+    """Keep a leading list marker out of an OCR body that did not transcribe it.
+
+    Measure projection islands, not individual connected strokes. The first
+    Chinese glyph may have disconnected upper/lower strokes; treating only a
+    tall component as the body accidentally groups that glyph with the bullet.
+    """
+    if not text or not text[0].isalnum():
+        return ink,False
+    used = ink.any(axis=0)
+    starts = np.flatnonzero(used & ~np.r_[False,used[:-1]])
+    ends = np.flatnonzero(used & ~np.r_[used[1:],False])+1
+    if len(starts)<2:
+        return ink,False
+    left,right = int(starts[0]),int(ends[0])
+    yy,_ = np.where(ink[:,left:right])
+    top,bottom = int(yy.min()),int(yy.max()+1)
+    cw,ch = right-left,bottom-top
+    next_yy,_ = np.where(ink[:,starts[1]:ends[1]])
+    next_height = int(np.ptp(next_yy)+1)
+    next_center = float((next_yy.min()+next_yy.max()+1)/2)
+    if (.2*height<ch<.55*height and .65<cw/max(1,ch)<1.4
+            and ink[:,left:right].sum()/max(1,cw*ch)>.25
+            and starts[1]-right>height*.2 and next_height>ch*1.6
+            and abs((top+bottom)/2-next_center)<height*.22):
+        body = ink.copy()
+        body[:,left:right] = False
+        return body,True
+    return ink,False
 
 
 def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndarray | None=None) -> dict | None:
@@ -130,7 +188,8 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
 
 
 def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = None,
-                           diagnostics: dict | None = None) -> tuple[dict,np.ndarray,np.ndarray] | None:
+                           diagnostics: dict | None = None, *,
+                           paper_reference: tuple[int,int,np.ndarray,dict] | None = None) -> tuple[dict,np.ndarray,np.ndarray] | None:
     report = diagnostics if diagnostics is not None else {}
     report["reason"] = "unreliable_ocr_or_artwork"
     text = str(item.get("text") or "")
@@ -145,7 +204,14 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     x1,y1,x2,y2 = max(0,round(x)-pad),max(0,round(y)-pad),min(w,round(x+iw)+pad),min(h,round(y+ih)+pad)
     patch = source[y1:y2,x1:x2]
     report["reason"] = "complex_or_unmeasured_paper"
-    model = measured_surface(patch)
+    model = None
+    if paper_reference is not None:
+        px,py,parent_paper,parent_evidence = paper_reference
+        if x1>=px and y1>=py and x2<=px+parent_paper.shape[1] and y2<=py+parent_paper.shape[0]:
+            model = (parent_paper[y1-py:y2-py,x1-px:x2-px],
+                     {**parent_evidence,"sharedOcrLinePaper":True})
+    if model is None:
+        model = measured_text_surface(patch)
     if model is None:
         return None
     paper,evidence = model
@@ -162,41 +228,26 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     alignment = np.max(np.abs(pixels-(paper+alpha[:,:,None]*direction)),axis=2)
     core = np.zeros(patch.shape[:2],bool)
     core[max(0,round(y)-y1):min(patch.shape[0],round(y+ih)-y1),max(0,round(x)-x1):min(patch.shape[1],round(x+iw)-x1)] = True
-    strong = core & (alpha>.35) & (alignment<30) & (length>40**2)
+    magnitude = np.sum(difference*difference,axis=2)
+    cosine = np.sum(difference*direction,axis=2)/np.maximum(1,np.sqrt(magnitude*length))
+    # OCR supplies an approximate colour for the entire line. A differently
+    # coloured emphasis run must not estimate its fill from pale AA fringes
+    # just because the true solid strokes differ by >30 RGB levels.
+    strong = core & (alpha>.35) & (cosine>.94) & (length>40**2)
     if np.count_nonzero(strong)<8:
         report["reason"] = "no_separable_glyphs"
         return None
-    fg = np.median(pixels[strong & (alpha>=np.quantile(alpha[strong],.65))],axis=0)
+    fg = np.median(pixels[strong & (magnitude>=np.quantile(magnitude[strong],.65))],axis=0)
     direction = fg-paper.astype(float)
     alpha = np.sum(difference*direction,axis=2)/np.maximum(1,np.sum(direction*direction,axis=2))
     alignment = np.max(np.abs(pixels-(paper+alpha[:,:,None]*direction)),axis=2)
     contrast = np.max(np.abs(difference),axis=2)
     seed = core & (alpha>.16) & (contrast>max(10,evidence["backgroundError95"]*2)) & (alignment<22)
+    seed,excluded_bullet = without_untranscribed_bullet(seed,text,ih)
     count,labels,stats,_ = cv2.connectedComponentsWithStats(seed.astype(np.uint8),8)
     glyphs = np.zeros(seed.shape,bool)
     rejected_line = False
-    excluded_bullet = set()
-    components = sorted(range(1,count),key=lambda n:stats[n,0])
-    if components and text[0].isalnum():
-        tall_left = min((stats[n,0] for n in components if stats[n,3]>.6*ih),default=0)
-        leading = [n for n in components if stats[n,0]+stats[n,2]<tall_left]
-        if leading:
-            cx,cy = min(stats[n,0] for n in leading),min(stats[n,1] for n in leading)
-            cw = max(stats[n,0]+stats[n,2] for n in leading)-cx
-            ch = max(stats[n,1]+stats[n,3] for n in leading)-cy
-            area = sum(stats[n,4] for n in leading)
-        else:
-            cx=cy=cw=ch=area=0
-        gap = tall_left-cx-cw
-        # OCR often includes a list bullet in its bbox but omits it from text.
-        # Keep that visual outside the glyph owner; never invent a character.
-        if (.2*ih<ch<.55*ih and .65<cw/max(1,ch)<1.4
-                and area/max(1,cw*ch)>.25 and gap>ih*.2
-                and abs(cy+ch/2-(y-y1+ih/2))<ih*.22):
-            excluded_bullet = set(leading)
     for number in range(1,count):
-        if number in excluded_bullet:
-            continue
         _,_,cw,ch,area = stats[number]
         if cw>iw*.65 and ch<max(3,ih*.15):
             rejected_line = True  # Grid/axis rules are not glyphs.
