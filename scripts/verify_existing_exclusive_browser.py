@@ -26,21 +26,20 @@ def main():
         page = browser.new_page(viewport={"width": 1600, "height": 1000}, accept_downloads=True)
         page.on("pageerror", lambda exc: errors.append(str(exc)))
         page.on("response", lambda r: missing.append(r.url) if r.status >= 400 and "/media/" in r.url else None)
-        page.goto("http://127.0.0.1:5173/", wait_until="domcontentloaded")
+        page.goto("http://127.0.0.1:5173/?project="+args.project_id, wait_until="domcontentloaded")
         expect(page.get_by_role("button", name="AI设置", exact=True)).to_be_visible()
         page.wait_for_function("""async () => {
-          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+          const module=performance.getEntriesByType('resource').find(e=>e.name.includes('/src/stores/useProjectStore.ts'));
+          if (!module) return false;
+          const {useProjectStore} = await import(module.name);
           const state=useProjectStore.getState(); return Boolean(state.project?.id) && !state.busy;
         }""")
         layout = page.evaluate("""async id => {
           const response = await fetch('/api/projects/'+id+'/slides/1');
           if (!response.ok) throw new Error('Actual saved layout unavailable');
           const layout = await response.json();
-          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
-          useProjectStore.setState({project:{id,name:'单页Ownership回归',createdAt:'2026-10-07',imageCount:1},
-            slides:[layout],pagePreviews:[{id:'source',originalPreviewUrl:'/api/projects/'+id+'/artifacts/source.png',
-              resultPreviewUrl:'/api/projects/'+id+'/artifacts/reconstructed_preview.png',status:'ready'}],
-            activePage:0,approvedPages:[],busy:false,reviewVersion:1,message:'真实结果回归，不启动自动优化'});
+          const {useProjectStore} = await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/stores/useProjectStore.ts')).name);
+          if (useProjectStore.getState().project?.id !== id) throw new Error('Project restore failed');
           return layout;
         }""", args.project_id)
         expect(page.get_by_role("button", name="手动编辑", exact=True).first).to_be_enabled()
@@ -79,7 +78,7 @@ def main():
             page.get_by_label('字号',exact=True).click()
             expect(page.get_by_role('textbox',name='内容',exact=True)).to_have_value('单一文字层回归')
             page.evaluate("""async layout => {
-              const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+              const {useProjectStore} = await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/stores/useProjectStore.ts')).name);
               useProjectStore.setState({slides:[layout],selectedIds:[]});
             }""",layout)
             expect(node.locator('[data-text-content]')).to_have_text(item['text'])
@@ -124,7 +123,7 @@ def main():
         page.screenshot(path=str(output / "browser_image_moved.png"),full_page=True)
         # Restore only this isolated in-memory test state; baseline files untouched.
         page.evaluate("""async layout => {
-          const {useProjectStore} = await import('/src/stores/useProjectStore.ts');
+          const {useProjectStore} = await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/stores/useProjectStore.ts')).name);
           useProjectStore.setState({slides:[layout],selectedIds:[]});
         }""", layout)
         expect(page.get_by_role("button",name="保存当前页面",exact=True)).to_be_enabled()

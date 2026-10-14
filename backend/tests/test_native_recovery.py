@@ -119,7 +119,8 @@ def test_raster_only_quality_failure_is_actionable_http409(monkeypatch,tmp_path)
             pass
         def analyze_project(self,*args):
             raise ReconstructionQualityError('未生成原生文本框；候选已保留，原结果未覆盖。')
-    monkeypatch.setattr(api,'ReconstructionPipeline',FailedPipeline)
+    from backend.tests.test_page_review import install_inline_tasks
+    install_inline_tasks(monkeypatch, api, FailedPipeline)
     response = TestClient(api.app).post(f"/api/projects/{record['id']}/analyze")
     assert response.status_code == 409
     assert response.json()['detail']['code'] == 'EDITABLE_TEXT_RECONSTRUCTION_INCOMPLETE'

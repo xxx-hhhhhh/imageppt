@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import axios from 'axios';
 import type { LayoutElement, LayoutJSON, PagePreview, ProjectInfo } from '../types/layout';
-import { acceptCurrentResult, analyzeProject, approvePage, artifactUrl, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
+import { acceptCurrentResult, approvePage, artifactUrl, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
+import { cancelTask, readTask, restoreProject, startTask, taskIsActive, type AnalysisTask, type RestoredProject } from '../services/analysisTasks';
 
 interface ProjectState {
   project: ProjectInfo | null;
@@ -10,6 +11,11 @@ interface ProjectState {
   activePage: number;
   selectedIds: string[];
   busy: boolean;
+  task: AnalysisTask | null;
+  taskDisconnected: boolean;
+  cancelAnalysis: () => Promise<void>;
+  reconnectAnalysis: () => Promise<void>;
+  runAnalysis: (fallback?: boolean) => Promise<void>;
   message: string;
   aiPaused: boolean;
   reviewVersion: number;
@@ -38,6 +44,45 @@ interface ProjectState {
 }
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+const PROJECT_KEY = 'image2editableppt.projectId';
+let initializing: Promise<void> | null = null;
+let watching: string | null = null;
+function restoredState(data: RestoredProject) {
+  return { project: data.project, slides: data.slides, approvedPages: data.approvedPages,
+    pagePreviews: data.images.map((image, index) => ({ id: image.id, originalPreviewUrl: image.source_url,
+      resultPreviewUrl: data.slides[index] ? `${artifactUrl(data.project.id, index === 0 ? 'reconstructed_preview.png' : `reconstructed_preview_${index + 1}.png`)}?v=${Date.now()}` : null,
+      status: data.slides[index] ? 'ready' as const : 'waiting' as const })) };
+}
+async function watchTask(initial: AnalysisTask) {
+  if (watching === initial.id) return;
+  watching = initial.id;
+  try {
+    let task = initial;
+    while (true) {
+      if (useProjectStore.getState().project?.id !== task.projectId) return;
+      useProjectStore.setState({ task, taskDisconnected: false, busy: taskIsActive(task),
+        message: taskIsActive(task) ? `第 ${task.page} 页：${task.stageLabel} · 已用 ${task.elapsedSeconds} 秒 / 上限 ${task.deadlineSeconds} 秒` : task.message });
+      if (!taskIsActive(task)) {
+        if (task.status === 'succeeded') {
+          const data = await restoreProject(task.projectId);
+          // Keep unsaved edits to other pages; only the analyzed page changes.
+          useProjectStore.setState(state => ({ ...restoredState(data),
+            slides: data.slides.map((slide, index) => index === task.page - 1 ? slide : state.slides[index] || slide),
+            activePage: task.page - 1, reviewVersion: state.reviewVersion + 1, busy: false, aiPaused: false }));
+        } else {
+          useProjectStore.setState({ busy: false, aiPaused: ['failed', 'timed_out', 'interrupted'].includes(task.status) });
+        }
+        return;
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 1500));
+      task = await readTask(task.projectId, task.id);
+    }
+  } catch {
+    // Unknown server state is NOT a failed job. Do not offer a duplicate submit.
+    useProjectStore.setState({ taskDisconnected: true, busy: true,
+      message: '任务连接暂时中断，后台可能仍在处理。点击“恢复连接”或刷新，不会重复开始分析。' });
+  } finally { watching = null; }
+}
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
   project: null,
@@ -46,15 +91,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   activePage: 0,
   selectedIds: [],
   busy: false,
+  task: null,
+  taskDisconnected: false,
   message: '请上传一张或多张图片开始',
   aiPaused: false,
   reviewVersion: 0,
   approvedPages: [],
   conversionMode: 'maximum',
   create: async () => {
-    set({ busy: true, message: '正在创建项目…' });
-    const project = await createProject();
-    set({ project, busy: false, message: '项目已创建，请上传图片' });
+    if (get().project) return;
+    if (initializing) return initializing;
+    initializing = (async () => {
+      set({ busy: true, message: '正在恢复工作区…' });
+      try {
+        const id = new URLSearchParams(window.location.search).get('project') || localStorage.getItem(PROJECT_KEY);
+        if (id) {
+          try {
+            const data = await restoreProject(id);
+            localStorage.setItem(PROJECT_KEY, id);
+            set({ ...restoredState(data), activePage: Math.max(0, (data.task?.page || data.slides.length || 1) - 1),
+              busy: taskIsActive(data.task), task: data.task, message: '已恢复上次项目。' });
+            if (data.task) void watchTask(data.task);
+            return;
+          } catch (error) {
+            if (!axios.isAxiosError(error) || error.response?.status !== 404) throw error;
+            localStorage.removeItem(PROJECT_KEY);
+          }
+        }
+        const project = await createProject();
+        localStorage.setItem(PROJECT_KEY, project.id);
+        set({ project, busy: false, message: '项目已创建，请上传图片' });
+      } catch { set({ busy: false, message: '无法恢复工作区，请检查服务后刷新；没有创建重复项目。' }); }
+    })();
+    try { await initializing; } finally { initializing = null; }
   },
   upload: async (files) => {
     const current = get().project;
@@ -71,18 +140,55 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
   analyze: async () => {
+    await get().runAnalysis();
+  },
+  runAnalysis: async (fallback = false) => {
     const project = get().project;
-    if (!project) return;
-    const page = Math.min(get().slides.length + 1, project.imageCount);
+    if (!project || get().busy || taskIsActive(get().task)) return;
+    const page = get().task && get().task!.status !== 'succeeded' ? get().task!.page : Math.min(get().slides.length + 1, project.imageCount);
     set({ busy: true, aiPaused: false, message: `正在重建第 ${page} / ${project.imageCount} 页…` });
     try {
-      const result = await analyzeProject(project.id, get().conversionMode, page);
-      set((state) => ({ project: result.project, slides: [...state.slides.slice(0, page - 1), result.slides[0]], pagePreviews: state.pagePreviews.map((item, index) => index === page - 1 ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, page === 1 ? 'reconstructed_preview.png' : `reconstructed_preview_${page}.png`)}?v=${state.reviewVersion + 1}`, status: 'ready' } : item), activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: `第 ${page} 页已重建，请对照原图确认。${result.warnings[0] || ''}` }));
+      const task = await startTask(project.id, page, fallback ? 'fast' : get().conversionMode, fallback);
+      set({ task, activePage: page - 1 });
+      void watchTask(task);
     } catch (error) {
+      if (axios.isAxiosError(error) && !error.response) {
+        // POST may have reached the server even if its response was lost.
+        // Recover its id before allowing another submit or calling it failed.
+        try {
+          const restored = await restoreProject(project.id);
+          if (restored.task && taskIsActive(restored.task)) {
+            set({ task: restored.task });
+            void watchTask(restored.task);
+            return;
+          }
+        } catch {
+          set({ busy: true, taskDisconnected: true,
+            message: '未收到提交确认，任务可能已启动。请恢复连接，不要重复提交。' });
+          return;
+        }
+      }
       const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null;
       set({ busy: false, aiPaused: detail?.code === 'AI_UNAVAILABLE', message: typeof detail?.message === 'string' ? detail.message : '本页重建失败，请重试。' });
       throw error;
     }
+  },
+  cancelAnalysis: async () => {
+    const task = get().task;
+    if (!task || !taskIsActive(task)) return;
+    try {
+      const result = await cancelTask(task.projectId, task.id);
+      set({ task: result, busy: taskIsActive(result), taskDisconnected: false, message: result.message });
+    } catch { set({ taskDisconnected: true, message: '未确认取消成功，请恢复连接后重试；后台任务仍受总时限保护。' }); }
+  },
+  reconnectAnalysis: async () => {
+    const { project } = get();
+    if (!project) { await get().create(); return; }
+    try {
+      const data = await restoreProject(project.id);
+      if (data.task) await watchTask(data.task);
+      else set({ busy: false, taskDisconnected: false });
+    } catch { set({ taskDisconnected: true, message: '服务仍未连接，请检查后再次恢复。' }); }
   },
   approveAndNext: async () => {
     const { project, slides, activePage } = get();
@@ -99,17 +205,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (activePage + 1 < project.imageCount) await get().analyze();
   },
   useBasicFallback: async () => {
-    const project = get().project;
-    if (!project) return;
-    const page = Math.min(get().slides.length + 1, project.imageCount);
-    set({ busy: true, aiPaused: false, message: `正在以基础模式处理第 ${page} 页…` });
-    try {
-      const result = await analyzeProject(project.id, get().conversionMode, page, true);
-      set((state) => ({ slides: [...state.slides.slice(0, page - 1), result.slides[0]], pagePreviews: state.pagePreviews.map((item, index) => index === page - 1 ? { ...item, resultPreviewUrl: `${artifactUrl(project.id, page === 1 ? 'reconstructed_preview.png' : `reconstructed_preview_${page}.png`)}?v=${state.reviewVersion + 1}`, status: 'ready' } : item), activePage: page - 1, busy: false, reviewVersion: state.reviewVersion + 1, message: '本页已使用基础模式，请仔细核对视觉结果。' }));
-    } catch (error) {
-      set({ busy: false, aiPaused: true, message: '基础模式也未能完成，请检查设置并重试。' });
-      throw error;
-    }
+    await get().runAnalysis(true);
   },
   reanalyzeCurrent: async () => {
     const { project, activePage } = get();

@@ -104,12 +104,13 @@ class ReconstructionPipeline:
         refined["coordinateSystem"] = "source-pixels-left-top"
         return refined
 
-    def analyze_project(self, project_id: str, mode: str | None = None, page: int = 1, allow_fallback: bool = False) -> tuple[list[dict], str, list[str]]:
+    def analyze_project(self, project_id: str, mode: str | None = None, page: int = 1, allow_fallback: bool = False, *, progress=None, prepare_only: bool = False) -> tuple[list[dict], str, list[str]]:
         """The sole production route: proposals -> verified owners -> background.
 
         Old erase/repair helpers remain for reading historical artifacts, but
         this entry point cannot invoke them or an automatic revision loop.
         """
+        report = progress or (lambda stage: None)
         from app.services.layout.detectors import (
             detect_simple_shapes,
             detect_text_elements,
@@ -136,7 +137,9 @@ class ReconstructionPipeline:
         candidate.mkdir(parents=True)
         original_source = Path(images[page-1]["path"])
         normalized = candidate / "normalized" / f"page_{page}.png"
+        report("preprocessing")
         width, height = preprocess_image(original_source, normalized)
+        report("ocr")
         ocr = OCRService(OCR_PROVIDER)
         regions = ocr.recognize(normalized)
         # Do NOT call LayoutService's badge suppressor, pre-cleaner or planner.
@@ -146,7 +149,10 @@ class ReconstructionPipeline:
         if hasattr(self.scene_analyzer.vision_provider, "strict"):
             self.scene_analyzer.vision_provider.strict = conversion_mode != "fast" and not allow_fallback
         self.segmentation_provider.text_regions = [e for e in ocr_layout['elements'] if e.get('type')=='text']
+        report("segmentation")
         segments = [] if conversion_mode == "fast" else self.segmentation_provider.segment(normalized, candidate / "assets", project_id)
+        report("layout")
+        self.scene_analyzer.progress = report
         scene, scene_warnings = self.scene_analyzer.analyze(normalized, ocr_layout, regions, segments,
             enable_vision=conversion_mode != "fast", mode="high" if conversion_mode in {"maximum", "high_quality"} else conversion_mode)
         routing = self.scene_analyzer.vision_routing
@@ -156,10 +162,12 @@ class ReconstructionPipeline:
             raise AIUnavailableError("Qwen 页面理解未成功；候选已保留，原结果没有被覆盖。请检查 AI 设置后重试。")
         self._write_json(candidate / "scene_raw.json", scene)
         self._write_json(candidate / "ocr_layout.json", ocr_layout)
+        report("text_reconstruction")
         layout = build_exclusive_scene(normalized, ocr_layout, scene, segments, candidate, project_id, page)
         layout["metadata"].update({"conversionMode": conversion_mode, "ocrProvider": ocr.provider_name,
             "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
             "requestedVisionProvider": routing.get("requestedProvider"), "segmentationProvider": self.segmentation_provider.name})
+        report("validation")
         background = candidate / "backgrounds" / f"page_{page}.png"
         # Preview renders the candidate paths before assets have been committed.
         preview_layout = copy.deepcopy(layout)
@@ -203,7 +211,9 @@ class ReconstructionPipeline:
             "stagnationReason": "ownership_audit_pause",
             "semanticObjectCoverage":None,
             "metricScope": "source-pixel ownership and glyph-local repairs; semantic extraction completeness is not implied; font substitution/verified antialias edges explicit; PowerPoint render separate"})
-        from app.services.validation.reconstruction_quality import reconstruction_quality
+        from app.services.validation.reconstruction_quality import (
+            reconstruction_quality,
+        )
         score.update(reconstruction_quality(layout,audit,preservation))
         score['issuesAfter'] = score.get('issues',[]) + score['issuesAfter']
         score['visualSimilarityScore'] = score.get('overall')
@@ -215,9 +225,38 @@ class ReconstructionPipeline:
         candidate_slides = [preview_layout if index == page else slide for index, slide in enumerate(prior_slides, 1)]
         if page > len(prior_slides):
             candidate_slides.append(preview_layout)
+        report("pptx")
         output_path, validation = PPTXRenderer().render_project(project_id, candidate_slides, output_dir=candidate)
         if not validation['valid']:
             raise ReconstructionQualityError('PPTX 重新打开后的内容与 Layout 不一致；候选保留，未覆盖上一版本。')
+        warnings = list(ocr.warnings) + scene_warnings + list(getattr(self.segmentation_provider, "warnings", []))
+        warnings.append(f"自动优化已暂停；{detected-editable_lines}/{detected} 条文字尚未完整转为可编辑文本。当前为部分可编辑结果，需人工检查字体与图片拆分。")
+        self._write_json(candidate / "publication.json", {"projectId": project_id, "page": page,
+            "mode": conversion_mode, "ocrProvider": ocr.provider_name, "routing": routing,
+            "warnings": warnings, "quality": score, "outputName": output_path.name})
+        self.prepared_candidate = candidate
+        if not prepare_only:
+            report("publishing")
+            self.publish_candidate(self.store, candidate)
+        return [layout], ocr.provider_name, warnings
+
+    @staticmethod
+    def publish_candidate(store: ProjectStore, candidate: Path) -> None:
+        """Only the supervisor publishes; a cancelled worker cannot alter results."""
+        manifest = json.loads((candidate / "publication.json").read_text(encoding="utf-8"))
+        project_id, page = manifest["projectId"], manifest["page"]
+        root = store.root / project_id
+        if candidate.resolve().parent != (root / "candidates").resolve():
+            raise ValueError("Invalid candidate directory")
+        token = candidate.name
+        layout = json.loads((candidate / f"scene_final_{page}.json").read_text(encoding="utf-8"))
+        normalized = candidate / "normalized" / f"page_{page}.png"
+        background = candidate / "backgrounds" / f"page_{page}.png"
+        preview = candidate / "reconstructed_preview.png"
+        output_path = candidate / manifest["outputName"]
+        validation = json.loads((candidate / "validation.json").read_text(encoding="utf-8"))
+        def write_json(path, payload):
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         # Freeze the prior working artifacts. Never delete an old asset.
         if (root / "slides" / f"page_{page}.json").is_file():
             archive = root / "snapshots" / token
@@ -246,7 +285,7 @@ class ReconstructionPipeline:
             shutil.copy2(background, root / "backgrounds" / background.name)
             suffix = "" if page == 1 else f"_{page}"
             for filename in ("scene_raw", "visual_score", "visual_validation", "routing", "vision_debug", "raster_text_audit", "preservation_checks"):
-                self._write_json(root / f"{filename}{suffix}.json", json.loads((candidate / f"{filename}.json").read_text(encoding="utf-8")))
+                write_json(root / f"{filename}{suffix}.json", json.loads((candidate / f"{filename}.json").read_text(encoding="utf-8")))
             for filename in ("source", "original"):
                 shutil.copy2(normalized, root / f"{filename}{suffix}.png")
             for filename in ("reconstructed_preview", "final_preview", "initial_preview"):
@@ -255,18 +294,16 @@ class ReconstructionPipeline:
             shutil.copy2(background, root / f"clean_background{suffix}.png")
             for filename in (f"ownership_labels_{page}.png", f"ownership_audit_{page}.json", f"scene_final_{page}.json"):
                 shutil.copy2(candidate / filename, root / filename)
-            self.store.save_slide(project_id, page, layout)
+            store.save_slide(project_id, page, layout)
             shutil.copy2(output_path, root / "editable.pptx")
             shutil.copy2(candidate / "validation.json", root / "validation.json")
             shutil.copy2(output_path, root / "output.pptx")
-            warnings = list(ocr.warnings) + scene_warnings + list(getattr(self.segmentation_provider, "warnings", []))
-            warnings.append(f"自动优化已暂停；{detected-editable_lines}/{detected} 条文字尚未完整转为可编辑文本。当前为部分可编辑结果，需人工检查字体与图片拆分。")
-            self._write_json(root / "conversion_report.json", {"projectId": project_id, "mode": conversion_mode,
-                "ocrProvider": ocr.provider_name, "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
+            routing = manifest["routing"]
+            write_json(root / "conversion_report.json", {"projectId": project_id, "mode": manifest["mode"],
+                "ocrProvider": manifest["ocrProvider"], "visionProvider": routing.get("usedProvider"), "visionModel": routing.get("usedModel"),
                 "aiUsed": bool(routing.get("aiUsed")), "routing": routing, "criticRounds": 0,
                 "pipeline": "exclusive_object_first", "revisionStatus": "automatic_revisions_paused", "validation": validation,
-                "warnings": warnings, "quality": score})
-        return [layout], ocr.provider_name, warnings
+                "warnings": manifest["warnings"], "quality": manifest["quality"]})
 
 
 class AIUnavailableError(RuntimeError):

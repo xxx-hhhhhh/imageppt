@@ -30,9 +30,13 @@ export function EditorPage() {
   const [stagnationReason, setStagnationReason] = useState<string | null>(null);
   const [dismissedDecision, setDismissedDecision] = useState('');
   const [reviewAction, setReviewAction] = useState('');
+  const task = useProjectStore(state => state.task);
+  const taskDisconnected = useProjectStore(state => state.taskDisconnected);
+  const cancelAnalysis = useProjectStore(state => state.cancelAnalysis);
+  const reconnectAnalysis = useProjectStore(state => state.reconnectAnalysis);
   const { project, slides, pagePreviews, activePage, selectedIds, busy, message, aiPaused, reviewVersion, approvedPages, create, upload, analyze, approveAndNext, useBasicFallback, reanalyzeCurrent, downgradeCurrent, acceptCurrent, persistPage, updateActive, setSelection, setActivePage, moveLayer, export: exportProject } = useProjectStore();
 
-  useEffect(() => { if (!project) void create(); }, [project, create]);
+  useEffect(() => { void create(); }, [create]);
   useEffect(() => { void getVisionStatus().then(setVisionStatus).catch(() => setVisionStatus(null)); }, []);
   useEffect(() => { void getLocalInpaintStatus().then(setLocalInpaint).catch(() => setLocalInpaint(null)); }, [reviewVersion]);
   useEffect(() => {
@@ -66,6 +70,11 @@ export function EditorPage() {
         <div className="workspace-heading"><div><span className="eyebrow">AI PRESENTATION STUDIO</span><h1>{pagePreview ? `第 ${activePage + 1} 页 · ${page ? editing ? '手动编辑' : approved ? '已通过' : '逐页确认' : '待解析'}` : '创作工作台'}</h1></div><div className="workspace-chips"><span className="quality-badge">最高质量</span><span className="inpaint-status" title={localInpaint?.connected ? '本地修图服务可用' : '本地修图不可用，自动使用原有修复方式'}>{localFallbacks > 0 ? `LaMa 已回退 ${localFallbacks} 次` : localSuccesses > 0 ? `LaMa 已修复 ${localSuccesses} 次` : localInpaint?.connected ? '本地 LaMa 已连接' : '本地 LaMa 未连接'}</span></div></div>
         <div className="status-row"><span className={busy ? 'status busy' : 'status'} role="status">{reviewAction || error || message}</span>{partialPlan && <span className="quality-badge" role="status">AI 模块已规划 · {partialPlan.uncoveredTextIds?.length || 0} 条文字由 OCR 补齐</span>}{pagePreview && <span className="page-counter">{String(activePage + 1).padStart(2, '0')} / {String(project?.imageCount || pagePreviews.length).padStart(2, '0')}</span>}</div>
         {pagePreview && <div className="view-toolbar"><div className="view-segments" role="group" aria-label="查看模式"><button type="button" className={viewMode === 'original' ? 'selected' : ''} aria-pressed={viewMode === 'original'} onClick={() => setViewMode('original')}>原图</button><button type="button" className={viewMode === 'result' ? 'selected' : ''} aria-pressed={viewMode === 'result'} onClick={() => setViewMode('result')}>结果</button><button type="button" className={viewMode === 'compare' ? 'selected' : ''} aria-pressed={viewMode === 'compare'} onClick={() => setViewMode('compare')}>对比查看</button></div><div className="zoom-controls" role="group" aria-label="画布缩放"><button type="button" aria-label="缩小" disabled={zoomFactor <= 0.5} onClick={() => setZoomFactor((value) => Math.max(0.5, Math.round((value - .25) * 100) / 100))}>−</button><span>{Math.round(zoomFactor * 100)}%</span><button type="button" aria-label="放大" disabled={zoomFactor >= 2} onClick={() => setZoomFactor((value) => Math.min(2, Math.round((value + .25) * 100) / 100))}>＋</button></div></div>}
+        {(task && ['running', 'publishing'].includes(task.status) || taskDisconnected) && <div className="review-actions" aria-label="分析任务进度">
+          <span role="status">{message}。刷新可恢复任务；完成前不覆盖旧结果。</span>
+          {taskDisconnected && <button onClick={() => void handle(reconnectAnalysis)}>恢复连接</button>}
+          <button disabled={!task || task.status === 'publishing'} onClick={() => void handle(cancelAnalysis)}>取消分析</button>
+        </div>}
         {aiPaused && !busy && <div className="review-actions" role="alert"><span>{error || message || 'AI 处理已暂停，请重试。'}</span><button onClick={() => void handle(analyze)}>重试 AI</button><button onClick={() => void handle(useBasicFallback)}>使用基础模式</button></div>}
         {reviewing && revisionStatus === 'stagnated' && !busy && dismissedDecision !== decisionKey && <div className="review-actions" role="alert"><span>局部优化已停滞{stagnationReason === 'no_targetable_issues' ? '：没有新的可修复区域' : '，请选择下一步'}。</span><button onClick={() => void handleDecision(reanalyzeCurrent)}>继续自动优化</button><button onClick={() => void handleDecision(downgradeCurrent, '正在调整问题区域…')}>图片主体＋可编辑文字</button><button onClick={() => void handleDecision(acceptCurrent, '正在保留当前结果…')}>使用当前结果</button></div>}
         {reviewing && !busy && (revisionStatus !== 'stagnated' || dismissedDecision === decisionKey) && <div className="review-actions page-decision"><span>检查当前结果，可切换到对比查看</span><div><button className="decision-primary" onClick={() => void approvePage()}>通过本页</button><button onClick={() => void handleDecision(reanalyzeCurrent)}>继续自动优化</button><button onClick={() => { setEditing(true); setViewMode('result'); }}>手动编辑</button></div></div>}

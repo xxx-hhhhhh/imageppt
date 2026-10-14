@@ -9,12 +9,16 @@ from typing import Any
 
 import httpx
 
-from .proxy import resolve_proxy
 from .base import VisionProvider
-from .prompts import CRITIC_PROMPT, SCENE_REPAIR_PROMPT, SCENE_SYSTEM_PROMPT, scene_user_prompt
+from .prompts import (
+    CRITIC_PROMPT,
+    SCENE_REPAIR_PROMPT,
+    SCENE_SYSTEM_PROMPT,
+    scene_user_prompt,
+)
+from .proxy import resolve_proxy
 from .schemas import extract_json, validate_json
 from .test_assets import cleanup_test_image, create_test_image
-
 
 logger = logging.getLogger(__name__)
 _PROXY_UNSET = object()
@@ -99,7 +103,25 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         for attempt in range(self.max_retries + 1):
             started = time.perf_counter()
             try:
-                response = self.client.chat.completions.create(model=self.model, messages=request_messages)
+                deadline = getattr(self, "_analysis_deadline", None)
+                if deadline is not None:
+                    # A non-streaming response returns nothing until the entire
+                    # scene JSON is generated. Consume incremental output so a
+                    # healthy long generation isn't mistaken for a dead socket.
+                    stream = self.client.chat.completions.create(model=self.model, messages=request_messages, stream=True)
+                    parts = []
+                    try:
+                        for chunk in stream:
+                            if time.monotonic() >= deadline:
+                                raise VisionProviderError("AI 页面理解已达到请求预算", error_code="analysis_budget")
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                parts.append(chunk.choices[0].delta.content)
+                    finally:
+                        stream.close()
+                    body = "".join(parts)
+                else:
+                    response = self.client.chat.completions.create(model=self.model, messages=request_messages)
+                    body = str(response.choices[0].message.content or "")
                 self.last_status_code = 200
                 self.last_latency_ms = round((time.perf_counter() - started) * 1000)
                 logger.info(
@@ -110,8 +132,10 @@ class OpenAICompatibleVisionProvider(VisionProvider):
                     self.connection_path,
                     self.last_latency_ms,
                 )
-                return str(response.choices[0].message.content or "")
+                return body
             except Exception as exc:
+                if isinstance(exc, VisionProviderError):
+                    raise
                 last_error = exc
                 error = classify_vision_error(self.name, exc, self.connection_path, round((time.perf_counter() - started) * 1000))
                 self.last_status_code = error.status_code

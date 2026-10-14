@@ -131,3 +131,40 @@ def test_adjacent_runs_use_one_verified_paper_field():
     overlap=candidates[0][1]&candidates[1][1]
     assert overlap.any()
     assert np.array_equal(candidates[0][2][overlap],candidates[1][2][overlap])
+
+
+def test_crop_fragments_do_not_define_text_height_or_remove_punctuation():
+    from app.services.reconstruction.editable_text import (
+        exclude_isolated_crop_fragments,
+    )
+    seed = np.zeros((32, 130), bool)
+    for x in (20, 40, 60, 80):
+        seed[10:26, x:x+12] = True
+    seed[4, 44] = True  # one isolated compression pixel above the baseline
+    seed[16:19, 7] = True  # clipped list marker, outside the body
+    seed[7:9, 84:86] = True  # actual punctuation / i dot, must stay
+    cleaned = exclude_isolated_crop_fragments(seed, '正文文字', 20)
+    assert not cleaned[4, 44] and not cleaned[16:19, 7].any()
+    assert cleaned[7:9, 84:86].all()
+    assert seed[4, 44]  # Never mutate source evidence.
+
+
+def test_borderline_ocr_requires_glyph_confirmation_and_retains_confidence():
+    path = Path('C:/Windows/Fonts/msyh.ttc')
+    if not path.is_file():
+        pytest.skip('Windows font fixture')
+    image = Image.new('RGB', (400, 100), '#EDF5FA')
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(str(path), 24)
+    text = '普通正文可以编辑'
+    draw.text((24, 20), text, font=font, fill='#17365D')
+    x, y, r, b = draw.textbbox((24, 20), text, font=font)
+    item = {'id': 'body', 'text': text, 'confidence': .88, 'x': x, 'y': y,
+            'width': r-x, 'height': b-y, 'style': {'color': '#17365D'}}
+    source = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    candidate = restore_text_candidate(source, item)
+    assert candidate is not None
+    assert candidate[0]['confidence'] == .88
+    assert candidate[0]['metadata']['ocrNeedsReview']
+    assert restore_text_candidate(source, {**item, 'confidence': .7}) is None
+    assert restore_text_candidate(source, {**item, 'text': '错误文字不能通过'}) is None

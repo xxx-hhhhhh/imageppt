@@ -91,7 +91,8 @@ def main():
     assert audit["missingAssetCount"]==audit["rasterNativeDuplicateTextCount"]==0
     assert preservation["unownedSourcePixels"]==preservation["multiplyOwnedSourcePixels"]==preservation["unexpectedVisualChangedPixels"]==0
     assert preservation["unownedGlyphPaperPixels"]==preservation["multiplyOwnedGlyphPaperPixels"]==0
-    store.add_image(record["id"],{"path":str(source)})
+    store.add_image(record["id"],{"id":"source_1","path":str(source),
+        "source_url":f"/api/projects/{record['id']}/artifacts/source.png"})
     store.save_slide(record["id"],1,layout)
     shutil.copy2(source,root / "source.png")
     shutil.copy2(source,root / "original.png")

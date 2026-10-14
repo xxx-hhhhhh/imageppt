@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.services.fusion.scene_fusion import fuse_scene
 from app.services.scene.alignment_analyzer import analyze_alignment
 from app.services.scene.component_classifier import classify_element
 from app.services.scene.geometry_optimizer import optimize_layout
@@ -14,7 +15,6 @@ from app.services.scene.relation_analyzer import analyze_relations
 from app.services.scene.repetition_detector import detect_repetition
 from app.services.style.color_analyzer import analyze_colors
 from app.services.typography.text_analyzer import analyze_text_regions
-from app.services.fusion.scene_fusion import fuse_scene
 from app.services.vision.factory import create_vision_provider
 
 
@@ -46,9 +46,13 @@ class SceneAnalyzer:
         provider_regions = self.layout_provider.analyze(image_path)
         relations = analyze_relations(elements) + analyze_alignment(elements) + detect_repetition(elements) + detect_grid(elements)
         groups = [{"id": group_id, "role": next((item.get("role") for item in elements if item.get("groupId") == group_id), "component"), "members": [item["id"] for item in elements if item.get("groupId") == group_id]} for group_id in sorted({item.get("groupId") for item in elements if item.get("groupId")})]
-        ocr_payload = [{"id": f"ocr_{index + 1}", "text": item.text, "bbox": item.bbox, "confidence": item.confidence} for index, item in enumerate(ocr_results)]
+        # One canonical id per OCR owner; do not send the same text under both
+        # ocr_N and text_NNN and ask the model to repeat it in its response.
+        ocr_payload = [{"id": item["id"], "text": item["text"], "bbox": item["bbox"], "confidence": item["confidence"]}
+                       for item in elements if item.get("type") == "text"]
         if enable_vision:
             try:
+                getattr(self, "progress", lambda stage: None)("vision")
                 candidates = [
                     {"id": item["id"], "type": item["type"], "bbox": item["bbox"], "text": str(item.get("text") or "")[:80]}
                     for item in elements if item.get("type") != "background"

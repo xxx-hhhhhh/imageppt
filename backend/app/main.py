@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import mimetypes
 import json
+import mimetypes
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -10,25 +11,41 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app.config import LOCAL_INPAINT_ENABLED, LOCAL_INPAINT_MODEL, LOCAL_INPAINT_URL, OUTPUTS_DIR, PUBLIC_SHARED_MODE, TEMP_DIR, UPLOADS_DIR, VISION_PROVIDER, ensure_runtime_dirs
-from app.services.inpainting.local_client import LocalIOPaintClient
+from app.config import (
+    LOCAL_INPAINT_ENABLED,
+    LOCAL_INPAINT_MODEL,
+    LOCAL_INPAINT_URL,
+    OUTPUTS_DIR,
+    PUBLIC_SHARED_MODE,
+    UPLOADS_DIR,
+    ensure_runtime_dirs,
+)
 from app.models.project_store import ProjectStore
 from app.schemas.layout import AnalyzeResponse, LayoutJSON, RevisionResponse
 from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
-from app.schemas.vision import VisionSettingsPayload, VisionSettingsResponse, VisionTestResponse
+from app.schemas.tasks import AnalysisTaskRequest
+from app.schemas.vision import (
+    VisionSettingsPayload,
+    VisionSettingsResponse,
+    VisionTestResponse,
+)
+from app.services.inpainting.local_client import LocalIOPaintClient
+from app.services.paddle_runtime import paddle_diagnostics
 from app.services.pptx import PPTXRenderer
-from app.services.reconstruction import ReconstructionPipeline
-from app.services.reconstruction.pipeline import AIUnavailableError, ReconstructionQualityError
 from app.services.reconstruction.downgrade import downgrade_problem_regions
 from app.services.reconstruction.revision import run_revision_loop
-from app.services.settings.runtime_settings import load_vision_settings, mask_api_key, save_vision_settings
-from app.services.vision.router import VisionRouter
+from app.services.reconstruction.tasks import AnalysisTasks, TaskConflict
+from app.services.settings.runtime_settings import (
+    load_vision_settings,
+    mask_api_key,
+    save_vision_settings,
+)
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
-from app.services.paddle_runtime import paddle_diagnostics
-
+from app.services.vision.router import VisionRouter
 
 ensure_runtime_dirs()
 store = ProjectStore()
+analysis_tasks = AnalysisTasks(store)
 renderer = PPTXRenderer()
 app = FastAPI(title="Image2EditablePPT API", version="1.0.0")
 app.add_middleware(
@@ -42,6 +59,15 @@ app.add_middleware(
 
 def project_response(record: dict) -> ProjectResponse:
     return ProjectResponse(id=record["id"], name=record["name"], createdAt=record["createdAt"], imageCount=len(record.get("images", [])))
+
+
+def _require_idle_project(project_id: str) -> None:
+    # A manager only owns tasks for its configured storage root.
+    if analysis_tasks.store.root != store.root:
+        return
+    task = analysis_tasks.latest(project_id)
+    if task and task["status"] in {"running", "publishing"}:
+        raise HTTPException(409, detail={"code": "TASK_RUNNING", "message": "本项目正在分析，请先取消或等待完成；当前修改未覆盖。"})
 
 
 def _get_project(project_id: str) -> dict:
@@ -69,9 +95,48 @@ def create_project(payload: ProjectCreate) -> ProjectResponse:
     return project_response(store.create(payload.name))
 
 
+@app.get("/api/projects/{project_id}")
+def restore_project(project_id: str) -> dict:
+    record = _get_project(project_id)
+    return {"project": project_response(record), "slides": store.list_slides(project_id),
+            "approvedPages": record.get("approvedPages", []),
+            "images": [{"id": image.get("id", f"page_{index}"),
+                        "source_url": image.get("source_url") or f"/api/projects/{project_id}/artifacts/source{'_' + str(index) if index > 1 else ''}.png"}
+                       for index, image in enumerate(record["images"], 1)],
+            "task": analysis_tasks.latest(project_id)}
+
+
+@app.post("/api/projects/{project_id}/analysis-tasks", status_code=202)
+def start_analysis_task(project_id: str, payload: AnalysisTaskRequest) -> dict:
+    _get_project(project_id)
+    try:
+        return analysis_tasks.submit(project_id, payload.page, payload.mode, payload.allowFallback)
+    except TaskConflict as exc:
+        raise HTTPException(409, detail={"code": "TASK_CONFLICT", "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail="Page not found") from exc
+
+
+@app.get("/api/projects/{project_id}/analysis-tasks/{task_id}")
+def get_analysis_task(project_id: str, task_id: str) -> dict:
+    try:
+        return analysis_tasks.get(project_id, task_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="Task not found") from exc
+
+
+@app.post("/api/projects/{project_id}/analysis-tasks/{task_id}/cancel")
+def cancel_analysis_task(project_id: str, task_id: str) -> dict:
+    try:
+        return analysis_tasks.cancel(project_id, task_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="Task not found") from exc
+
+
 @app.post("/api/projects/{project_id}/images", response_model=UploadResponse)
 async def upload_images(project_id: str, files: list[UploadFile] = File(...)) -> UploadResponse:
-    record = _get_project(project_id)
+    _get_project(project_id)
+    _require_idle_project(project_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image is required")
     allowed = {".png", ".jpg", ".jpeg", ".webp"}
@@ -108,17 +173,20 @@ def analyze_project(project_id: str, mode: str = Query("maximum", pattern="^(fas
         raise HTTPException(status_code=404, detail="Page not found")
     if page > 1 and page - 1 not in record.get("approvedPages", []):
         raise HTTPException(status_code=409, detail={"code": "PREVIOUS_PAGE_NOT_APPROVED", "message": "请先确认上一页的重建结果。"})
-    try:
-        pipeline = ReconstructionPipeline(store)
-        slides, provider, warnings = pipeline.analyze_project(project_id, mode, page, allow_fallback)
-    except AIUnavailableError as exc:
-        raise HTTPException(status_code=409, detail={"code": "AI_UNAVAILABLE", "message": str(exc)}) from exc
-    except ReconstructionQualityError as exc:
-        raise HTTPException(status_code=409, detail={"code": "EDITABLE_TEXT_RECONSTRUCTION_INCOMPLETE", "message": str(exc)}) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="页面重建失败，请重试。") from exc
-    routing = pipeline.scene_analyzer.vision_routing
-    runtime = load_vision_settings()
+    # Compatibility endpoint: same response contract, same bounded supervisor.
+    # The browser uses POST analysis-tasks + polling instead of this long request.
+    task = start_analysis_task(project_id, AnalysisTaskRequest(page=page, mode=mode, allowFallback=allow_fallback))
+    while task["status"] in {"running", "publishing"}:
+        time.sleep(.2)
+        task = analysis_tasks.get(project_id, task["id"])
+    if task["status"] != "succeeded":
+        code = task.get("errorCode") or task["status"].upper()
+        if code == "QUALITY_REJECTED":
+            code = "EDITABLE_TEXT_RECONSTRUCTION_INCOMPLETE"
+        raise HTTPException(409, detail={"code": code, "message": task["message"], "taskId": task["id"]})
+    report = json.loads((store.root / project_id / "conversion_report.json").read_text(encoding="utf-8"))
+    slides = [store.get_slide(project_id, page)]
+    provider, warnings, routing = report["ocrProvider"], report["warnings"], report["routing"]
     vision_warning = next((item for item in warnings if any(name in item for name in ("Qwen", "Vision", "vision"))), None)
     return AnalyzeResponse(project=project_response(record), slides=slides, provider=provider, ocrProvider=provider, visionProvider=routing.get("usedProvider", "none"), aiUsed=bool(routing.get("aiUsed")), visionModel=routing.get("usedModel"), requestedVisionProvider=routing.get("requestedProvider"), fallbackCount=int(routing.get("fallbackCount", 0)), visionWarning=vision_warning, warnings=warnings)
 
@@ -282,13 +350,16 @@ def get_slide(project_id: str, page: int) -> LayoutJSON:
 @app.put("/api/projects/{project_id}/slides/{page}", response_model=LayoutJSON)
 def update_slide(project_id: str, page: int, layout: LayoutJSON) -> LayoutJSON:
     _get_project(project_id)
-    store.save_slide(project_id, page, layout.model_dump(mode="json"))
+    with analysis_tasks.lock:
+        _require_idle_project(project_id)
+        store.save_slide(project_id, page, layout.model_dump(mode="json"))
     return layout
 
 
 @app.post("/api/projects/{project_id}/export/pptx")
 def export_pptx(project_id: str) -> dict:
     record = _get_project(project_id)
+    _require_idle_project(project_id)
     if any(page not in record.get("approvedPages", []) for page in range(1, len(record.get("images", [])) + 1)):
         raise HTTPException(status_code=409, detail="请先逐页确认全部重建结果。")
     layouts = store.list_slides(project_id)

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 
-
 SCENE_SYSTEM_PROMPT = """你是专业的视觉版式分析引擎。
 你的任务不是重新设计页面，也不是美化页面。你的唯一任务是理解输入图片原本的视觉结构，并返回结构化 JSON。
 必须尽可能忠实于原图。重点分析页面结构、标题副标题正文标签、卡片矩形圆形线条、图标 Logo 照片插画、背景装饰、组件归属、重复组件、行列布局、对齐关系、图层顺序、字体视觉类别和包含关系。
 不要猜测精确像素坐标。精确坐标由 CV/OCR 模块提供。你主要负责判断 WHAT、ROLE、GROUP、RELATION、LAYER、STYLE CATEGORY。
-elements 中每个匹配元素至少返回：ocrId 或 id、role、semanticType、groupId、zLayer、fontClass、fontWeight、alignment、reconstructionStrategy、doNotVectorize、visualComplexity、visionConfidence。
+elements 仅列需要补充语义的特殊元素（主标题、艺术字、Logo、复杂视觉、归属歧义），返回 id/ocrId、role、groupId、reconstructionStrategy、visionConfidence；其他字段只在确实需要时返回。普通正文默认 editable_text，不要为每一行重复默认字段，不要返回文字正文或重新抄写 OCR。所有 OCR 行仍由本地重建逐条处理，省略普通行不代表忽略该行。
 reconstructionStrategy 只能使用 editable_text、native_shape、transparent_image、local_image、background_image、group。
 可编辑文字使用 editable_text；可靠的简单矩形、圆、线使用 native_shape；icon、logo、illustration、ornament 等复杂视觉元素优先使用 transparent_image 并设置 doNotVectorize=true。不要把复杂图标或装饰强制改成 native_shape。
 fontClass 使用 serif、sans、bold-sans、calligraphy、display、monospace；alignment 使用 left、center、right；visualComplexity 和 visionConfidence 使用 0 到 1。
@@ -15,12 +14,12 @@ fontClass 使用 serif、sans、bold-sans、calligraphy、display、monospace；
 
 SCENE_SYSTEM_PROMPT += """
 先规划整页一级模块，再判断模块内元素。返回 reconstructionPlan.modules，按阅读顺序列出一级模块。
-每个模块包含 moduleId、role、bbox、reconstructionStrategy、visualComplexity、editablePriority、confidence、children、ownership、preserveWhole、memberIds、editableIds、ignoreIds、preserveRegions。
+每个模块包含 moduleId、role、bbox、reconstructionStrategy、confidence、memberIds、preserveRegions。其他字段仅在必要时返回；不要重复 children、ownership、editableIds 中相同的元素列表，不返回空数组或默认属性。
 bbox 和 preserveRegions 使用相对整页 0..1 的 left/top/width/height，仅用于圈定大区域；不要替换 OCR/CV 的文字或精确坐标。
 reconstructionStrategy 只能是 editable_text、native_shape、movable_image、mixed_component、background、ignore。每页每模块独立决策。标题、副标题、普通正文默认 editable_text。
 小图表、曲线图、拼贴小图、卫星/示意图组合、复杂图标优先 movable_image 或 mixed_component；preserveRegions 只圈需要裁切成独立可移动图片的图标、图片或图表主体，不能圈整个文字卡片。真正底纹才选 background。流程图先选可靠的节点、箭头和文字；复杂节点或连线难以高保真重建时选 mixed_component，主体图片加可编辑文字。
 memberIds、editableIds、ignoreIds 只能引用输入候选元素的真实 id。ignoreIds 表示局部误检测或重复层；不要忽略全页背景。
-普通文字（含图表坐标轴、图例、数值和标签）应作为可编辑文字；图片模块必须先擦除其原字，再叠加独立文本框。Logo 和装饰艺术字可随图片保留。不要为每个小碎片生成单独模块。
+普通文字（含图表坐标轴、图例、数值和标签）应作为可编辑文字；本地算法验证文字 owner 后才允许清除对应字形像素。未验证的内容必须保留，禁止指示整块擦除。Logo 和装饰艺术字可随图片保留。不要为每个小碎片生成单独模块。
 只有确实能定位复杂区域时才输出 preserveRegions；没有把握就保持 editable_text，避免遮挡真实内容。
 """
 
@@ -45,6 +44,7 @@ CRITIC_PROMPT = """你是视觉重建质量检查器。
 
 def scene_user_prompt(ocr_elements: list[dict], context: dict | None = None) -> str:
     context = context or {}
+    ocr_ids = {item.get("id") for item in ocr_elements}
     payload = {
         "width": context.get("width"),
         "height": context.get("height"),
@@ -54,7 +54,7 @@ def scene_user_prompt(ocr_elements: list[dict], context: dict | None = None) -> 
         ],
         "candidate_elements": [
             {"id": item.get("id"), "type": item.get("type"), "bbox": item.get("bbox"), "text": str(item.get("text") or "")[:40]}
-            for item in context.get("candidate_elements", [])[:160]
+            for item in context.get("candidate_elements", [])[:160] if item.get("id") not in ocr_ids
         ],
         "layout_regions": [
             {"type": item.get("type"), "bbox": item.get("bbox"), "confidence": item.get("confidence")}

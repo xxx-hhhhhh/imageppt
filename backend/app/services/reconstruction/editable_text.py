@@ -187,6 +187,30 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
     return best[1] if best[1]["fontDimensionError"] <= .19 and best[1]["fontMaskSimilarity"] >= .35 else None
 
 
+def exclude_isolated_crop_fragments(seed: np.ndarray, text: str, height: float) -> np.ndarray:
+    """Exclude tiny neighbouring ink from fitting, not from the source image.
+
+    An OCR rectangle may include a one-pixel edge of an untranscribed bullet,
+    or compression speckles above the baseline. Neither defines the font size.
+    Punctuation/i dots within the body band remain untouched.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(seed.astype(np.uint8), 8)
+    substantial = [s for s in stats[1:] if s[4] > max(6, height * .35) and s[3] > height * .4]
+    if len(substantial) < 3:
+        return seed
+    top = float(np.median([s[1] for s in substantial]))
+    bottom = float(np.median([s[1] + s[3] for s in substantial]))
+    left = min(s[0] for s in substantial)
+    cleaned = seed.copy()
+    for number in range(1, count):
+        x, y, w, h, area = stats[number]
+        isolated = y + h <= top - 3 or y >= bottom + 3
+        clipped_marker = bool(text and text[0].isalnum() and w <= 2 and h < height * .3 and left - (x + w) > height * .3)
+        if area <= 3 and (isolated or clipped_marker):
+            cleaned[labels == number] = False
+    return cleaned
+
+
 def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = None,
                            diagnostics: dict | None = None, *,
                            paper_reference: tuple[int,int,np.ndarray,dict] | None = None) -> tuple[dict,np.ndarray,np.ndarray] | None:
@@ -194,7 +218,8 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     report["reason"] = "unreliable_ocr_or_artwork"
     text = str(item.get("text") or "")
     semantic = str((hints or {}).get("componentType") or (hints or {}).get("role") or "").lower()
-    if not text.strip() or "\n" in text or float(item.get("confidence") or 0)<.9 or any(t in semantic for t in ("logo","wordmark","artistic")) or "^{" in text or "_{" in text:
+    confidence = float(item.get("confidence") or 0)
+    if not text.strip() or "\n" in text or confidence<.85 or any(t in semantic for t in ("logo","wordmark","artistic")) or "^{" in text or "_{" in text:
         return None
     h,w = source.shape[:2]
     x,y,iw,ih = (float(item.get(k,0)) for k in ("x","y","width","height"))
@@ -244,6 +269,7 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     contrast = np.max(np.abs(difference),axis=2)
     seed = core & (alpha>.16) & (contrast>max(10,evidence["backgroundError95"]*2)) & (alignment<22)
     seed,excluded_bullet = without_untranscribed_bullet(seed,text,ih)
+    seed = exclude_isolated_crop_fragments(seed, text, ih)
     count,labels,stats,_ = cv2.connectedComponentsWithStats(seed.astype(np.uint8),8)
     glyphs = np.zeros(seed.shape,bool)
     rejected_line = False
@@ -278,6 +304,9 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     fit = _fit_font(text,glyphs,item.get("style",{}).get("fontFamily","Microsoft YaHei"),np.where(core,alpha,0))
     if fit is None:
         return None
+    if confidence < .9 and (fit["fontMaskSimilarity"] < .5 or fit["fontAlphaError"] > .32):
+        report["reason"] = "borderline_ocr_without_visual_confirmation"
+        return None
     ys,xs = np.where(glyphs)
     offset_x,offset_y = fit["fontInkOffset"]
     element = copy.deepcopy(item)
@@ -291,6 +320,9 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     element["metadata"] = {"reconstructionStrategy":"editable_text","exclusiveFontVerified":True,
                            "nativeTextMeasured":True,"fontMatchingVersion":2,"fontMeasurement":fit,"textErasureEvidence":evidence,
                            "rawOCRBBox":[round(x),round(y),round(x+iw),round(y+ih)],"originalLineCount":1}
+    if confidence < .9:
+        element["metadata"].update(ocrNeedsReview=True, ocrConfidence=confidence,
+            ocrAcceptance="borderline_confidence_with_measured_glyph_confirmation")
     if excluded_bullet:
         element['metadata']['originalOCRBBox'] = element['metadata']['rawOCRBBox'][:]
         element['metadata']['rawOCRBBox'][0] = int(x1+xs.min())

@@ -4,11 +4,18 @@ import base64
 import json
 
 import pytest
+from app.services.vision.qwen_provider import (
+    QwenProvider,
+    VisionProviderError,
+    _plan_text_coverage,
+    image_to_data_url,
+)
+from app.services.vision.schemas import (
+    extract_json,
+    normalize_scene_payload,
+    validate_json,
+)
 from PIL import Image
-
-from app.services.vision.qwen_provider import QwenProvider, VisionProviderError, image_to_data_url
-from app.services.vision.qwen_provider import _plan_text_coverage
-from app.services.vision.schemas import extract_json, normalize_scene_payload, validate_json
 
 
 def test_image_to_data_url_supports_local_png(tmp_path):
@@ -17,6 +24,82 @@ def test_image_to_data_url_supports_local_png(tmp_path):
     value = image_to_data_url(path)
     assert value.startswith("data:image/png;base64,")
     assert base64.b64decode(value.split(",", 1)[1]).startswith(b"\x89PNG")
+
+
+def test_network_failure_does_not_start_another_planning_request(monkeypatch, tmp_path):
+    provider = object.__new__(QwenProvider)
+    provider.name, provider.model = 'qwen', 'test-model'
+    path = tmp_path / 'source.png'
+    Image.new('RGB', (20, 20)).save(path)
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise VisionProviderError('safe error', error_type='connection_timeout')
+    monkeypatch.setattr(provider, '_request', fail)
+    with pytest.raises(VisionProviderError):
+        provider.analyze_scene(path, {'candidate_elements': [{'id': 'text', 'type': 'text'}]}, 'high')
+    assert len(calls) == 1
+
+
+def test_analysis_call_budget_includes_connection_fallback(monkeypatch):
+    import time
+
+    from app.services.vision.openai_compatible_provider import (
+        OpenAICompatibleVisionProvider,
+    )
+    provider = object.__new__(QwenProvider)
+    provider.connection_options = [(None, 'DIRECT'), ('http://unused', 'PROXY')]
+    provider._analysis_deadline = time.monotonic() + 180
+    provider._analysis_requests = 0
+    monkeypatch.setattr(provider, '_configure_client', lambda proxy: None)
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise VisionProviderError('safe error', error_type='connection_timeout')
+    monkeypatch.setattr(OpenAICompatibleVisionProvider, '_request', fail)
+    for _ in range(3):
+        with pytest.raises(VisionProviderError):
+            provider._request([])
+    assert len(calls) == 3
+    assert provider.timeout <= 90
+
+
+def test_scene_prompt_does_not_repeat_ocr_under_candidate_elements():
+    from app.services.vision.prompts import scene_user_prompt
+    texts = [{'id': 'text_001', 'text': '普通正文', 'bbox': {'left': 1, 'top': 2, 'width': 30, 'height': 8}}]
+    prompt = scene_user_prompt(texts, {'candidate_elements': [*texts, {'id': 'visual_1', 'type': 'image'}]})
+    assert prompt.count('普通正文') == 1
+    assert 'visual_1' in prompt and prompt.count('text_001') == 1
+
+
+def test_streaming_scene_collects_complete_json_and_closes_stream(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from app.services.vision.openai_compatible_provider import (
+        OpenAICompatibleVisionProvider,
+    )
+    provider = object.__new__(OpenAICompatibleVisionProvider)
+    provider.name, provider.model, provider.base_url, provider.connection_path = 'qwen', 'fixture', 'https://example.invalid', 'DIRECT'
+    provider.max_retries = 0
+    provider._analysis_deadline = time.monotonic() + 5
+    class Stream:
+        closed = False
+        def __iter__(self):
+            for part in ['{"elements":', '[]}']:
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=part))])
+        def close(self):
+            self.closed = True
+    stream = Stream()
+    calls = []
+    provider.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: calls.append(kw) or stream)))
+    assert provider._request([]) == '{"elements":[]}'
+    assert stream.closed and calls[0]['stream'] is True
+    provider._analysis_deadline = time.monotonic() - 1
+    with pytest.raises(VisionProviderError) as error:
+        provider._request([])
+    assert error.value.error_code == 'analysis_budget'
 
 
 def test_json_parser_strips_fence_and_validates_scene():

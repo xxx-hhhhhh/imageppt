@@ -26,7 +26,7 @@ def _kind(char):
 
 def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -> list[dict]:
     text = str(item.get('text') or '')
-    if len(text)<2 or len(text)>80 or '\n' in text or float(item.get('confidence') or 0)<.9:
+    if len(text)<2 or len(text)>80 or '\n' in text or float(item.get('confidence') or 0)<.85:
         return []
     chars = [(index,char) for index,char in enumerate(text) if not char.isspace()]
     raw=[float(item[k]) for k in ('x','y','width','height')]

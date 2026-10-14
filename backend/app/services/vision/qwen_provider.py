@@ -24,10 +24,13 @@ from .openai_compatible_provider import (
     classify_vision_error,
     image_to_data_url,
 )
+from .prompts import (
+    RECONSTRUCTION_PLAN_PROMPT,
+    SCENE_REPAIR_PROMPT,
+    reconstruction_plan_user_prompt,
+)
 from .proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
-from .prompts import RECONSTRUCTION_PLAN_PROMPT, SCENE_REPAIR_PROMPT, reconstruction_plan_user_prompt
 from .schemas import extract_json, validate_json
-
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +88,17 @@ class QwenProvider(OpenAICompatibleVisionProvider):
         return plan
 
     def analyze_scene(self, image_path: Path, context: dict | None = None, mode: str = "standard") -> dict[str, Any]:
+        # One budget across scene, JSON repair, planning AND proxy fallback.
+        # No repeated five-minute attempts on every logical request.
+        self._analysis_deadline = time.monotonic() + 180
+        self._analysis_requests = 0
         scene: dict[str, Any] | None = None
         try:
             scene = super().analyze_scene(image_path, context, mode)
         except Exception as exc:
             logger.warning("qwen_scene_analysis_failed error_type=%s", type(exc).__name__)
+            if isinstance(exc, VisionProviderError) and (exc.network_failure or exc.status_code or getattr(exc, "error_code", None) == "analysis_budget"):
+                raise
             if not (context or {}).get("candidate_elements"):
                 raise
             plan = self.plan_reconstruction(image_path, context)
@@ -134,7 +143,7 @@ class QwenProvider(OpenAICompatibleVisionProvider):
             base_url=normalize_qwen_base_url(base_url if base_url is not None else config.base_url, api_key if api_key is not None else config.api_key),
             model=model or config.model or QWEN_MODEL,
             timeout=runtime.timeout,
-            max_retries=1,
+            max_retries=0,
             proxy_url=first_proxy,
         )
 
@@ -142,6 +151,13 @@ class QwenProvider(OpenAICompatibleVisionProvider):
         self.connection_attempts = []
         last_error: VisionProviderError | None = None
         for index, (proxy_url, path) in enumerate(self.connection_options):
+            deadline = getattr(self, "_analysis_deadline", None)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 1 or self._analysis_requests >= 3:
+                    raise VisionProviderError("AI 页面理解已达到请求预算", error_code="analysis_budget")
+                self._analysis_requests += 1
+                self.timeout = min(90, remaining)
             self._configure_client(proxy_url)
             started = time.perf_counter()
             try:
