@@ -184,6 +184,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
 
     def image_owner(mask: np.ndarray, role: str, hint: str, parent: str | None = None,
                     seed: tuple[tuple[int,int,int,int],np.ndarray,dict] | None = None) -> None:
+        support = mask.copy()
         mask = mask & (labels == 0)
         if not mask.any():
             return
@@ -201,9 +202,12 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         # Exactly one raster carrier supplies repaired paper beneath each
         # native glyph. Copying the same jagged substrate into every overlapping
         # image creates interpolation seams in PowerPoint even when PIL looks OK.
-        substrate = ink[y1:y2, x1:x2] & ~substrate_claimed[y1:y2,x1:x2]
+        substrate = ink[y1:y2, x1:x2] & support[y1:y2,x1:x2] & ~substrate_claimed[y1:y2,x1:x2]
         rgba[:,:,:3][substrate] = cleaned[y1:y2,x1:x2][substrate]
         rgba[:, :, 3][substrate] = 255
+        from app.services.reconstruction.contour_objects import complete_carrier_holes
+        _, completion = complete_carrier_holes(cleaned,rgba,(x1,y1,x2,y2),
+            support[y1:y2,x1:x2],labels,ink)
         # PowerPoint resamples each PNG independently. Complementary hard masks
         # can otherwise expose white hairline cracks between two exact owners.
         # Extend ONLY the lower carrier's existing boundary colour by two pixels
@@ -239,33 +243,23 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                    "role": role, "groupId": parent, "style": {"opacity": 1}, "confidence": 1,
                    "metadata": {"reconstructionStrategy": "transparent_image", "proposal": hint,
                                 **seed_evidence,
+                                **completion,
                                 "paperSubstrateMask":str(substrate_path.relative_to(output)).replace("\\","/"),
                                 "paperSubstrateBBox":[int(x1),int(y1),int(x2),int(y2)],
                                 "cleanSubstratePixels": int(substrate.sum()), "edgeSubstratePixels": int(synthetic_floor.sum()),
                                 "edgeSubstratePolicy": "two_pixel_owned_boundary_color_not_source_copy", "preserveWholeAsset": True}}
         register(element, mask, "movable_image", hint)
 
-    # Small segmented children precede carrier modules. Large parent masks then
-    # retain ONLY the unclaimed carrier pixels, without duplicating the child.
-    def segment_area(segment):
-        box = box_of(segment, w, h)
-        return (box[2]-box[0])*(box[3]-box[1]) if box else float("inf")
-
-    for segment in sorted(segments, key=segment_area):
-        box = box_of(segment, w, h)
-        src = segment.get("alphaCrop")
-        if not box or not src:
-            continue
-        asset = image_io.imread(assets / src.replace("\\", "/").split("/")[-1], cv2.IMREAD_UNCHANGED)
-        x1, y1, x2, y2 = box
-        if asset is None or asset.ndim != 3 or asset.shape[2] != 4 or asset.shape[:2] != (y2-y1, x2-x1):
-            continue
-        from app.services.reconstruction.visual_assets import prepare_visual_seed
-        refined = prepare_visual_seed(cleaned,box,asset[:,:,3])
+    # Resolve nested contour proposals before ownership. Smallest-first used to
+    # cut one photo stack/title into a center and multiple disconnected frames.
+    from app.services.reconstruction.contour_objects import plan_contour_objects
+    planned, contour_audit = plan_contour_objects(cleaned,segments,assets,text_decisions,box_of)
+    for proposal in planned:
+        refined = (proposal['box'],proposal['rgba'],proposal['evidence'])
         (x1,y1,x2,y2),rgba_seed,_ = refined
         mask = np.zeros((h, w), bool)
         mask[y1:y2, x1:x2] = rgba_seed[:, :, 3] > 0
-        image_owner(mask, "segmented_visual", segment.get("source", "opencv_segment"),seed=refined)
+        image_owner(mask, "carrier_surface" if proposal['panel'] else "segmented_visual",proposal['source'],seed=refined)
 
     modules = ((scene.get("vision") or {}).get("reconstructionPlan") or {}).get("modules") or []
     # The VLM plan is a TREE. Previously only root modules were read, so a
@@ -275,17 +269,18 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             yield {**item, 'parentModule':parent}
             yield from descendants(item.get('children') or [], item.get('moduleId') or item.get('id'))
 
-    proposals = []
-    for module in descendants(modules):
-        box = box_of(module, w, h)
-        if box and (box[2]-box[0])*(box[3]-box[1]) < .8*w*h:
-            proposals.append((module, box))
-    # Leaf objects precede carriers. Large parents own only residual substrate.
-    proposals.sort(key=lambda pair: (pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]))
-    for module, (x1, y1, x2, y2) in proposals:
-        mask = np.zeros((h, w), bool)
-        mask[y1:y2, x1:x2] = True
-        image_owner(mask, module.get("role") or "module_visual", "vlm_module_crop", module.get("moduleId"))
+    # Semantic modules provide grouping only. Their approximate bounding boxes
+    # are NOT source contours and must never slice banners or nearby OCR lines.
+    module_boxes = [(m,box_of(m,w,h)) for m in descendants(modules)]
+    for element in elements:
+        eb = box_of(element,w,h)
+        if eb is None:
+            continue
+        candidates = [(m,b) for m,b in module_boxes if b and b[0]<=eb[0] and b[1]<=eb[1] and b[2]>=eb[2] and b[3]>=eb[3]]
+        if candidates:
+            module,_ = min(candidates,key=lambda pair:(pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]))
+            element['groupId'] = module.get('moduleId') or module.get('id')
+            element['parent'] = element['groupId']
 
     # Fallback OCR is an image owner, not a hidden duplicate native text object.
     for decision in text_decisions:
@@ -304,6 +299,10 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             continue
         x1,y1,x2,y2 = decision["bbox"]
         mask = np.zeros((h,w),bool)
+        # Avoid a separate rectangular patch once a complete carrier already
+        # supplies the paper under this line.
+        if not np.any(ink[y1:y2,x1:x2] & ~substrate_claimed[y1:y2,x1:x2]):
+            continue
         mask[max(0,y1-4):min(h,y2+4),max(0,x1-4):min(w,x2+4)] = True
         image_owner(mask,"text_paper_carrier","ocr_local_paper",decision["id"])
 
@@ -326,6 +325,27 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         mask = np.zeros((h, w), bool)
         mask[y:y+ch, x:x+cw] = (components[y:y+ch, x:x+cw] == number) & remaining[y:y+ch, x:x+cw]
         image_owner(mask, "retained_decoration", "source_component_fallback")
+    # Tight object masks may exclude a few native-glyph halo pixels that lie
+    # just outside an OCR bbox. Attach their already-verified clean paper to one
+    # existing carrier, rather than leave holes or copy old glyph pixels back.
+    for element in sorted((e for e in elements if e.get('owner')=='movable_image'),
+                          key=lambda e:e['width']*e['height'],reverse=True):
+        x,y,cw,ch = (element[k] for k in ('x','y','width','height'))
+        missing = ink[y:y+ch,x:x+cw] & ~substrate_claimed[y:y+ch,x:x+cw]
+        if not missing.any():
+            continue
+        path = assets/element['src'].split('/')[-1]
+        rgba = image_io.imread(path,cv2.IMREAD_UNCHANGED)
+        rgba[:,:,:3][missing] = cleaned[y:y+ch,x:x+cw][missing]
+        rgba[:,:,3][missing] = 255
+        _save_exact(path,rgba)
+        paper_path = output/element['metadata']['paperSubstrateMask']
+        paper_mask = image_io.imread(paper_path,cv2.IMREAD_UNCHANGED)
+        paper_mask[:,:,3][missing] = 255
+        _save_exact(paper_path,paper_mask)
+        element['metadata']['cleanSubstratePixels'] += int(missing.sum())
+        element['metadata']['completedGlyphHaloPixels'] = int(missing.sum())
+        substrate_claimed[y:y+ch,x:x+cw] |= missing
     background_path = output / "backgrounds" / f"page_{page}.png"
     background = np.broadcast_to(bg_color, source.shape).copy()
     background_element = {"id": f"{prefix}_background", "type": "background", "x": 0, "y": 0, "width": w, "height": h,
@@ -373,6 +393,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     by_id = {e["id"]: e for e in elements}
     for node in nodes:
         node["zIndex"] = by_id[node["id"]].get("zIndex", 0)
+        node['parent'] = by_id[node['id']].get('parent')
     for decision in text_decisions:
         box = decision["bbox"]
         if box:
@@ -382,6 +403,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
              "textDecisions": text_decisions, "unownedPixelCount": int((labels == 0).sum()),
              "sourcePixelCount": w*h, "automaticRevisionsPaused": True,
              "inpaintCalls":0,
+             "contourPlanning":contour_audit,
              "repairScope":"glyph-local measured paper, after persisted owner; never a whole module"}
     (output / f"ownership_audit_{page}.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
     result = {"version": "1.1", "sceneVersion": "3.0-exclusive-owner-evidence", "slide": {"width": w, "height": h},

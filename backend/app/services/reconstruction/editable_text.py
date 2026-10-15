@@ -283,13 +283,31 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     report["reason"] = "intersecting_rule_or_visual"
     if rejected_line or not glyphs.any() or np.mean(glyphs)>.5:
         return None
-    neighbors = cv2.dilate(glyphs.astype(np.uint8),np.ones((7,7),np.uint8))>0
+    # A gold/gradient glyph can change colour along its height. Matching only
+    # the median foreground leaves its darker connected feet in the old image.
+    # Grow the ERASURE support within the authoritative OCR box, using only
+    # contrast components attached to verified glyphs. Font fitting is unchanged.
+    agreement = np.sum(difference*direction,axis=2)/np.maximum(1,
+        np.sqrt(np.sum(difference*difference,axis=2)*np.sum(direction*direction,axis=2)))
+    support = core & (contrast>max(10,evidence['backgroundError95']*3)) & (agreement>.80) & (alpha>.12)
+    count,parts,stats,_ = cv2.connectedComponentsWithStats(support.astype(np.uint8),connectivity=8)
+    complete_glyphs = glyphs.copy()
+    for number in range(1,count):
+        _,_,cw,ch,area = stats[number]
+        component = parts==number
+        overlap = np.count_nonzero(component & glyphs)
+        if overlap>=max(3,area*.35) and not (cw>iw*.65 and ch<max(3,ih*.15)):
+            complete_glyphs |= component
+    if complete_glyphs.sum()>glyphs.sum()*1.75:
+        complete_glyphs = glyphs
+    evidence['connectedGlyphColourPixels'] = int((complete_glyphs & ~glyphs).sum())
+    neighbors = cv2.dilate(complete_glyphs.astype(np.uint8),np.ones((7,7),np.uint8))>0
     # Includes source antialias fringes; changes only glyph-local pixels.
     # JPEG ringing can have the OPPOSITE polarity to the foreground. Filtering
     # by positive foreground alpha leaves white outlines around black glyphs
     # and dark outlines around white glyphs. Include their narrow local halo;
     # never authorize the surrounding card/bbox as an erasure region.
-    ink = glyphs | (neighbors & (contrast>.5))
+    ink = complete_glyphs | (neighbors & (contrast>.5))
     # The replacement must cover the full source ink, not merely the pixels
     # which best fit the foreground colour model (JPEG/embossed glyphs vary).
     from app.services.reconstruction.owner_gate import tight_text_mask

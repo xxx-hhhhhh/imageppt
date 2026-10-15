@@ -33,6 +33,11 @@ def reconstruction_quality(layout: dict, raster_audit: dict, preservation: dict)
             tight.append(element['id'])
     issues.extend({'elementId':i,'problem':'approximateFontNeedsVisualReview'} for i in approximate)
     issues.extend({'elementId':i,'problem':'excessiveNegativeTracking'} for i in tight)
+    visuals = [e for e in elements if e.get('owner')=='movable_image']
+    uncertain_mattes = [e['id'] for e in visuals if e.get('metadata',{}).get('matteNeedsReview')]
+    unresolved_surfaces = [e['id'] for e in visuals if e.get('metadata',{}).get('unresolvedChildSurfacePixels',0)>0]
+    issues.extend({'elementId':i,'problem':'uncertainObjectMatte'} for i in uncertain_mattes)
+    issues.extend({'elementId':i,'problem':'incompleteOccludedSurface'} for i in unresolved_surfaces)
     return {
         'qualityStatus':'partial_editable' if unresolved or largest>.3 else 'requires_visual_review',
         'detectedTextCount':len(decisions),'editableTextCount':complete,
@@ -49,6 +54,10 @@ def reconstruction_quality(layout: dict, raster_audit: dict, preservation: dict)
         'imageAssetCount':len(image_nodes),'shapeCount':sum(e.get('owner')=='native_shape' for e in elements),
         'fontApproximationWarningCount':len(approximate),'aggressiveTrackingCount':len(tight),
         'recoveredVisualPixelCount':sum(e.get('metadata',{}).get('recoveredVisualPixelCount',0) for e in elements),
+        'contourPlanning':graph.get('contourPlanning',{}),
+        'transparentContourAssetCount':sum(e.get('metadata',{}).get('visualAssetPolicy')=='supersampled_colour_decontaminated_matte' for e in visuals),
+        'uncertainMatteCount':len(uncertain_mattes),'incompleteSurfaceCount':len(unresolved_surfaces),
+        'completedChildSurfacePixels':sum(e.get('metadata',{}).get('completedChildSurfacePixels',0) for e in visuals),
         'issuesAfter':issues,
         'metricScope':'Character coverage from authoritative OCR; missing assets and old-ink ghosts measured. Pixel ownership is NOT semantic extraction completeness. Unknown metrics are null; PowerPoint rendering needs separate review.',
     }

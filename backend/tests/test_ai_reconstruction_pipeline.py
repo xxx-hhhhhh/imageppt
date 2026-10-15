@@ -53,7 +53,13 @@ def test_pipeline_preserves_pale_plate_and_decoration_without_any_revision(monke
     assert any(e.get("owner") == "movable_image" for e in layout["elements"])
     assert {e["owner"] for e in layout["elements"]} <= {"movable_image", "native_shape", "editable_text", "intentional_background"}
     root = pipeline.store.root / project_id
-    assert np.array_equal(image_io.imread(source), image_io.imread(root / "reconstructed_preview.png"))
+    from app.services.reconstruction.preservation_checks import inspect_preservation
+    check = inspect_preservation(source,layout,root,root/'reconstructed_preview.png')
+    assert check['unexpectedVisualChangedPixels']==0
+    assert check['unownedSourcePixels']==check['multiplyOwnedSourcePixels']==0
+    # Measured antialias boundaries can differ. Pale panel interiors must not.
+    assert np.array_equal(image_io.imread(source)[60:150,40:360],
+                          image_io.imread(root/'reconstructed_preview.png')[60:150,40:360])
     assert (root / "editable.pptx").is_file()
 
 

@@ -53,6 +53,7 @@ def main():
         provider,_ = create_segmentation_provider('sam2')
         provider.text_regions = [e for e in ocr['elements'] if e.get('type')=='text']
         scene['segmentation'] = provider.segment(source,root/'assets',record['id'])
+        scene['segmentationProvider'] = provider.name
         print(json.dumps({'segmentationProvider':provider.name,'segments':len(scene['segmentation'])}),flush=True)
     (root/'ocr_layout.json').write_text(json.dumps(ocr,ensure_ascii=False,indent=2),encoding='utf-8')
     (root/'scene_raw.json').write_text(json.dumps(scene,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -60,6 +61,10 @@ def main():
     original=json.loads((previous / "slides/page_1.json").read_text(encoding="utf-8"))
     for key in ("ocrProvider","visionProvider","visionModel","segmentationProvider","conversionMode"):
         layout["metadata"][key]=original["metadata"].get(key)
+    if scene.get('segmentationProvider'):
+        layout['metadata']['segmentationProvider']=scene['segmentationProvider']
+    elif scene.get('segmentation') and all(s.get('source')=='ultralytics_sam2' for s in scene['segmentation']):
+        layout['metadata']['segmentationProvider']='sam2'
     layout["metadata"]["recordedProviderSourceProject"]=previous.name
     (root/'scene_final_1.json').write_text(json.dumps(layout,ensure_ascii=False,indent=2),encoding='utf-8')
     local=copy.deepcopy(layout)

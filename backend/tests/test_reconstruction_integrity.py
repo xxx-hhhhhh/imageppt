@@ -1,16 +1,18 @@
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from pptx import Presentation
-
 from app.services.pptx.renderer import PPTXRenderer, font_px_to_pt
-from app.services.reconstruction.exclusive_ownership import box_of, build_exclusive_scene
+from app.services.reconstruction.exclusive_ownership import (
+    box_of,
+    build_exclusive_scene,
+)
 from app.services.reconstruction.mixed_text import restore_text_candidates
 from app.services.segmentation.segmentation_provider import OpenCVSegmentationProvider
 from app.services.validation.reconstruction_quality import reconstruction_quality
 from app.services.validation.service import validate_pptx
 from app.services.visual_qa.analyzer import _similarity
 from app.utils import image_io
+from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
 
 
 def test_ordinary_latin_line_is_not_split_into_glyph_height_spans(tmp_path):
@@ -55,7 +57,11 @@ def test_nested_modules_have_distinct_replacement_owners(tmp_path):
             {'moduleId':'left','bbox':[20,20,70,70]}, {'moduleId':'right','bbox':[100,20,150,70]}]}]}}}
     layout=build_exclusive_scene(path,{'elements':[]},scene,[],tmp_path/'out','test',1)
     images=[e for e in layout['elements'] if e.get('owner')=='movable_image']
-    assert {'left','right','parent'}<={e.get('groupId') for e in images}
+    assert {'left','right'}<={e.get('groupId') for e in images}
+    # A semantic parent spanning blank page paper does not justify manufacturing
+    # another rectangular crop. Preserve the hierarchy without duplicate pixels.
+    assert layout['metadata']['reconstructionPlan']['modules'][0]['moduleId']=='parent'
+    assert not any(e.get('source')=='vlm_module_crop' for e in images)
 
 
 def test_nested_contours_propose_objects_inside_cards(tmp_path):
