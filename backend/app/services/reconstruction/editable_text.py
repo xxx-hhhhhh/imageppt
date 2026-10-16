@@ -70,7 +70,35 @@ def measured_text_surface(patch: np.ndarray) -> tuple[np.ndarray, dict] | None:
             paper,evidence = model
             return paper,{**evidence,"backgroundSamplingInset":inset,
                           "backgroundSamplingPolicy":"local_ocr_ring_same_quality_gates"}
+    # Keep established inset fits first: an underline can contaminate a thin
+    # outer ring even when its residual is small. Only use this if every inset
+    # failed, with the same error/inlier gates and subsequent glyph validation.
+    model = measured_surface(patch,border=2)
+    if model is not None:
+        paper,evidence = model
+        return paper,{**evidence,'backgroundSamplingBorder':2}
     return None
+
+
+def match_paper_boundary(patch: np.ndarray, paper: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend only verified glyph holes into the real surrounding paper.
+
+    Low-order fields model gradients but omit compression/soft texture. Solve
+    one bounded harmonic residual from clean neighbours, never copy dark ink
+    and never smooth or overwrite the surrounding card.
+    """
+    if min(patch.shape[:2])<28:
+        return paper  # Tiny/light footer glyphs must not borrow their AA fringes.
+    residual = patch.astype(np.float32)-paper.astype(np.float32)
+    reliable = ~mask & (np.max(np.abs(residual),axis=2)<=8)
+    correction = np.where(reliable[:,:,None],residual,0)
+    kernel = np.array([[0,.25,0],[.25,0,.25],[0,.25,0]],np.float32)
+    for _ in range(64):
+        average = cv2.filter2D(correction,-1,kernel,borderType=cv2.BORDER_REFLECT)
+        correction[mask] = average[mask]
+    result = paper.copy()
+    result[mask] = np.clip(np.rint(paper.astype(float)+correction),0,255).astype(np.uint8)[mask]
+    return result
 
 
 def without_untranscribed_bullet(ink: np.ndarray, text: str, height: float) -> tuple[np.ndarray, bool]:
@@ -104,7 +132,8 @@ def without_untranscribed_bullet(ink: np.ndarray, text: str, height: float) -> t
     return ink,False
 
 
-def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndarray | None=None) -> dict | None:
+def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndarray | None=None,
+              *, required_family: str | None = None) -> dict | None:
     ys,xs = np.where(mask)
     th,tw = int(ys.max()-ys.min()+1),int(xs.max()-xs.min()+1)
     target = mask[ys.min():ys.max()+1,xs.min():xs.max()+1]
@@ -119,6 +148,10 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
                ("Times New Roman","times.ttf",400),("Times New Roman","timesbd.ttf",700),
                ("KaiTi","simkai.ttf",400)]
     choices.sort(key=lambda item: item[0] != preferred)
+    import unicodedata
+    punctuation=all(c.isspace() or unicodedata.category(c).startswith(('P','S')) for c in text)
+    if required_family and not punctuation:
+        choices = [choice for choice in choices if choice[0] == required_family]
     best = None
     for family,filename,weight in choices:
         if not (Path("C:/Windows/Fonts") / filename).is_file():
@@ -126,15 +159,16 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
         # Latin-only files otherwise score their missing-CJK square glyphs.
         if any('\u2e80' <= c <= '\u9fff' for c in text) and family in ('Arial','Times New Roman'):
             continue
-        import unicodedata
-        punctuation=all(c.isspace() or unicodedata.category(c).startswith(('P','S')) for c in text)
-        for size in range(max(8,round(th*.85)),min(150,round(th*(4.5 if punctuation else 1.5)))+1):
+        # A centred list dot has a tiny ink height relative to its em size.
+        # Capping punctuation at 4.5x rejected ordinary 7px bullets and, via
+        # atomic line validation, an otherwise perfectly readable sentence.
+        for size in range(max(8,round(th*.85)),min(150,round(th*(9 if punctuation else 1.5)))+1):
             font = font_face(filename,size,weight)
             bbox = font.getbbox(text)
             fw,fh = bbox[2]-bbox[0],bbox[3]-bbox[1]
             # Font bbox width includes advance whitespace (especially Chinese
             # punctuation). Compare real ink below, not that whitespace.
-            if not fw or not fh or abs(fh-th)/max(1,th) > .3 or (not punctuation and abs(fw-tw)/max(1,tw) > .25):
+            if not fw or not fh or (not punctuation and (abs(fh-th)/max(1,th) > .3 or abs(fw-tw)/max(1,tw) > .25)):
                 continue
             stroke = size/48 if filename=='simsun.ttc' and weight==700 else 0
             raster,offset = glyph_raster(text,filename,size,stroke,weight=weight)
@@ -319,7 +353,8 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
         report["reason"] = "glyphs_cross_source_boundary"
         return None
     report["reason"] = "font_layout_does_not_fit"
-    fit = _fit_font(text,glyphs,item.get("style",{}).get("fontFamily","Microsoft YaHei"),np.where(core,alpha,0))
+    fit = _fit_font(text,glyphs,item.get("style",{}).get("fontFamily","Microsoft YaHei"),np.where(core,alpha,0),
+                    required_family=(hints or {}).get('_cohortFontFamily'))
     if fit is None:
         return None
     if confidence < .9 and (fit["fontMaskSimilarity"] < .5 or fit["fontAlphaError"] > .32):
@@ -348,7 +383,13 @@ def restore_text_candidate(source: np.ndarray, item: dict, hints: dict | None = 
     mask = np.zeros((h,w),bool)
     mask[y1:y2,x1:x2] = ink
     fill = source.copy()
-    fill[y1:y2,x1:x2] = paper
+    # A sampling inset means the crop straddles another field/card edge. Do not
+    # borrow residual colours across that boundary or across adjacent run halos.
+    if evidence.get('backgroundSamplingInset') or evidence.get('sharedOcrLinePaper'):
+        fill[y1:y2,x1:x2] = paper
+    else:
+        fill[y1:y2,x1:x2] = match_paper_boundary(patch,paper,ink)
+        evidence['paperBoundaryPolicy'] = 'bounded_harmonic_residual_inside_verified_glyph_mask'
     report["reason"] = "ocr_glyph_owner_with_measured_paper_and_font_layout"
     report.update({"glyphPixelCount":int(ink.sum()),"fontMaskSimilarity":fit["fontMaskSimilarity"]})
     return element,mask,fill

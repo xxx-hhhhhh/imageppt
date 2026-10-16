@@ -33,11 +33,16 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("recorded_project",type=Path)
     parser.add_argument("--output-root",type=Path)
+    parser.add_argument('--page',type=int,default=1,help='Source page to replay as an isolated one-page project')
     parser.add_argument('--refresh-segmentation',action='store_true')
+    parser.add_argument('--recover-columns',action='store_true',help='Actually rerun local OCR on uncertain vertical stacks')
     parser.add_argument('--require-text-id',action='append',default=[],help='Saved OCR ids that must be fully editable')
     args=parser.parse_args()
     previous=args.recorded_project.resolve()
-    candidate=next((previous / "candidates").iterdir()) if (previous/'candidates').is_dir() else previous
+    candidates=sorted((previous/'candidates').iterdir(),reverse=True) if (previous/'candidates').is_dir() else []
+    candidate=next((c for c in candidates if (c/f'scene_final_{args.page}.json').is_file()),previous)
+    if args.page==1 and (previous/'ocr_layout.json').is_file():
+        candidate=previous
     store=ProjectStore(args.output_root or ROOT / "outputs")
     record=store.create("Real evidence - native text / coherent visual regression")
     root=store.root / record["id"]
@@ -45,7 +50,34 @@ def main():
     shutil.copytree(candidate / "assets",root / "assets")
     ocr=json.loads((candidate / "ocr_layout.json").read_text(encoding="utf-8"))
     scene=json.loads((candidate / "scene_raw.json").read_text(encoding="utf-8"))
-    source=previous / "original.png"
+    source=previous / ('original.png' if args.page==1 else f'original_{args.page}.png')
+    if args.recover_columns:
+        from app.services.ocr.column_recovery import recover_columns
+        from app.services.ocr.provider import (
+            OCRResult,
+            PaddleOCRProvider,
+            create_ocr_provider,
+        )
+        provider,_ = create_ocr_provider('auto')
+        if isinstance(provider,PaddleOCRProvider):
+            from app.services.paddle_runtime import get_paddle_ocr_engine
+            get_paddle_ocr_engine()
+        updated=[]
+        for item in ocr['elements']:
+            if item.get('type')!='text' or item.get('confidence',1)>=.85:
+                updated.append(item)
+                continue
+            original_row=OCRResult(item['text'],[item['x'],item['y'],item['x']+item['width'],item['y']+item['height']],item['confidence'],item['style'])
+            rows=recover_columns(source,[original_row],provider)
+            if rows==[original_row]:
+                updated.append(item)
+                continue
+            for index,row in enumerate(rows):
+                x,y,bx,by=row.bbox
+                updated.append({**item,'id':f"{item['id']}_row_{index+1}",'text':row.text,
+                    'x':x,'y':y,'width':bx-x,'height':by-y,'confidence':row.confidence,'style':row.style,'lines':[],
+                    'metadata':{'recoveredFromOcrId':item['id'],'recoveryProvider':provider.name}})
+        ocr['elements']=updated
     if args.refresh_segmentation:
         from app.services.segmentation.segmentation_provider import (
             create_segmentation_provider,
@@ -58,7 +90,7 @@ def main():
     (root/'ocr_layout.json').write_text(json.dumps(ocr,ensure_ascii=False,indent=2),encoding='utf-8')
     (root/'scene_raw.json').write_text(json.dumps(scene,ensure_ascii=False,indent=2),encoding='utf-8')
     layout=build_exclusive_scene(source,ocr,scene,scene.get("segmentation",[]),root,record["id"],1)
-    original=json.loads((previous / "slides/page_1.json").read_text(encoding="utf-8"))
+    original=json.loads((previous / f"slides/page_{args.page}.json").read_text(encoding="utf-8"))
     for key in ("ocrProvider","visionProvider","visionModel","segmentationProvider","conversionMode"):
         layout["metadata"][key]=original["metadata"].get(key)
     if scene.get('segmentationProvider'):
@@ -125,6 +157,7 @@ def main():
                  'editableTextCount':score['editableTextCount'],'detectedTextCount':score['detectedTextCount']}
     (root/'text_recovery_verification.json').write_text(json.dumps(text_report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(text_report,ensure_ascii=False),flush=True)
+    assert not text_report['regressedOcrLineIds'], 'Previously editable OCR lines regressed'
     # Export a genuine blank-text diagnostic: retained old glyphs will show here.
     blank=copy.deepcopy(local)
     blank["elements"]=[e for e in blank["elements"] if e.get("type")!="text"]

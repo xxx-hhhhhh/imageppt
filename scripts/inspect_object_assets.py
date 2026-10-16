@@ -14,9 +14,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('project', type=Path)
     parser.add_argument('--compare', type=Path)
+    parser.add_argument('--layout', default='slides/page_1.json')
     args = parser.parse_args()
     root = args.project
-    layout = json.loads((root/'slides/page_1.json').read_text(encoding='utf8'))
+    layout = json.loads((root/args.layout).read_text(encoding='utf8'))
     images = [e for e in layout['elements'] if e.get('owner') == 'movable_image']
     print(json.dumps({'images': len(images), 'policies': dict(Counter(e.get('metadata', {}).get('visualAssetPolicy', e.get('source')) for e in images))}))
     cell_w, cell_h = 300, 200

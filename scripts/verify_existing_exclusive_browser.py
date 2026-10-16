@@ -18,6 +18,7 @@ def main():
     parser.add_argument("project_id")
     parser.add_argument("--output-root",type=Path)
     parser.add_argument('--text-id',action='append',default=[],help='Verify every editable span belonging to these OCR ids')
+    parser.add_argument('--image-id', help='Exercise a particular saved image object')
     args = parser.parse_args()
     output = (args.output_root or Path(__file__).resolve().parents[1] / "outputs") / args.project_id
     errors, missing = [], []
@@ -85,9 +86,10 @@ def main():
         # A paper carrier can sit behind editable text. Clicking its centre
         # correctly selects the text, not the carrier. Pick a real hit-tested
         # image point rather than interpreting that expected behaviour as failure.
-        hit = page.evaluate("""layout => {
+        hit = page.evaluate("""({layout,imageId}) => {
           for (const n of document.querySelectorAll('.visual-image')) {
             const item=layout.elements.find(e=>e.id===n.dataset.elementId);
+            if(imageId && item?.id!==imageId) continue;
             // A page-width substrate is correctly clamped at x=0. Exercise a
             // genuine independent object with room to move on both axes.
             if(!item || item.width>layout.slide.width*.55 || item.height>layout.slide.height*.65) continue;
@@ -99,7 +101,7 @@ def main():
             }
           }
           return null;
-        }""",layout)
+        }""",{"layout":layout,"imageId":args.image_id})
         assert hit, 'No independently selectable image'
         image = next(e for e in layout['elements'] if e['id']==hit['id'])
         node = page.locator(f'[data-element-id="{image["id"]}"]')
@@ -111,15 +113,23 @@ def main():
         page.mouse.move(hit['x']+30,hit['y']+20, steps=8)
         page.mouse.up()
         expect(node).not_to_have_css("left", f'{image["x"]}px')
-        handle = node.locator(".resize-handle")
-        expect(handle).to_be_visible()
-        bounds = handle.bounding_box()
-        assert bounds
-        page.mouse.move(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
-        page.mouse.down()
-        page.mouse.move(bounds["x"]+25,bounds["y"]+15,steps=6)
-        page.mouse.up()
-        expect(page.get_by_label("宽度",exact=True)).not_to_have_value(str(image["width"]))
+        # In dense cards another foreground element may cover a corner handle.
+        # Use the real property control for an explicit target, then assert the
+        # target itself changed (a different selection is not a successful resize).
+        if args.image_id:
+            expect(page.get_by_label("宽度",exact=True)).to_have_value(str(image['width']))
+            page.get_by_label("宽度",exact=True).fill(str(image['width']+20))
+            page.get_by_label("宽度",exact=True).press('Tab')
+        else:
+            handle = node.locator(".resize-handle")
+            expect(handle).to_be_visible()
+            bounds = handle.bounding_box()
+            assert bounds
+            page.mouse.move(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
+            page.mouse.down()
+            page.mouse.move(bounds["x"]+25,bounds["y"]+15,steps=6)
+            page.mouse.up()
+        expect(node).not_to_have_css('width',f'{image["width"]}px')
         page.screenshot(path=str(output / "browser_image_moved.png"),full_page=True)
         # Restore only this isolated in-memory test state; baseline files untouched.
         page.evaluate("""async layout => {
@@ -131,7 +141,7 @@ def main():
         assert not errors and not missing, {"errors":errors,"missing":missing}
         result = {"projectId": args.project_id,"realSavedApiLayout":True,"imageDrag":True,"imageResize":True,"nativeSingleLineRendering":True,
                   "domTextEditing":True,"fabricDuplicateTextPixelCount":duplicate_pixels,
-                  "verifiedOcrLineIds":args.text_id,"editedTextSpanIds":[e['id'] for e in selected],
+                  "verifiedOcrLineIds":args.text_id,"editedTextSpanIds":[e['id'] for e in selected],"movedImageId":image['id'],
                   "missingAssets":missing,"browserErrors":errors,"nativeTextCount":sum(e.get('owner') == 'editable_text' for e in layout['elements']),
                   "originalResultFilesModified":False,"automaticRevisionCalls":0}
         (output / "exclusive_browser.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")

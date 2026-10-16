@@ -7,6 +7,38 @@ import numpy as np
 from app.services.reconstruction.editable_text import measured_surface
 
 
+def refine_edge_alpha(rgb, paper, alpha, contrast):
+    """Unmix a narrow exterior fringe using nearby stronger foreground colour.
+
+    Geometry alone cannot measure source antialias opacity. Only accept a
+    lower opacity if recomposition onto the measured paper still matches the
+    source. Interior white artwork and uncertain edges remain unchanged.
+    """
+    distance = cv2.distanceTransform(np.uint8(alpha>0),cv2.DIST_L2,3)
+    eligible = (alpha>0) & (distance<=2) & (contrast>4)
+    best = contrast.copy()
+    reference = rgb.astype(float).copy()
+    for dy in range(-2,3):
+        for dx in range(-2,3):
+            shifted = np.roll(rgb,(dy,dx),(0,1)).astype(float)
+            strength = np.roll(contrast,(dy,dx),(0,1))
+            valid = eligible & (strength>best) & (np.roll(alpha,(dy,dx),(0,1))>=.99)
+            if dy>0: valid[:dy]=False
+            if dy<0: valid[dy:]=False
+            if dx>0: valid[:,:dx]=False
+            if dx<0: valid[:,dx:]=False
+            reference[valid]=shifted[valid]
+            best[valid]=strength[valid]
+    direction = reference-paper
+    fitted = np.sum((rgb-paper)*direction,axis=2)/np.maximum(1,np.sum(direction*direction,axis=2))
+    prediction = paper+fitted[:,:,None]*direction
+    accept = eligible & (best>contrast*1.4) & (fitted>.08) & (fitted<alpha-.03)
+    accept &= np.max(np.abs(prediction-rgb),axis=2)<=3
+    alpha=alpha.copy()
+    alpha[accept]=fitted[accept]
+    return alpha,int(accept.sum())
+
+
 def prepare_visual_seed(image: np.ndarray, box: tuple[int,int,int,int], raw: np.ndarray) -> tuple[tuple[int,int,int,int],np.ndarray,dict]:
     x1,y1,x2,y2 = box
     binary = raw > 127
@@ -91,6 +123,7 @@ def prepare_visual_seed(image: np.ndarray, box: tuple[int,int,int,int], raw: np.
     # Remove the old paper colour from feather pixels. Simply softening alpha
     # while keeping source RGB creates white/pink fringes when moved.
     rgb = patch.astype(float)
+    alpha,unmixed_edges = refine_edge_alpha(rgb,paper.astype(float),alpha,contrast)
     band = (alpha>0) & (alpha<1)
     foreground = rgb.copy()
     foreground[band] = (rgb[band]-(1-alpha[band,None])*paper[band])/np.maximum(.05,alpha[band,None])
@@ -116,5 +149,6 @@ def prepare_visual_seed(image: np.ndarray, box: tuple[int,int,int,int], raw: np.
     return (ax+cx,ay+cy,ax+dx,ay+dy),rgba[cy:dy,cx:dx],{
         "visualAssetPolicy":"supersampled_colour_decontaminated_matte","seedMaskDensity":round(density,4),
         "featherPixelCount":int(band.sum()),"matteBackgroundEvidence":model,
+        "sourceMeasuredEdgeAlphaPixels":unmixed_edges,
         "recoveredVisualPixelCount":int(added.sum()),"unsafeFeatherPixelsPreserved":int(unsafe.sum()),
         "matteValidation":"source_contrast_components_and_local_composite"}

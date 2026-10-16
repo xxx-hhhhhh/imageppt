@@ -100,14 +100,15 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         elements.append(element)
         return number
 
+    from app.services.reconstruction.text_cohorts import prepare_text_lines
+    prepared_lines = prepare_text_lines(source,
+        [i for i in ocr_layout.get('elements', []) if i.get('type') == 'text'], semantic)
     # OCR coordinates and body are authoritative. VLM assigns semantics only.
     for item in ocr_layout.get("elements", []):
         if item.get("type") != "text":
             continue
         hints = semantic.get(item["id"]) or {}
-        diagnostics = {}
-        from app.services.reconstruction.mixed_text import restore_text_candidates
-        candidates = restore_text_candidates(source,item,hints,diagnostics)
+        candidates, diagnostics = prepared_lines[item['id']]
         # Validate the WHOLE OCR line before registering any span. Adjacent
         # glyph repair halos may overlap only when their measured paper agrees.
         pending = ink.copy()
@@ -233,6 +234,12 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 synthetic_floor |= extend
         path = assets / f"{identifier}.png"
         _save_exact(path, rgba)  # A missing/corrupt asset aborts without a background write.
+        if seed_evidence.get('visualAssetPolicy') == 'closed_carrier_outer_contour':
+            support_path = mask_dir / f'{identifier}_support.png'
+            support_rgba = np.zeros(rgba.shape,np.uint8)
+            support_rgba[:,:,3] = support[y1:y2,x1:x2].astype(np.uint8)*255
+            _save_exact(support_path,support_rgba)
+            seed_evidence['carrierSupportMask'] = str(support_path.relative_to(output)).replace('\\','/')
         substrate_path = mask_dir / f"{identifier}_paper.png"
         paper_mask = np.zeros(rgba.shape,np.uint8)
         paper_mask[:,:,3] = substrate.astype(np.uint8)*255
@@ -276,7 +283,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         eb = box_of(element,w,h)
         if eb is None:
             continue
-        candidates = [(m,b) for m,b in module_boxes if b and b[0]<=eb[0] and b[1]<=eb[1] and b[2]>=eb[2] and b[3]>=eb[3]]
+        candidates = [(m,b) for m,b in module_boxes if b and b[0]-3<=eb[0] and b[1]-3<=eb[1] and b[2]+3>=eb[2] and b[3]+3>=eb[3]]
         if candidates:
             module,_ = min(candidates,key=lambda pair:(pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]))
             element['groupId'] = module.get('moduleId') or module.get('id')
@@ -376,6 +383,39 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         number = (element.get("metadata") or {}).get("exclusiveSourceOwner")
         if number:
             owner_layers[number] = element.get("zIndex", 0)
+    # Adjacent child masks can form one enormous connected hole in a parent.
+    # Measure each already-extracted child's local paper separately instead
+    # of trying to extrapolate one field through all cards/modules at once.
+    from app.services.reconstruction.editable_text import measured_surface
+    for child in reversed(visuals):
+        if child['metadata'].get('visualAssetPolicy') not in {
+                'supersampled_colour_decontaminated_matte', 'source_verified_photographic_rectangle'}:
+            continue
+        cx,cy,cw,ch = (child[k] for k in ('x','y','width','height'))
+        parents = [e for e in visuals if e['zIndex']<child['zIndex']
+                   and e['x']<=cx and e['y']<=cy
+                   and e['x']+e['width']>=cx+cw and e['y']+e['height']>=cy+ch]
+        if not parents:
+            continue
+        model = None
+        for pad in (6,10,16):
+            ax,ay,bx,by = max(0,cx-pad),max(0,cy-pad),min(w,cx+cw+pad),min(h,cy+ch+pad)
+            model = measured_surface(cleaned[ay:by,ax:bx],border=2)
+            if model is not None:
+                break
+        if model is None:
+            continue
+        parent = min(parents,key=lambda e:e['width']*e['height'])
+        path = assets/parent['src'].split('/')[-1]
+        rgba = image_io.imread(path,cv2.IMREAD_UNCHANGED)
+        lx,ly = cx-parent['x'],cy-parent['y']
+        target = rgba[ly:ly+ch,lx:lx+cw]
+        missing = (target[:,:,3]==0)&(labels[cy:cy+ch,cx:cx+cw]==child['metadata']['exclusiveSourceOwner'])
+        target[:,:,:3][missing] = model[0][cy-ay:cy-ay+ch,cx-ax:cx-ax+cw][missing]
+        target[:,:,3][missing] = 255
+        parent['metadata']['individualChildSurfacePixels'] = parent['metadata'].get('individualChildSurfacePixels',0)+int(missing.sum())
+        parent['metadata']['unresolvedChildSurfacePixels'] = max(0,parent['metadata'].get('unresolvedChildSurfacePixels',0)-int(missing.sum()))
+        _save_exact(path,rgba)
     # Never let a synthetic floor paint on top of the verified original owner.
     # This layer check is independent of segmentation / VLM insertion order.
     for element in visuals:
@@ -389,6 +429,20 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         keep_floor = owner_layers[labels[y:y+ch,x:x+cw]] > element["zIndex"]
         rgba[:,:,3][synthetic & ~keep_floor] = 0
         element["metadata"]["edgeSubstratePixels"] = int((synthetic & keep_floor).sum())
+        support_file = element['metadata'].get('carrierSupportMask')
+        if support_file:
+            from app.services.reconstruction.contour_objects import _visible_surface
+            support = image_io.imread(output/support_file,cv2.IMREAD_UNCHANGED)[:,:,3]>0
+            missing = support & (rgba[:,:,3]==0) & keep_floor
+            # After verified child-local paper is installed, an enclosing card
+            # may finally have enough supported samples for one smooth field.
+            # This is a single bounded fit; it never paints visible source ink.
+            field = _visible_surface(rgba[:,:,:3],support & (rgba[:,:,3]>0))
+            if field is not None:
+                rgba[:,:,:3][missing] = field[missing]
+                rgba[:,:,3][missing] = 255
+                element['metadata']['finalCarrierSurfacePixels'] = int(missing.sum())
+            element['metadata']['unresolvedChildSurfacePixels'] = int((support & (rgba[:,:,3]==0) & keep_floor).sum())
         _save_exact(path,rgba)
     by_id = {e["id"]: e for e in elements}
     for node in nodes:
@@ -405,6 +459,12 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
              "inpaintCalls":0,
              "contourPlanning":contour_audit,
              "repairScope":"glyph-local measured paper, after persisted owner; never a whole module"}
+    graph['objectIntegrity'] = {
+        'unresolvedCarrierIds':[e['id'] for e in visuals if e['metadata'].get('carrierSupportMask')
+                                and e['metadata'].get('unresolvedChildSurfacePixels',0)>0],
+        'photographicObjectCount':sum(e['metadata'].get('visualAssetPolicy')=='source_verified_photographic_rectangle' for e in visuals),
+        'scope':'carrier holes after assembly; independent of source pixel coverage',
+    }
     (output / f"ownership_audit_{page}.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
     result = {"version": "1.1", "sceneVersion": "3.0-exclusive-owner-evidence", "slide": {"width": w, "height": h},
               "coordinateSystem": "source-pixels-left-top", "source": source_path.name,
