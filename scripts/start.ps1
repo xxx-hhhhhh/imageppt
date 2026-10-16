@@ -100,6 +100,13 @@ try {
         WaitHealthy 'Backend' ${function:IsBackend} 60 $p
     }
     $frontendPort = 0
+    # Vite may already be serving the external Drive-safe runtime copy.
+    # Refresh its sources BEFORE reusing that process, not only on first setup.
+    $cachedFrontend = Join-Path $env:LOCALAPPDATA 'Image2EditablePPT\frontend-dependencies'
+    if (Test-Path -LiteralPath (Join-Path $cachedFrontend 'node_modules\vite\bin\vite.js')) {
+        . (Join-Path $PSScriptRoot 'frontend-runtime.ps1')
+        $null = Sync-FrontendRuntime $root
+    }
     foreach ($port in @(5173,5174)) {
         if ((PortOwner $port) -and (IsFrontend $port)) { $frontendPort = $port; break }
     }

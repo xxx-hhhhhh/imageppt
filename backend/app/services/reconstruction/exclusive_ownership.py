@@ -313,6 +313,26 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         mask[max(0,y1-4):min(h,y2+4),max(0,x1-4):min(w,x2+4)] = True
         image_owner(mask,"text_paper_carrier","ocr_local_paper",decision["id"])
 
+    # A closed detector contour can stop inside an antialiased/soft border.
+    # Keep that narrow unclaimed fringe with the module BEFORE residual
+    # components connect it to page-wide decoration. No existing owner changes.
+    from app.services.reconstruction.carrier_repair import unowned_contour_fringe
+    for carrier in list(elements):
+        support_file = carrier.get('metadata', {}).get('carrierSupportMask')
+        if not support_file or not carrier.get('groupId'):
+            continue
+        cx,cy,cw,ch = (carrier[k] for k in ('x','y','width','height'))
+        radius = max(3,min(6,round(min(cw,ch)*.02)))
+        ax,ay,bx,by = max(0,cx-radius),max(0,cy-radius),min(w,cx+cw+radius),min(h,cy+ch+radius)
+        support = np.zeros((by-ay,bx-ax),bool)
+        support[cy-ay:cy-ay+ch,cx-ax:cx-ax+cw] = image_io.imread(output/support_file,cv2.IMREAD_UNCHANGED)[:,:,3]>0
+        fringe = unowned_contour_fringe(support, labels[ay:by,ax:bx]>0, radius)
+        if not fringe.any():
+            continue
+        mask = np.zeros((h,w),bool)
+        mask[ay:by,ax:bx] = fringe
+        image_owner(mask,'module_contour_fringe','closed_contour_antialias_fringe',carrier['groupId'])
+
     # Background LAST: only an edge-connected, exact flat colour is intentional
     # background. Pale plates and disconnected white cards are NOT background.
     edge = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
@@ -431,6 +451,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         element["metadata"]["edgeSubstratePixels"] = int((synthetic & keep_floor).sum())
         support_file = element['metadata'].get('carrierSupportMask')
         if support_file:
+            from app.services.reconstruction.carrier_repair import complete_local_floor
             from app.services.reconstruction.contour_objects import _visible_surface
             support = image_io.imread(output/support_file,cv2.IMREAD_UNCHANGED)[:,:,3]>0
             missing = support & (rgba[:,:,3]==0) & keep_floor
@@ -442,6 +463,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 rgba[:,:,:3][missing] = field[missing]
                 rgba[:,:,3][missing] = 255
                 element['metadata']['finalCarrierSurfacePixels'] = int(missing.sum())
+            element['metadata']['localCarrierSurfacePixels'] = complete_local_floor(rgba, support, keep_floor)
             element['metadata']['unresolvedChildSurfacePixels'] = int((support & (rgba[:,:,3]==0) & keep_floor).sum())
         _save_exact(path,rgba)
     by_id = {e["id"]: e for e in elements}

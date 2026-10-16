@@ -35,6 +35,8 @@ export interface LayoutElement {
   confidence?: number | null;
   metadata?: Record<string, unknown>;
   groupId?: string;
+  parent?: string;
+  bbox?: { left: number; top: number; width: number; height: number };
   role?: string;
   componentType?: string;
   lines?: { text: string; bbox?: number[]; baseline?: number; height?: number }[];

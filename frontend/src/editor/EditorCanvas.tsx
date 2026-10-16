@@ -3,6 +3,8 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as Reac
 import { Canvas, Ellipse, FabricImage, Line, Rect, Textbox } from 'fabric';
 import type { LayoutElement, LayoutJSON } from '../types/layout';
 import { assetUrl } from '../services/api';
+import { hitElement } from './alphaHitTest';
+import { selectionBounds, transformSelection } from './selectionGeometry';
 
 interface Props {
   page: LayoutJSON | undefined;
@@ -15,14 +17,6 @@ interface Props {
 const objectId = (object: any): string | undefined => object?.elementId;
 const isVisibleElement = (element: LayoutElement): boolean =>
   element.type !== 'group' && !element.metadata?.suppressed && !element.metadata?.suppressRender && !element.metadata?.ownedBy;
-
-function movableModuleIds(page: LayoutJSON, elementId: string): string[] {
-  const plate = page.elements.find((item) => item.metadata?.layerRole === 'container' &&
-    (item.id === elementId || (Array.isArray(item.metadata.moduleMemberIds) && item.metadata.moduleMemberIds.includes(elementId))));
-  if (!plate) return [elementId];
-  return [plate.id, ...(Array.isArray(plate.metadata?.moduleMemberIds) ? plate.metadata.moduleMemberIds.filter((id): id is string => typeof id === 'string') : [])]
-    .filter((id) => page.elements.some((item) => item.id === id && isVisibleElement(item)));
-}
 
 function boundedModuleDelta(page: LayoutJSON, ids: string[], dx: number, dy: number): [number, number] {
   const members = page.elements.filter((item) => ids.includes(item.id));
@@ -73,9 +67,10 @@ export function EditorCanvas({ page, zoomFactor = 1, selectedIds, onSelection, o
       const before = page.elements.find((item) => item.id === id);
       const after = next.elements.find((item) => item.id === id);
       if (id && before && after && event.transform?.action === 'drag') {
-        const ids = movableModuleIds(page, id);
+        const ids = selectedIds.includes(id) ? selectedIds : [id];
         const [dx, dy] = boundedModuleDelta(page, ids, after.x - before.x, after.y - before.y);
-        onChange({ ...next, elements: next.elements.map((item) => ids.includes(item.id) && item.id !== id ? { ...item, x: item.x + dx, y: item.y + dy } : item) });
+        const bounds = selectionBounds(page, ids);
+        onChange(transformSelection(page, ids, { x: bounds.x + dx, y: bounds.y + dy }));
       } else onChange(next);
     });
     fabricCanvas.on('text:changed', () => onChange(readLayout(fabricCanvas, page)));
@@ -119,22 +114,45 @@ export function EditorCanvas({ page, zoomFactor = 1, selectedIds, onSelection, o
       fabricCanvas.dispose();
       fabricRef.current = null;
     };
-  }, [page, onChange, onSelection, zoomFactor]);
+  }, [page, onChange, onSelection, zoomFactor, selectedIds]);
 
-  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-viewport" style={{ width: (page?.slide.width || 1) * zoom, height: (page?.slide.height || 1) * zoom }}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className="canvas-overlay">{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div></div>;
+  const routePointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('.resize-handle,[contenteditable="true"]')) return;
+    const current = (event.target as HTMLElement).closest('[data-element-id]');
+    const hit = hitElement(event.currentTarget, event.clientX, event.clientY);
+    if (hit === current) return;
+    event.preventDefault(); event.stopPropagation();
+    if (hit) hit.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: event.clientX,
+      clientY: event.clientY, pointerId: event.pointerId, button: event.button, shiftKey: event.shiftKey }));
+    else onSelection([]);
+  };
+  const routeDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('[contenteditable="true"]')) return;
+    const current = (event.target as HTMLElement).closest('[data-element-id]');
+    const hit = hitElement(event.currentTarget, event.clientX, event.clientY);
+    if (hit === current) return;
+    event.preventDefault(); event.stopPropagation();
+    hit?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: event.clientX, clientY: event.clientY }));
+  };
+
+  return <div className="canvas-wrapper" ref={wrapper}><div className="canvas-viewport" style={{ width: (page?.slide.width || 1) * zoom, height: (page?.slide.height || 1) * zoom }}><div className="canvas-stage" ref={stageRef} style={{ width: page?.slide.width || 1, height: page?.slide.height || 1 }}><canvas ref={canvasElement} /><div className={`canvas-overlay${selectedIds.length > 1 ? ' module-selection' : ''}`} onPointerDownCapture={routePointer} onDoubleClickCapture={routeDoubleClick}>{page?.elements.filter(isVisibleElement).sort((a, b) => a.zIndex - b.zIndex).map((element) => <VisualElement key={element.id} element={element} selectedIds={selectedIds} selected={selectedIds.includes(element.id)} onSelect={onSelection} onChange={onChange} page={page} />)}</div></div></div></div>;
 }
 
-function VisualElement({ element, selected, onSelect, onChange, page }: { element: LayoutElement; selected: boolean; onSelect: (ids: string[]) => void; onChange: (layout: LayoutJSON) => void; page: LayoutJSON }) {
+function VisualElement({ element, selected, selectedIds, onSelect, onChange, page }: { element: LayoutElement; selected: boolean; selectedIds: string[]; onSelect: (ids: string[]) => void; onChange: (layout: LayoutJSON) => void; page: LayoutJSON }) {
   const style = element.style || {};
   const lowConfidence = element.confidence != null && element.confidence < 0.65;
-  const base: CSSProperties = { position: 'absolute', left: element.x, top: element.y, width: Math.max(1, element.width), height: Math.max(1, element.height), transform: `rotate(${element.rotation}deg)`, opacity: style.opacity ?? 1, pointerEvents: element.type === 'background' ? 'none' : 'auto', outline: selected ? '2px solid #2563a6' : undefined, outlineOffset: 2, boxShadow: lowConfidence ? '0 0 0 2px #f59e0b66' : undefined };
+  const base: CSSProperties = { position: 'absolute', left: element.x, top: element.y, width: Math.max(1, element.width), height: Math.max(1, element.height), transform: `rotate(${element.rotation}deg)`, lineHeight: style.lineSpacing || 1.12, opacity: style.opacity ?? 1, pointerEvents: element.type === 'background' ? 'none' : 'auto', outline: selected ? '2px solid #2563a6' : undefined, outlineOffset: 2, boxShadow: lowConfidence ? '0 0 0 2px #f59e0b66' : undefined };
   const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (element.type === 'background') return;
     if ((event.target as HTMLElement).closest('[contenteditable="true"]')) return;
     event.preventDefault();
     event.stopPropagation();
-    const movingIds = movableModuleIds(page, element.id);
-    onSelect([element.id]);
+    if (event.shiftKey) {
+      onSelect(selected ? selectedIds.filter(id => id !== element.id) : [...selectedIds, element.id]);
+      return;
+    }
+    const movingIds = selected ? selectedIds : [element.id];
+    if (!selected) onSelect([element.id]);
     const target = event.currentTarget;
     const startX = event.clientX;
     const startY = event.clientY;
@@ -151,7 +169,7 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
       });
     };
     const up = (upEvent: PointerEvent) => {
-      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel);
       const [dx, dy] = boundedModuleDelta(page, movingIds, (upEvent.clientX - startX) / scaleX, (upEvent.clientY - startY) / scaleY);
       target.closest('.canvas-overlay')?.querySelectorAll<HTMLElement>('[data-element-id]').forEach((node) => {
         if (movingIds.includes(node.dataset.elementId || '')) {
@@ -159,19 +177,26 @@ function VisualElement({ element, selected, onSelect, onChange, page }: { elemen
           node.style.transform = `rotate(${member?.rotation || 0}deg)`;
         }
       });
-      onChange({ ...page, elements: page.elements.map((item) => movingIds.includes(item.id) ? { ...item, x: item.x + dx, y: item.y + dy } : item) });
+      if (Math.abs(dx) + Math.abs(dy) > .01) {
+        const bounds = selectionBounds(page, movingIds);
+        onChange(transformSelection(page, movingIds, { x: bounds.x + dx, y: bounds.y + dy }));
+      }
     };
+    const cancel = () => up({ clientX: startX, clientY: startY } as PointerEvent);
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up, { once: true });
+    window.addEventListener('pointercancel', cancel, { once: true });
   };
   const beginResize = (event: React.PointerEvent<HTMLSpanElement>) => {
-    event.preventDefault(); event.stopPropagation(); onSelect([element.id]);
+    event.preventDefault(); event.stopPropagation();
+    if (selectedIds.length > 1) return; // Group dimensions are edited atomically in the property panel.
+    onSelect([element.id]);
     const startX = event.clientX; const startY = event.clientY; const startW = element.width; const startH = element.height; const target = event.currentTarget.parentElement;
     const stageBounds = (event.currentTarget.closest('.canvas-stage') as HTMLElement | null)?.getBoundingClientRect();
     const scaleX = stageBounds && page.slide.width ? stageBounds.width / page.slide.width : 1;
     const scaleY = stageBounds && page.slide.height ? stageBounds.height / page.slide.height : 1;
     const move = (moveEvent: PointerEvent) => { if (target) { target.style.width = `${Math.max(12, startW + (moveEvent.clientX - startX) / scaleX)}px`; target.style.height = `${Math.max(12, startH + (moveEvent.clientY - startY) / scaleY)}px`; } };
-    const up = (upEvent: PointerEvent) => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, width: Math.max(12, Math.min(page.slide.width - item.x, startW + (upEvent.clientX - startX) / scaleX)), height: Math.max(12, Math.min(page.slide.height - item.y, startH + (upEvent.clientY - startY) / scaleY)) } : item) }); };
+    const up = (upEvent: PointerEvent) => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); onChange(transformSelection(page, [element.id], { width: Math.max(12, startW + (upEvent.clientX - startX) / scaleX), height: Math.max(12, startH + (upEvent.clientY - startY) / scaleY) })); };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true });
   };
   const beginTextEdit = (event: ReactMouseEvent<HTMLDivElement>) => {

@@ -152,6 +152,19 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
         box = proposal['box']
         near = next((p for p in unique if overlap(box,p['box'])/area(box)>.93 and area(box)/area(p['box'])>.68),None)
         if near:
+            if proposal['carrier']:
+                # Duplicate resolution used to keep only the SAM mask while
+                # copying the CV 'carrier' flag. This discarded the actual
+                # closed border and left its fragments in the page fallback.
+                # Merge measured silhouettes, not just their semantic flags.
+                na,nb,nc,nd = near['box']
+                pa,pb,pc,pd = proposal['box']
+                ax,ay,bx,by = min(na,pa),min(nb,pb),max(nc,pc),max(nd,pd)
+                merged = np.zeros((by-ay,bx-ax),np.uint8)
+                merged[nb-ay:nd-ay,na-ax:nc-ax] = near['mask']
+                target = merged[pb-ay:pd-ay,pa-ax:pc-ax]
+                np.maximum(target,proposal['mask'],out=target)
+                near['box'],near['mask'] = (ax,ay,bx,by),merged
             # Give the strongest enclosing contour the carrier semantics too.
             near['carrier'] |= proposal['carrier']
             near['photo'] = near.get('photo',False) or proposal.get('photo',False)
