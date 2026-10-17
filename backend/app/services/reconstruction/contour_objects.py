@@ -195,17 +195,28 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
         compact = area(box)<w*h*.035
         photo_children = [p for p in children if p.get('photo')]
         composite = any(overlap(a['box'],b['box']) == 0 for i,a in enumerate(photo_children) for b in photo_children[i+1:])
-        is_panel = (proposal['carrier'] and (not compact or bool(children))) or composite
+        contours, _ = cv2.findContours((proposal['mask']>0).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        support = np.zeros(proposal['mask'].shape,np.uint8)
+        cv2.drawContours(support,contours,-1,255,-1)
+        _, _, support_stats, _ = cv2.connectedComponentsWithStats(np.uint8(support>0),8)
+        coherent = (len(support_stats)>1 and support_stats[1:,4].max() >= np.count_nonzero(support)*.98
+                    and np.mean(support>0)>.85)
+        # Multiple photos inside a detector window do not prove that the
+        # disconnected pieces between them are a background plate.
+        is_panel = coherent and ((proposal['carrier'] and (not compact or bool(children))) or composite)
         if is_panel:
             # A carrier's silhouette is its OUTER boundary, not a foreground
             # matte with the labels and previously extracted objects punched out.
-            contours, _ = cv2.findContours((proposal['mask']>0).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-            support = np.zeros(proposal['mask'].shape,np.uint8)
-            cv2.drawContours(support,contours,-1,255,-1)
             x,y,bx,by = box
             refined_box,rgba = box,np.dstack((image[y:by,x:bx],support))
             evidence = {'visualAssetPolicy':'closed_carrier_outer_contour',
+                        'carrierBoundaryVerified':bool(proposal['carrier']),
                         'carrierSilhouette':'external_contour_without_child_holes'}
+        elif composite and not coherent:
+            x,y,bx,by = box
+            refined_box,rgba = box,np.dstack((image[y:by,x:bx],proposal['mask']))
+            evidence = {'visualAssetPolicy':'retained_disconnected_visual',
+                        'carrierRejectedReason':'disconnected_detector_mask_not_a_closed_plate'}
         elif proposal.get('photo'):
             x,y,bx,by = box
             refined_box,rgba = box,cv2.cvtColor(image[y:by,x:bx],cv2.COLOR_BGR2BGRA)

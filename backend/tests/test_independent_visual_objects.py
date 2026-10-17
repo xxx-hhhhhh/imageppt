@@ -40,3 +40,22 @@ def test_edge_alpha_unmixes_old_paper_without_touching_interior():
     assert np.allclose(refined[5,6:14],.4)
     assert refined[10,10]==1
     assert np.array_equal(refined[alpha==0],alpha[alpha==0])
+
+
+def test_disconnected_photo_strip_is_not_promoted_to_a_carrier(tmp_path, monkeypatch):
+    from app.services.reconstruction import contour_objects
+    image = np.full((200, 500, 3), 250, np.uint8)
+    mask = np.zeros((90, 400), np.uint8)
+    mask[:, 10:90] = 255
+    mask[:, 140:220] = 255
+    mask[:, 270:350] = 255
+    image_io.imwrite(tmp_path/'strip.png', np.dstack((image[50:140, 30:430], mask)))
+    monkeypatch.setattr(contour_objects, 'carrier_contours', lambda _: [])
+    monkeypatch.setattr(contour_objects, 'photographic_rectangles', lambda _: [
+        (40, 50, 120, 140), (170, 50, 250, 140), (300, 50, 380, 140)])
+    planned, _ = plan_contour_objects(image, [{'id': 'strip', 'bbox': [30, 50, 430, 140],
+                                               'alphaCrop': 'strip.png'}], tmp_path, [], box_of)
+    strip = next(p for p in planned if p['evidence']['contourProposalId'] == 'strip')
+    assert not strip['panel']
+    assert strip['evidence']['visualAssetPolicy'] == 'retained_disconnected_visual'
+    assert np.array_equal(strip['rgba'][:, :, 3], mask)

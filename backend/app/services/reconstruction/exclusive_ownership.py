@@ -204,7 +204,8 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         # native glyph. Copying the same jagged substrate into every overlapping
         # image creates interpolation seams in PowerPoint even when PIL looks OK.
         substrate = ink[y1:y2, x1:x2] & support[y1:y2,x1:x2] & ~substrate_claimed[y1:y2,x1:x2]
-        rgba[:,:,:3][substrate] = cleaned[y1:y2,x1:x2][substrate]
+        if not seed_evidence.get('carrierSurfaceRebuilt'):
+            rgba[:,:,:3][substrate] = cleaned[y1:y2,x1:x2][substrate]
         rgba[:, :, 3][substrate] = 255
         from app.services.reconstruction.contour_objects import complete_carrier_holes
         _, completion = complete_carrier_holes(cleaned,rgba,(x1,y1,x2,y2),
@@ -216,6 +217,8 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         # substrate, NOT another claim on their original source content.
         floor = rgba[:, :, 3] > 0
         eligible = (labels[y1:y2, x1:x2] > 0) & ~ink[y1:y2,x1:x2]
+        if seed_evidence.get('carrierSurfaceRebuilt'):
+            eligible &= support[y1:y2,x1:x2]
         synthetic_floor = np.zeros(floor.shape, bool)
         for _ in range(2):
             previous = floor.copy()
@@ -234,6 +237,18 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 synthetic_floor |= extend
         path = assets / f"{identifier}.png"
         _save_exact(path, rgba)  # A missing/corrupt asset aborts without a background write.
+        if seed_evidence.get('carrierSurfaceRebuilt'):
+            error = np.max(np.abs(rgba[:,:,:3].astype(float)-source[y1:y2,x1:x2]),axis=2)
+            source_owned = mask[y1:y2,x1:x2]
+            if np.any(error[source_owned]>6):
+                raise ValueError('Carrier foreground must have a persisted owner before surface reconstruction')
+            approximation = np.zeros_like(rgba)
+            approximation[:,:,3] = (source_owned & (error>1)).astype(np.uint8)*255
+            approximation_path = mask_dir/f'{identifier}_tone.png'
+            _save_exact(approximation_path,approximation)
+            seed_evidence.update(surfaceApproximationMask=str(approximation_path.relative_to(output)).replace('\\','/'),
+                                 surfaceApproximationMaxError=6,
+                                 surfaceApproximationPixels=int((approximation[:,:,3]>0).sum()))
         if seed_evidence.get('visualAssetPolicy') == 'closed_carrier_outer_contour':
             support_path = mask_dir / f'{identifier}_support.png'
             support_rgba = np.zeros(rgba.shape,np.uint8)
@@ -262,6 +277,28 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     from app.services.reconstruction.contour_objects import plan_contour_objects
     planned, contour_audit = plan_contour_objects(cleaned,segments,assets,text_decisions,box_of)
     for proposal in planned:
+        if proposal['panel'] and proposal['evidence'].get('carrierBoundaryVerified'):
+            from app.services.reconstruction.carrier_repair import separate_carrier_surface
+            x1,y1,x2,y2 = proposal['box']
+            support = proposal['rgba'][:,:,3]>0
+            separated = separate_carrier_surface(
+                cleaned[y1:y2,x1:x2], support, labels[y1:y2,x1:x2]==0)
+            if separated is not None:
+                surface, details, _ = separated
+                detail_ids = []
+                for detail in details:
+                    mask = np.zeros((h,w),bool)
+                    mask[y1:y2,x1:x2] = detail
+                    before = len(elements)
+                    image_owner(mask,'carrier_detail','measured_carrier_foreground',seed=(
+                        proposal['box'],np.dstack((cleaned[y1:y2,x1:x2],detail.astype(np.uint8)*255)),
+                        {'visualAssetPolicy':'independent_carrier_detail',
+                         'carrierDetailOf':proposal['evidence']['contourProposalId']}))
+                    if len(elements)>before:
+                        detail_ids.append(elements[-1]['id'])
+                proposal['rgba'][:,:,:3] = surface
+                proposal['evidence'].update(carrierSurfaceRebuilt=True,carrierDetailIds=detail_ids,
+                    carrierSurfacePolicy='rim_measured_paper_after_independent_foreground_owners')
         refined = (proposal['box'],proposal['rgba'],proposal['evidence'])
         (x1,y1,x2,y2),rgba_seed,_ = refined
         mask = np.zeros((h, w), bool)
@@ -288,6 +325,9 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             module,_ = min(candidates,key=lambda pair:(pair[1][2]-pair[1][0])*(pair[1][3]-pair[1][1]))
             element['groupId'] = module.get('moduleId') or module.get('id')
             element['parent'] = element['groupId']
+
+    from app.services.reconstruction.carrier_repair import inherit_carrier_groups
+    inherit_carrier_groups(elements)
 
     # Fallback OCR is an image owner, not a hidden duplicate native text object.
     for decision in text_decisions:
@@ -403,6 +443,17 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         number = (element.get("metadata") or {}).get("exclusiveSourceOwner")
         if number:
             owner_layers[number] = element.get("zIndex", 0)
+    # Native glyph ownership is not the layer of the paper beneath the glyph.
+    # A new synthetic detail above that paper must not paint a second substrate
+    # just because the native text itself renders on the highest layer.
+    surface_layers = owner_layers[labels]
+    for element in elements:
+        metadata = element.get('metadata', {})
+        if not metadata.get('paperSubstrateMask'):
+            continue
+        paper = image_io.imread(output/metadata['paperSubstrateMask'],cv2.IMREAD_UNCHANGED)[:,:,3]>0
+        x,y,cw,ch = (element[k] for k in ('x','y','width','height'))
+        surface_layers[y:y+ch,x:x+cw][paper] = element['zIndex']
     # Adjacent child masks can form one enormous connected hole in a parent.
     # Measure each already-extracted child's local paper separately instead
     # of trying to extrapolate one field through all cards/modules at once.
@@ -445,8 +496,9 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         rgba = image_io.imread(path, cv2.IMREAD_UNCHANGED)
         owned = labels[y:y+ch,x:x+cw] == element["metadata"]["exclusiveSourceOwner"]
         glyph_substrate = ink[y:y+ch,x:x+cw]
-        synthetic = (rgba[:,:,3] > 0) & ~owned & ~glyph_substrate
-        keep_floor = owner_layers[labels[y:y+ch,x:x+cw]] > element["zIndex"]
+        own_paper = image_io.imread(output/element['metadata']['paperSubstrateMask'],cv2.IMREAD_UNCHANGED)[:,:,3]>0
+        synthetic = (rgba[:,:,3] > 0) & ~owned & ~own_paper
+        keep_floor = surface_layers[y:y+ch,x:x+cw] > element["zIndex"]
         rgba[:,:,3][synthetic & ~keep_floor] = 0
         element["metadata"]["edgeSubstratePixels"] = int((synthetic & keep_floor).sum())
         support_file = element['metadata'].get('carrierSupportMask')
@@ -463,7 +515,16 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 rgba[:,:,:3][missing] = field[missing]
                 rgba[:,:,3][missing] = 255
                 element['metadata']['finalCarrierSurfacePixels'] = int(missing.sum())
-            element['metadata']['localCarrierSurfacePixels'] = complete_local_floor(rgba, support, keep_floor)
+            repair = {}
+            before_completion = rgba[:,:,3] == 0
+            element['metadata']['localCarrierSurfacePixels'] = complete_local_floor(
+                rgba, support, keep_floor, sample_mask=owned & ~glyph_substrate, diagnostics=repair)
+            completion_path = mask_dir / f"{element['id']}_completion.png"
+            completion_mask = np.zeros_like(rgba)
+            completion_mask[:,:,3] = (before_completion & (rgba[:,:,3]>0)).astype(np.uint8)*255
+            _save_exact(completion_path,completion_mask)
+            repair['mask'] = str(completion_path.relative_to(output)).replace('\\','/')
+            element['metadata']['localCarrierRepair'] = repair
             element['metadata']['unresolvedChildSurfacePixels'] = int((support & (rgba[:,:,3]==0) & keep_floor).sum())
         _save_exact(path,rgba)
     by_id = {e["id"]: e for e in elements}
