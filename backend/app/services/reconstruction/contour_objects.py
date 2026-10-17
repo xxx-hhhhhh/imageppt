@@ -42,7 +42,67 @@ def photographic_rectangles(image: np.ndarray):
         texture = np.max(np.abs(patch.astype(float)-cv2.GaussianBlur(patch, (5, 5), 0)), axis=2)
         if np.mean(texture > 12) < .18:
             continue
-        yield (max(0, int(x)-1), max(0, int(y)-1), min(w, int(x+cw)+1), min(h, int(y+ch)+1))
+        # Morphological opening can trim a photo's outer pixel row. Grow only
+        # while most of that edge is still dark photo evidence, then include
+        # one measured paper/antialias row. A thin arrow cannot drive growth.
+        ax, ay, bx, by = int(x), int(y), int(x+cw), int(y+ch)
+        for _ in range(5):
+            changes = (ax > 0 and np.mean(gray[ay:by, ax] < 190) > .65,
+                       ay > 0 and np.mean(gray[ay, ax:bx] < 190) > .65,
+                       bx < w and np.mean(gray[ay:by, bx-1] < 190) > .65,
+                       by < h and np.mean(gray[by-1, ax:bx] < 190) > .65)
+            if not any(changes):
+                break
+            ax -= int(changes[0]); ay -= int(changes[1])
+            bx += int(changes[2]); by += int(changes[3])
+        yield (max(0, ax-1), max(0, ay-1), min(w, bx+1), min(h, by+1))
+
+
+def _supported_convex_boundary(contour, edge_distance, box):
+    """Close small contour intrusions only when every hull side has real edges.
+
+    A filled detector window or an L-shaped graphic must not authorize a plate.
+    The hull is a candidate; nearby source edges independently validate it.
+    """
+    x, y, w, h = box
+    hull = cv2.convexHull(contour)
+    rim = np.zeros((h, w), np.uint8)
+    cv2.drawContours(rim, [hull-np.array([[[x, y]]])], -1, 1, 1)
+    yy, xx = np.where(rim > 0)
+    band = max(3, min(12, min(w, h)//8))
+    distances = edge_distance[y+yy, x+xx]
+    sides = (yy < band, yy >= h-band, xx < band, xx >= w-band)
+    if all(side.sum() >= min(w, h)*.25 and np.mean(distances[side] <= 3) >= .85 for side in sides):
+        # A notched contour's convex hull can still cut diagonally across a
+        # title near the top. Recover an axis-aligned rounded frame only when
+        # the source supports all FOUR straight sides and measured corners.
+        margin = max(4, min(24, min(w, h)//8))
+        straight = (edge_distance[y, x+margin:x+w-margin],
+                    edge_distance[y+h-1, x+margin:x+w-margin],
+                    edge_distance[y+margin:y+h-margin, x],
+                    edge_distance[y+margin:y+h-margin, x+w-1])
+        if all(len(v) and np.mean(v <= 3) >= .90 for v in straight):
+            best = None
+            for radius in range(margin+1):
+                candidate = np.zeros((h, w), np.uint8)
+                cv2.rectangle(candidate, (radius, 0), (w-radius-1, h-1), 1, -1)
+                cv2.rectangle(candidate, (0, radius), (w-1, h-radius-1), 1, -1)
+                for cx, cy in ((radius, radius), (w-radius-1, radius),
+                               (radius, h-radius-1), (w-radius-1, h-radius-1)):
+                    cv2.circle(candidate, (cx, cy), radius, 1, -1)
+                boundary = candidate-cv2.erode(candidate, np.ones((3, 3), np.uint8),
+                                               borderType=cv2.BORDER_CONSTANT, borderValue=0)
+                ry, rx = np.where(boundary > 0)
+                corner = ((rx < margin) | (rx >= w-margin)) & ((ry < margin) | (ry >= h-margin))
+                error = edge_distance[y+ry[corner], x+rx[corner]]
+                score = float(np.mean(error))
+                if np.quantile(error, .9) <= 3 and (best is None or score < best[0]):
+                    contours, _ = cv2.findContours(candidate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    best = (score, contours[0]+np.array([[[x, y]]]))
+            if best is not None:
+                return best[1]
+        return hull
+    return None
 
 
 def carrier_contours(image: np.ndarray):
@@ -50,6 +110,7 @@ def carrier_contours(image: np.ndarray):
     gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
     # Max across channels retains pale cyan/pink panel borders grayscale misses.
     edges = np.maximum.reduce([cv2.Canny(image[:,:,c],12,36) for c in range(3)])
+    edge_distance = cv2.distanceTransform(np.uint8(edges == 0), cv2.DIST_L2, 5)
     edges = cv2.morphologyEx(edges,cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
     contours,_ = cv2.findContours(edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
     contours = list(contours)
@@ -70,9 +131,16 @@ def carrier_contours(image: np.ndarray):
             continue
         hull = cv2.contourArea(cv2.convexHull(contour))
         if actual/max(1,hull)<.97:
-            continue
+            if actual/max(1,hull)<.93 or actual<size*.90:
+                continue
+            supported = _supported_convex_boundary(contour, edge_distance, (x, y, cw, ch))
+            if supported is None:
+                continue
+            contour = supported
         # A framed photograph is already a coherent visual, not a paper panel.
         patch = image[y:y+ch,x:x+cw]
+        if np.mean(patch.max(axis=2) < 80) > .5:
+            continue  # Mostly black binary diagrams are visuals, not paper plates.
         gradient = np.max(np.abs(patch.astype(float)-cv2.GaussianBlur(patch,(5,5),0)),axis=2)
         if float(np.mean(gradient>12))>.20:
             continue
@@ -114,8 +182,15 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
                           'source':'source_closed_carrier','carrier':True})
     for index, box in enumerate(photographic_rectangles(image)):
         x,y,bx,by = box
-        proposals.append({'id':f'photo_boundary_{index}', 'box':box,
-                          'mask':np.full((by-y,bx-x),255,np.uint8),
+        # Pale antialias/shadow pixels belong to the photograph, not a later
+        # plate-detail layer. Keep a narrow measured halo, excluding saturated
+        # arrows and adjacent ink. The core remains an intact opaque photo.
+        ax, ay, rx, ry = max(0,x-6), max(0,y-6), min(w,bx+6), min(h,by+6)
+        patch = image[ay:ry,ax:rx]
+        halo = (patch.min(axis=2)>175) & (np.ptp(patch.astype(np.int16),axis=2)<30)
+        halo[y-ay:by-ay,x-ax:bx-ax] = True
+        proposals.append({'id':f'photo_boundary_{index}', 'box':(ax,ay,rx,ry), 'contentBox':box,
+                          'mask':halo.astype(np.uint8)*255,
                           'source':'source_textured_rectangle', 'carrier':False, 'photo':True})
     interiors = []
     for proposal in proposals:
@@ -191,7 +266,7 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
         # photos in a stack or line-chart curves remain whole, movable objects.
         # Large panels instead allow independent children above their surface.
         children = [p for p in unique if p is not proposal and area(p['box'])<area(box)*.55
-                    and overlap(box,p['box'])/area(p['box'])>.95]
+                    and overlap(box,p.get('contentBox',p['box']))/area(p.get('contentBox',p['box']))>.95]
         compact = area(box)<w*h*.035
         photo_children = [p for p in children if p.get('photo')]
         composite = any(overlap(a['box'],b['box']) == 0 for i,a in enumerate(photo_children) for b in photo_children[i+1:])
@@ -219,12 +294,14 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
                         'carrierRejectedReason':'disconnected_detector_mask_not_a_closed_plate'}
         elif proposal.get('photo'):
             x,y,bx,by = box
-            refined_box,rgba = box,cv2.cvtColor(image[y:by,x:bx],cv2.COLOR_BGR2BGRA)
+            refined_box,rgba = box,np.dstack((image[y:by,x:bx],proposal['mask']))
             evidence = {'visualAssetPolicy':'source_verified_photographic_rectangle'}
         else:
             refined_box,rgba,evidence = prepare_visual_seed(image,box,proposal['mask'])
         if not is_panel:
-            parent = next((p for p in result if not p['panel'] and overlap(box,p['originalBox'])/area(box)>.93),None)
+            parent = next((p for p in result if not p['panel']
+                and not (proposal.get('photo') and p['evidence'].get('carrierRejectedReason'))
+                and overlap(box,p['originalBox'])/area(box)>.93),None)
             if parent:
                 parent['evidence'].setdefault('absorbedContourProposals',[]).append(proposal['id'])
                 continue
@@ -232,7 +309,11 @@ def plan_contour_objects(image: np.ndarray, segments: list[dict], assets: Path,
                     'boundaryAuthority':'source_pixels_not_vlm_bbox'}
         result.append({'box':refined_box,'originalBox':box,'rgba':rgba,'evidence':evidence,
                        'source':proposal['source'],'panel':is_panel})
-    result.sort(key=lambda p:(p['panel'],area(p['box']) if p['panel'] else -area(p['box'])))
+    # Verified photographs own their full rectangles before residual strips.
+    # Otherwise a disconnected detector strip steals their borders and arrows.
+    result.sort(key=lambda p:(p['panel'],
+        p['evidence'].get('visualAssetPolicy') != 'source_verified_photographic_rectangle',
+        area(p['box']) if p['panel'] else -area(p['box'])))
     return result,{'inputProposals':len(proposals),'duplicateContoursMerged':duplicates,
                    'rasterTextCrossingProposalsRejected':crossing,'plannedObjects':len(result)}
 

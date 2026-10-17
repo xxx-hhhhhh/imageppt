@@ -52,7 +52,7 @@ def separate_carrier_surface(rgb: np.ndarray, support: np.ndarray,
     from app.services.reconstruction.contour_objects import _visible_surface
 
     h, w = support.shape
-    if min(h, w) < 100:
+    if min(h, w) < 40:
         return None
     inner = cv2.erode(support.astype(np.uint8), np.ones((7, 7), np.uint8),
                       borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0

@@ -66,6 +66,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     cleaned = source.copy()
     elements: list[dict] = []
     nodes: list[dict] = []
+    photographic_owners: list[int] = []
     text_decisions = []
     prefix = f"exclusive_p{page}_{uuid4().hex[:8]}"
     assets = output / "assets"
@@ -208,8 +209,22 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             rgba[:,:,:3][substrate] = cleaned[y1:y2,x1:x2][substrate]
         rgba[:, :, 3][substrate] = 255
         from app.services.reconstruction.contour_objects import complete_carrier_holes
-        _, completion = complete_carrier_holes(cleaned,rgba,(x1,y1,x2,y2),
-            support[y1:y2,x1:x2],labels,ink)
+        if seed_evidence.get('carrierSurfaceRebuilt'):
+            # Use the plate's measured field under every retained child. A
+            # second child-local fit can reintroduce white icon rectangles or
+            # old card colours into this already-clean background.
+            floor_mask = support[y1:y2,x1:x2]
+            filled = floor_mask & (rgba[:,:,3] == 0)
+            rgba[:,:,3][floor_mask] = 255
+            completion = {'completedChildSurfacePixels': int(filled.sum()),
+                          'unresolvedChildSurfacePixels': 0,
+                          'childSurfacePolicy': 'same_rebuilt_carrier_field_below_child_owners'}
+        elif seed_evidence.get('visualAssetPolicy') == 'closed_carrier_outer_contour':
+            _, completion = complete_carrier_holes(cleaned,rgba,(x1,y1,x2,y2),
+                support[y1:y2,x1:x2],labels,ink)
+        else:
+            completion = {'completedChildSurfacePixels': 0, 'unresolvedChildSurfacePixels': 0,
+                          'childSurfacePolicy': 'foreground_keeps_real_alpha_without_invented_floor'}
         # PowerPoint resamples each PNG independently. Complementary hard masks
         # can otherwise expose white hairline cracks between two exact owners.
         # Extend ONLY the lower carrier's existing boundary colour by two pixels
@@ -217,6 +232,10 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         # substrate, NOT another claim on their original source content.
         floor = rgba[:, :, 3] > 0
         eligible = (labels[y1:y2, x1:x2] > 0) & ~ink[y1:y2,x1:x2]
+        if not seed_evidence.get('carrierSupportMask') and seed_evidence.get('visualAssetPolicy') != 'closed_carrier_outer_contour':
+            # Foreground underpainting must not leave blue arrow fragments or
+            # white frames when an independent photograph is moved away.
+            eligible &= ~np.isin(labels[y1:y2,x1:x2], photographic_owners)
         if seed_evidence.get('carrierSurfaceRebuilt'):
             eligible &= support[y1:y2,x1:x2]
         synthetic_floor = np.zeros(floor.shape, bool)
@@ -270,7 +289,9 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                                 "paperSubstrateBBox":[int(x1),int(y1),int(x2),int(y2)],
                                 "cleanSubstratePixels": int(substrate.sum()), "edgeSubstratePixels": int(synthetic_floor.sum()),
                                 "edgeSubstratePolicy": "two_pixel_owned_boundary_color_not_source_copy", "preserveWholeAsset": True}}
-        register(element, mask, "movable_image", hint)
+        number = register(element, mask, "movable_image", hint)
+        if seed_evidence.get('visualAssetPolicy') == 'source_verified_photographic_rectangle':
+            photographic_owners.append(number)
 
     # Resolve nested contour proposals before ownership. Smallest-first used to
     # cut one photo stack/title into a center and multiple disconnected frames.
@@ -278,7 +299,9 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
     planned, contour_audit = plan_contour_objects(cleaned,segments,assets,text_decisions,box_of)
     for proposal in planned:
         if proposal['panel'] and proposal['evidence'].get('carrierBoundaryVerified'):
-            from app.services.reconstruction.carrier_repair import separate_carrier_surface
+            from app.services.reconstruction.carrier_repair import (
+                separate_carrier_surface,
+            )
             x1,y1,x2,y2 = proposal['box']
             support = proposal['rgba'][:,:,3]>0
             separated = separate_carrier_surface(
@@ -303,6 +326,22 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         (x1,y1,x2,y2),rgba_seed,_ = refined
         mask = np.zeros((h, w), bool)
         mask[y1:y2, x1:x2] = rgba_seed[:, :, 3] > 0
+        if proposal['evidence'].get('carrierRejectedReason'):
+            # After complete photo owners are installed, the residual strip
+            # contains independent arrows, not one draggable photo-frame net.
+            residual = mask[y1:y2,x1:x2] & (labels[y1:y2,x1:x2] == 0)
+            count, parts, stats, _ = cv2.connectedComponentsWithStats(residual.astype(np.uint8), 8)
+            fragments = np.zeros((h, w), bool)
+            for number in range(1, count):
+                piece = np.zeros((h, w), bool)
+                piece[y1:y2,x1:x2] = parts == number
+                if stats[number, cv2.CC_STAT_AREA] < 24 or min(stats[number, 2:4]) < 3:
+                    fragments |= piece
+                    continue
+                image_owner(piece, 'segmented_visual', proposal['source'], seed=refined)
+            if fragments.any():
+                image_owner(fragments, 'segmented_visual', proposal['source'], seed=refined)
+            continue
         image_owner(mask, "carrier_surface" if proposal['panel'] else "segmented_visual",proposal['source'],seed=refined)
 
     modules = ((scene.get("vision") or {}).get("reconstructionPlan") or {}).get("modules") or []
@@ -463,7 +502,8 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
                 'supersampled_colour_decontaminated_matte', 'source_verified_photographic_rectangle'}:
             continue
         cx,cy,cw,ch = (child[k] for k in ('x','y','width','height'))
-        parents = [e for e in visuals if e['zIndex']<child['zIndex']
+        parents = [e for e in visuals if e['metadata'].get('carrierSupportMask')
+                   and e['zIndex']<child['zIndex']
                    and e['x']<=cx and e['y']<=cy
                    and e['x']+e['width']>=cx+cw and e['y']+e['height']>=cy+ch]
         if not parents:
@@ -477,6 +517,8 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
         if model is None:
             continue
         parent = min(parents,key=lambda e:e['width']*e['height'])
+        if parent['metadata'].get('carrierSurfaceRebuilt'):
+            continue  # Its own measured field is complete and silhouette-bounded.
         path = assets/parent['src'].split('/')[-1]
         rgba = image_io.imread(path,cv2.IMREAD_UNCHANGED)
         lx,ly = cx-parent['x'],cy-parent['y']
@@ -526,6 +568,7 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
             repair['mask'] = str(completion_path.relative_to(output)).replace('\\','/')
             element['metadata']['localCarrierRepair'] = repair
             element['metadata']['unresolvedChildSurfacePixels'] = int((support & (rgba[:,:,3]==0) & keep_floor).sum())
+            element['metadata']['carrierInteriorHolePixels'] = int((support & (rgba[:,:,3]==0)).sum())
         _save_exact(path,rgba)
     by_id = {e["id"]: e for e in elements}
     for node in nodes:
@@ -544,9 +587,13 @@ def build_exclusive_scene(source_path: Path, ocr_layout: dict, scene: dict, segm
              "repairScope":"glyph-local measured paper, after persisted owner; never a whole module"}
     graph['objectIntegrity'] = {
         'unresolvedCarrierIds':[e['id'] for e in visuals if e['metadata'].get('carrierSupportMask')
-                                and e['metadata'].get('unresolvedChildSurfacePixels',0)>0],
+                                and e['metadata'].get('carrierInteriorHolePixels',0)>0],
+        'unverifiedCarrierIds':[e['id'] for e in visuals if e['metadata'].get('carrierSupportMask')
+                                and not e['metadata'].get('carrierBoundaryVerified')],
+        'unrebuiltCarrierIds':[e['id'] for e in visuals if e['metadata'].get('carrierSupportMask')
+                               and not e['metadata'].get('carrierSurfaceRebuilt')],
         'photographicObjectCount':sum(e['metadata'].get('visualAssetPolicy')=='source_verified_photographic_rectangle' for e in visuals),
-        'scope':'carrier holes after assembly; independent of source pixel coverage',
+        'scope':'all carrier interiors, boundary evidence and rebuild coverage; zero holes alone is not visual acceptance',
     }
     (output / f"ownership_audit_{page}.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
     result = {"version": "1.1", "sceneVersion": "3.0-exclusive-owner-evidence", "slide": {"width": w, "height": h},

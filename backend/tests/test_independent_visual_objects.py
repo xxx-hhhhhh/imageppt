@@ -59,3 +59,48 @@ def test_disconnected_photo_strip_is_not_promoted_to_a_carrier(tmp_path, monkeyp
     assert not strip['panel']
     assert strip['evidence']['visualAssetPolicy'] == 'retained_disconnected_visual'
     assert np.array_equal(strip['rgba'][:, :, 3], mask)
+    photos = [p for p in planned if p['evidence']['visualAssetPolicy'] == 'source_verified_photographic_rectangle']
+    assert len(photos) == 3
+    assert all(planned.index(p) < planned.index(strip) for p in photos)
+
+
+def test_convex_repair_needs_independent_edges_on_every_side():
+    from app.services.reconstruction.contour_objects import _supported_convex_boundary
+    # A near-rectangular contour with a notch may close only if the source
+    # independently shows the missing top edge; no user image coordinates.
+    contour = np.array([[[20, 20]], [[90, 20]], [[90, 30]], [[120, 30]],
+                        [[120, 20]], [[219, 20]], [[219, 139]], [[20, 139]]], np.int32)
+    edges = np.zeros((160, 240), np.uint8)
+    cv2.rectangle(edges, (20, 20), (219, 139), 255, 1)
+    distance = cv2.distanceTransform(np.uint8(edges == 0), cv2.DIST_L2, 5)
+    recovered = _supported_convex_boundary(contour, distance, (20, 20, 200, 120))
+    assert recovered is not None
+    mask = np.zeros_like(edges)
+    cv2.drawContours(mask, [recovered], -1, 1, -1)
+    assert mask[21, 100] == 1  # A diagonal hull across a title is not a full frame.
+    # An open U cannot be turned into a plate just from its bounding window.
+    edges[20, 21:219] = 0
+    distance = cv2.distanceTransform(np.uint8(edges == 0), cv2.DIST_L2, 5)
+    assert _supported_convex_boundary(contour, distance, (20, 20, 200, 120)) is None
+
+
+def test_dark_binary_diagram_is_not_a_pale_carrier():
+    from app.services.reconstruction.contour_objects import carrier_contours
+    image = np.full((260, 420, 3), 250, np.uint8)
+    image[70:190, 90:320] = 10
+    cv2.line(image, (130, 150), (280, 100), (255, 255, 255), 15)
+    candidates = carrier_contours(image)
+    assert not any(x <= 95 and y <= 75 and bx >= 315 and by >= 185 for (x, y, bx, by), _ in candidates)
+
+
+def test_photo_owns_pale_shadow_but_not_neighboring_blue_arrow(tmp_path):
+    image = np.full((230, 400, 3), 250, np.uint8)
+    image[76:164, 56:154] = 238
+    rng = np.random.default_rng(5)
+    image[80:160, 60:150] = rng.integers(20, 140, (80, 90, 3), dtype=np.uint8)
+    image[114:126, 155:165] = [230, 130, 10]
+    planned, _ = plan_contour_objects(image, [], tmp_path, [], box_of)
+    photo = next(p for p in planned if p['evidence']['visualAssetPolicy']=='source_verified_photographic_rectangle')
+    x, y, _, _ = photo['box']
+    assert photo['rgba'][120-y, 153-x, 3] == 255
+    assert photo['rgba'][120-y, 155-x, 3] == 0

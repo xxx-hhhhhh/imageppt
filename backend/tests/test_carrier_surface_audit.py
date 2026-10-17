@@ -4,7 +4,7 @@ from app.services.reconstruction.preservation_checks import inspect_preservation
 from app.utils import image_io
 
 
-def audit_fixture(tmp_path, delta=3, claimed=True, owned=True):
+def audit_fixture(tmp_path, delta=3, claimed=True, owned=True, new_text=False, foreign_overlay=False):
     source = np.full((32, 48, 3), 250, np.uint8)
     image_io.imwrite(tmp_path/'source.png', source)
     (tmp_path/'assets').mkdir()
@@ -29,6 +29,20 @@ def audit_fixture(tmp_path, delta=3, claimed=True, owned=True):
     scene = {'slide': {'width': 48, 'height': 32}, 'elements': [background, plate],
              'metadata': {'ownershipAudit': {'nodes': [
                  {'owner': 'movable_image', 'mask': 'owner.png', 'sourceBBox': [0, 0, 48, 32]}]}}}
+    if new_text:
+        from copy import deepcopy
+
+        from app.services.visual_qa.analyzer import render_preview
+        scene['elements'].append({'id': 'text', 'type': 'text', 'text': 'A', 'x': 10, 'y': 8,
+            'width': 25, 'height': 20, 'zIndex': 3, 'style': {'fontSize': 16, 'color': '#000000'}})
+        local = deepcopy(scene)
+        local['elements'][0]['src'] = str(tmp_path/'backgrounds/page_1.png')
+        local['elements'][1]['src'] = str(tmp_path/'assets/plate.png')
+        render_preview(tmp_path/'backgrounds/page_1.png', local, tmp_path/'preview.png')
+    if foreign_overlay:
+        preview = image_io.imread(tmp_path/'preview.png')
+        preview[0, 0] = 0
+        image_io.imwrite(tmp_path/'preview.png', preview)
     return inspect_preservation(tmp_path/'source.png', scene, tmp_path, tmp_path/'preview.png')
 
 
@@ -42,6 +56,78 @@ def test_undeclared_changes_are_still_unexpected(tmp_path):
     result = audit_fixture(tmp_path, claimed=False)
     assert result['boundedCarrierSurfacePixels'] == 0
     assert result['unexpectedVisualChangedPixels'] == 32*48
+
+
+def test_new_glyph_over_valid_surface_does_not_invalidate_text_free_paper(tmp_path):
+    result = audit_fixture(tmp_path, new_text=True)
+    assert result['unexpectedVisualChangedPixels'] == 0
+
+
+def test_surface_claim_still_detects_foreign_preview_overlay(tmp_path):
+    result = audit_fixture(tmp_path, new_text=True, foreign_overlay=True)
+    assert result['unexpectedVisualChangedPixels'] == 1
+
+
+def test_child_local_completion_cannot_leak_outside_rebuilt_round_plate(tmp_path, monkeypatch):
+    import cv2
+    from app.services.reconstruction import contour_objects
+    from app.services.reconstruction.exclusive_ownership import build_exclusive_scene
+
+    source = np.full((220, 360, 3), 250, np.uint8)
+    source[20:80, 20:90] = [20, 80, 130]
+    support = np.zeros((180, 320), np.uint8)
+    cv2.rectangle(support, (20, 0), (299, 179), 255, -1)
+    cv2.rectangle(support, (0, 20), (319, 159), 255, -1)
+    for center in [(20, 20), (299, 20), (20, 159), (299, 159)]:
+        cv2.circle(support, center, 20, 255, -1)
+
+    def proposals(cleaned, *args):
+        return [
+            {'box': (20, 20, 90, 80), 'rgba': np.dstack((cleaned[20:80, 20:90], np.full((60, 70), 255, np.uint8))),
+             'panel': False, 'source': 'photo', 'evidence': {'visualAssetPolicy': 'source_verified_photographic_rectangle'}},
+            {'box': (20, 20, 340, 200), 'rgba': np.dstack((cleaned[20:200, 20:340], support)),
+             'panel': True, 'source': 'plate', 'evidence': {'visualAssetPolicy': 'closed_carrier_outer_contour',
+                'carrierBoundaryVerified': True, 'contourProposalId': 'round_plate'}}], {}
+
+    monkeypatch.setattr(contour_objects, 'plan_contour_objects', proposals)
+    image_io.imwrite(tmp_path/'source.png', source)
+    root = tmp_path/'output'
+    scene = build_exclusive_scene(tmp_path/'source.png', {'elements': []}, {}, [], root, 'test', 1)
+    plate = next(e for e in scene['elements'] if e.get('source') == 'plate')
+    assert plate['metadata']['carrierSurfaceRebuilt']
+    asset = image_io.imread(root/'assets'/plate['src'].split('/')[-1], -1)
+    mask = image_io.imread(root/plate['metadata']['carrierSupportMask'], -1)[:, :, 3] > 0
+    assert not asset[:, :, 3][~mask].any()
+    assert np.all(asset[:, :, 3][mask] == 255)
+
+
+def test_foreground_cannot_underpaint_independent_photo_with_arrow_colour(tmp_path, monkeypatch):
+    from app.services.reconstruction import contour_objects
+    from app.services.reconstruction.exclusive_ownership import build_exclusive_scene
+
+    source = np.full((150, 180, 3), 250, np.uint8)
+    source[30:90, 30:90] = [40, 60, 80]
+    source[55:65, 90:120] = [230, 120, 10]
+    source[100, 35] = [230, 120, 10]
+    mask = np.zeros((150, 180), np.uint8)
+    mask[55:65, 90:120] = 255
+    mask[100, 35] = 255
+
+    def proposals(cleaned, *args):
+        return [
+            {'box': (30, 30, 90, 90), 'rgba': np.dstack((cleaned[30:90,30:90], np.full((60,60),255,np.uint8))),
+             'panel': False, 'source': 'photo', 'evidence': {'visualAssetPolicy':'source_verified_photographic_rectangle'}},
+            {'box': (0, 0, 180, 150), 'rgba': np.dstack((cleaned, mask)),
+             'panel': False, 'source': 'arrow', 'evidence': {'visualAssetPolicy':'independent_carrier_detail'}}], {}
+
+    monkeypatch.setattr(contour_objects, 'plan_contour_objects', proposals)
+    image_io.imwrite(tmp_path/'source.png', source)
+    root = tmp_path/'output'
+    scene = build_exclusive_scene(tmp_path/'source.png', {'elements': []}, {}, [], root, 'test', 1)
+    arrow = next(e for e in scene['elements'] if e.get('source')=='arrow')
+    asset = image_io.imread(root/'assets'/arrow['src'].split('/')[-1], -1)
+    assert asset[58-arrow['y'], 88-arrow['x'], 3] == 0
+    assert asset[58-arrow['y'], 92-arrow['x'], 3] == 255
 
 
 @pytest.mark.parametrize('delta,owned', [(20, True), (3, False)])

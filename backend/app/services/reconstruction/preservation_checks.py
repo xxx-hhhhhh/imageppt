@@ -98,16 +98,20 @@ def inspect_preservation(source_path: Path, layout: dict, root: Path, preview_pa
     # error, and only when that exact surface is visible in the final raster.
     # It cannot hide a missing/covered foreground object elsewhere in the scene.
     surfaces = surface_candidates & (np.max(np.abs(raster.astype(float)-surface_colors),axis=2)<=1)
-    surfaces &= np.max(np.abs(preview.astype(float)-surface_colors),axis=2)<=1
+    visible_surfaces = surfaces & (np.max(np.abs(preview.astype(float)-surface_colors),axis=2)<=1)
     glyph_overpaint = old_glyphs & (paper_claims==1) & ~visual_edges
     glyph_overpaint &= np.max(np.abs(raster.astype(float)-paper_colors),axis=2)>3
     support = old_glyphs|new_glyphs|visual_edges
-    unintended = (paper_changes&~(old_glyphs|visual_edges|surfaces))|(visible_changes&~(support|surfaces))
+    # A replacement font can cover formerly bare paper. Validate that paper
+    # in the text-free raster, and validate the full preview separately; do
+    # not demand a background colour through a legitimate new glyph.
+    unintended = (paper_changes&~(old_glyphs|visual_edges|surfaces))|(visible_changes&~(support|visible_surfaces))
     unintended |= glyph_overpaint
     return {"unownedSourcePixels":int((counts==0).sum()),"multiplyOwnedSourcePixels":int((counts>1).sum()),
             "unownedGlyphPaperPixels":int((old_glyphs & (paper_claims==0)).sum()),
             "multiplyOwnedGlyphPaperPixels":int((paper_claims>1).sum()),
             "unexpectedVisualChangedPixels":int(unintended.sum()),"nativeSourceGlyphPixels":int(old_glyphs.sum()),
+            "unexpectedVisualChangeSamplesXY":np.argwhere(unintended)[:20, ::-1].tolist(),
             "boundedCarrierSurfacePixels":int(surfaces.sum()),
             "glyphPaperOverpaintPixels":int(glyph_overpaint.sum()),
             "measuredAntialiasEdgePixels":int(visual_edges.sum()),"previewChangedPixels":int(visible_changes.sum()),

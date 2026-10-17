@@ -221,6 +221,15 @@ def test_surface_does_not_duplicate_details_already_owned_by_children():
     assert np.all(rebuilt[60:120, 80:240] == 250)
 
 
+def test_short_banner_also_separates_icon_and_returns_clean_paper():
+    rgb = np.full((64, 400, 3), 248, np.uint8)
+    rgb[18:46, 25:55] = [20, 90, 180]
+    support = np.ones(rgb.shape[:2], bool)
+    rebuilt, details, interior = separate_carrier_surface(rgb, support, support)
+    assert np.all(rebuilt[interior] == 248)
+    assert np.logical_or.reduce(details)[30, 40]
+
+
 def test_rebuilt_carrier_follows_agreeing_detail_module_despite_bbox_rim():
     carrier = {'id': 'plate', 'x': 0, 'y': 0, 'width': 300, 'height': 200,
                'metadata': {'carrierSurfaceRebuilt': True, 'carrierDetailIds': ['a', 'b']}}
