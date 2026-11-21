@@ -5,7 +5,8 @@ import { EditorCanvas } from '../editor/EditorCanvas';
 import { PageList } from '../components/PageList';
 import { PropertyPanel } from '../components/PropertyPanel';
 import { Toolbar } from '../components/Toolbar';
-import { getLocalInpaintStatus, getVisionStatus, getVisualScore, type VisionStatus } from '../services/api';
+import { TextPptxDialog } from '../components/TextPptxDialog';
+import { getLocalInpaintStatus, getVisionStatus, getVisualScore, type PptxEngine, type VisionStatus } from '../services/api';
 import { useProjectStore } from '../stores/useProjectStore';
 import type { LayoutJSON } from '../types/layout';
 
@@ -21,6 +22,7 @@ export function EditorPage() {
   const [localFallbacks, setLocalFallbacks] = useState(0);
   const [localSuccesses, setLocalSuccesses] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [textPptxOpen, setTextPptxOpen] = useState(false);
   const [similarity, setSimilarity] = useState<number | null>(null);
   const [actualVision, setActualVision] = useState<string | null>(null);
   const [professionalInpainting, setProfessionalInpainting] = useState<string | null>(null);
@@ -56,14 +58,20 @@ export function EditorPage() {
   };
   const approvePage = async () => { setReviewAction(`正在确认第 ${activePage + 1} 页…`); try { await handle(approveAndNext); } finally { setReviewAction(''); } };
   const saveCurrent = (next: LayoutJSON) => { updateActive(() => next); };
-  const exportPpt = async () => { const url = await exportProject(); window.open(url, '_blank'); };
+  const exportPpt = async (engine: PptxEngine) => {
+    const url = await exportProject(engine);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    link.click();
+  };
   const approved = approvedPages.includes(activePage + 1);
   const reviewing = Boolean(page && !approved && !editing);
   const originalPane = pagePreview && <section className="review-pane"><h2>原图</h2><div className="original-frame"><img src={pagePreview.originalPreviewUrl} alt={`第 ${activePage + 1} 页原图`} style={{ width: `${zoomFactor * 100}%`, height: `${zoomFactor * 100}%`, maxWidth: 'none', maxHeight: 'none' }} /></div></section>;
   const resultPane = <section className="review-pane"><h2>当前重建结果</h2>{page ? <EditorCanvas page={page} zoomFactor={zoomFactor} selectedIds={selectedIds} onSelection={setSelection} onChange={saveCurrent} /> : <div className="result-pending" role="status"><span className={busy ? 'processing-spinner' : 'result-placeholder-icon'} aria-hidden="true">{busy ? '' : '◇'}</span><strong>{busy ? '正在重建本页' : '本页尚未生成结果'}</strong><span>{busy ? '请稍候，完成后将显示当前重建结果。' : '点击顶部“AI解析 / 开始转换”后查看结果。'}</span></div>}</section>;
 
   return <div className="app-shell">
-    <Toolbar busy={busy} hasImages={Boolean(project?.imageCount)} hasPage={Boolean(page)} visionStatus={visionStatus} onOpenSettings={() => setSettingsOpen(true)} onUpload={(files) => void handle(() => upload(files))} onAnalyze={() => void handle(analyze)} onEdit={() => { setEditing(true); setViewMode('result'); }} onExport={() => void handle(exportPpt)} />
+    <Toolbar busy={busy} hasImages={Boolean(project?.imageCount)} hasPage={Boolean(page)} visionStatus={visionStatus} onOpenSettings={() => setSettingsOpen(true)} onTextPptx={() => setTextPptxOpen(true)} onUpload={(files) => void handle(() => upload(files))} onAnalyze={() => void handle(analyze)} onEdit={() => { setEditing(true); setViewMode('result'); }} onExport={(engine) => void handle(() => exportPpt(engine))} />
     <div className="workspace">
       <PageList pages={pagePreviews} activePage={activePage} approvedPages={approvedPages} busy={busy} onAdd={(files) => void handle(() => upload(files))} onSelect={(index) => { setEditing(false); setActivePage(index); }} />
       <main className="editor-area">
@@ -85,5 +93,6 @@ export function EditorPage() {
       <PropertyPanel page={page} selectedIds={selectedIds} onSelection={setSelection} onLayer={moveLayer} onChange={(updater) => { if (page) updateActive(updater); }} />
     </div>
     <AISettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void getVisionStatus().then(setVisionStatus).catch(() => undefined)} />
+    {textPptxOpen && <TextPptxDialog onClose={() => setTextPptxOpen(false)} />}
   </div>;
 }

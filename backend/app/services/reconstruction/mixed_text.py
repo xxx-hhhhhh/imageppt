@@ -117,7 +117,7 @@ def mixed_spans(source: np.ndarray,item: dict, *, typography_runs: bool=False) -
                 or (_kind(char) != 'punct' and (
                     (_kind(previous) != 'punct' and _kind(previous) != _kind(char))
                     or abs(math.log(size/np.median([sizes[j] for j in groups[-1]]))) > math.log(1.22)
-                    or (len(groups[-1])>=8 and len(chars)-i>2)))))
+                    ))))
         else:
             boundary = bool(i and (_kind(chars[i][1])=='punct' or _kind(chars[i-1][1])=='punct' or abs(math.log(size/np.median([sizes[j] for j in groups[-1]])))>math.log(1.22)))
         if not groups or boundary:
@@ -186,10 +186,65 @@ def restore_text_candidates(source,item,hints=None,diagnostics=None):
         candidates,evidence=min(options,key=lambda option:_run_error(option[0])+.004*(len(option[0])-1))
         if whole is None or _run_error(candidates)+.025 < _run_error([whole]):
             report.update(evidence)
-            return candidates
+            return coalesce_text_runs(source, item, candidates, hints, whole)
     if whole is not None:
         report.update(reason='whole_line_fit_better_than_runs')
     return [whole] if whole is not None else []
+
+
+def coalesce_text_runs(source, item, candidates, hints=None, whole=None):
+    """Prefer the fewest independently verified text boxes, keeping full text.
+
+    Fitting spans is an analysis detail, not a reason to expose single letters
+    or punctuation as separate editing objects. Refit adjacent spans against
+    the original image; never join unrelated OCR rows or merely concatenate
+    boxes whose combined typography cannot be verified.
+    """
+    if len(candidates) < 2:
+        return candidates
+    paper = _line_paper(source, item)
+    n = len(candidates)
+    best = {n: []}
+    for start in range(n-1, -1, -1):
+        best[start] = [candidates[start], *best[start+1]]
+        for end in range(n, start+1, -1):
+            parts = candidates[start:end]
+            if start == 0 and end == n:
+                merged = whole
+                query = item
+            else:
+                merged = None
+                boxes = [p[0]['metadata']['rawOCRBBox'] for p in parts]
+                x, y = min(b[0] for b in boxes), min(b[1] for b in boxes)
+                bx, by = max(b[2] for b in boxes), max(b[3] for b in boxes)
+                query = {**copy.deepcopy(item), 'text': ''.join(p[0]['text'] for p in parts),
+                         'x': x, 'y': y, 'width': bx-x, 'height': by-y, 'lines': []}
+            if merged is None:
+                merged = restore_text_candidate(source, query, hints, {}, paper_reference=paper)
+            if merged is None:
+                continue
+            # Keep real typography contrasts (e.g. a large lead-in). Small
+            # colour/font-fitting fluctuations do not justify separate boxes.
+            substantive = [p[0] for p in parts if len(p[0]['text'].strip(' ·•:：.,，。()（）')) > 1]
+            sizes = [p['style']['fontSize'] for p in substantive]
+            colors = [list(bytes.fromhex(p['style']['color'].lstrip('#'))) for p in substantive]
+            if sizes and max(sizes)/min(sizes) > 1.25:
+                continue
+            if colors and np.max(np.ptp(np.array(colors), axis=0)) > 35:
+                continue
+            if _run_error([merged]) > _run_error(parts)+.12:
+                continue
+            merged[0]['metadata'].update(sourceOcrIds=[item['id']],
+                textEditingUnit='verified_contiguous_line', mergedTextRunCount=len(parts))
+            choice = [merged, *best[end]]
+            if len(choice) < len(best[start]):
+                best[start] = choice
+    result = best[0]
+    # Keep stable unique IDs even when multiple substrings inherit the OCR ID.
+    for index, (element, _, _) in enumerate(result):
+        element['id'] = item['id'] if len(result)==1 else f"{item['id']}_linepart_{index+1}"
+    assert ''.join(p[0]['text'] for p in result) == item['text']
+    return result
 
 
 def _run_error(candidates):

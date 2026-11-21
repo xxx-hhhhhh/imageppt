@@ -5,9 +5,14 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-UPLOADS_DIR = PROJECT_ROOT / "uploads"
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
-TEMP_DIR = PROJECT_ROOT / "temp"
+PUBLIC_SHARED_MODE = os.getenv("IMAGE2EDITABLEPPT_PUBLIC_SHARED", "false").strip().lower() in {"1", "true", "yes", "on"}
+_runtime_override = os.getenv("IMAGE2EDITABLEPPT_RUNTIME_DIR")
+RUNTIME_DIR = Path(_runtime_override).resolve() if _runtime_override else PROJECT_ROOT
+if PUBLIC_SHARED_MODE and (RUNTIME_DIR == PROJECT_ROOT or not _runtime_override):
+    raise RuntimeError("Public sharing requires a separate IMAGE2EDITABLEPPT_RUNTIME_DIR")
+UPLOADS_DIR = RUNTIME_DIR / "uploads"
+OUTPUTS_DIR = RUNTIME_DIR / "outputs"
+TEMP_DIR = RUNTIME_DIR / "temp"
 
 
 def ensure_runtime_dirs() -> None:
@@ -64,7 +69,6 @@ RECONSTRUCTION_SURFACE_MODE = os.getenv("RECONSTRUCTION_SURFACE_MODE", "exclusiv
 # this stop: re-enabling revisions requires an explicit, reviewed code change.
 AUTOMATIC_REVISIONS_ENABLED = False
 MAX_AI_CALLS_PER_SLIDE = env_int("MAX_AI_CALLS_PER_SLIDE", 3)
-PUBLIC_SHARED_MODE = os.getenv("IMAGE2EDITABLEPPT_PUBLIC_SHARED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Settings:

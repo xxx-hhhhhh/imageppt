@@ -62,6 +62,7 @@ export interface VisionProviderSettings {
 }
 
 export interface VisionSettings {
+  publicShared?: boolean;
   enabled: boolean;
   selectedProvider: VisionProviderId;
   providers: { qwen: VisionProviderSettings };
@@ -110,13 +111,15 @@ export async function getVisionSettings(): Promise<VisionSettings> {
   return response.data;
 }
 
-export async function saveVisionSettings(payload: { enabled: boolean; selectedProvider: 'qwen' | 'local'; mode: 'fast' | 'standard' | 'high'; timeout: number; proxyMode: 'system' | 'manual' | 'none'; manualProxy: string; providers: { qwen: { enabled: boolean; apiKey?: string; baseUrl: string; model: string; clearApiKey?: boolean } } }): Promise<VisionSettings> {
+type VisionSettingsDraft = { enabled: boolean; selectedProvider: 'qwen' | 'local'; mode: 'fast' | 'standard' | 'high'; timeout: number; proxyMode: 'system' | 'manual' | 'none'; manualProxy: string; providers: { qwen: { enabled: boolean; apiKey?: string; baseUrl: string; model: string; clearApiKey?: boolean } } };
+
+export async function saveVisionSettings(payload: VisionSettingsDraft): Promise<VisionSettings> {
   const response = await api.put<VisionSettings>('/settings/vision', payload);
   return response.data;
 }
 
-export async function testVisionSettings(): Promise<VisionTestResult> {
-  const response = await api.post<VisionTestResult>('/settings/vision/test');
+export async function testVisionSettings(draft?: VisionSettingsDraft): Promise<VisionTestResult> {
+  const response = await api.post<VisionTestResult>('/settings/vision/test', draft);
   return response.data;
 }
 
@@ -140,7 +143,15 @@ export async function saveSlide(projectId: string, page: number, layout: LayoutJ
   return response.data;
 }
 
-export async function exportPptx(projectId: string): Promise<{ downloadUrl: string; validation: Record<string, unknown> }> {
-  const response = await api.post<{ downloadUrl: string; validation: Record<string, unknown> }>(`/projects/${projectId}/export/pptx`);
+export type PptxEngine = 'standard' | 'ppt-master';
+export type TextDeckStyle = 'business' | 'academic' | 'minimal';
+
+export async function generateTextPptx(input: { content: string; slideCount: number; style: TextDeckStyle }): Promise<Blob> {
+  const response = await api.post<Blob>('/export/text-pptx', input, { responseType: 'blob', timeout: 300_000 });
+  return response.data;
+}
+
+export async function exportPptx(projectId: string, engine: PptxEngine): Promise<{ downloadUrl: string; validation: Record<string, unknown> }> {
+  const response = await api.post<{ downloadUrl: string; validation: Record<string, unknown> }>(`/projects/${projectId}/export/pptx`, undefined, { params: { engine } });
   return response.data;
 }

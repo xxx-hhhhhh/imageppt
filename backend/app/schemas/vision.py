@@ -33,6 +33,7 @@ class VisionSettingsResponse(BaseModel):
     proxyMode: str
     manualProxy: str
     network: dict
+    publicShared: bool = False
 
 
 class VisionTestResponse(BaseModel):

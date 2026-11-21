@@ -257,7 +257,6 @@ def test_qwen_connectivity(vision_settings: VisionSettings | None = None) -> dic
     if isinstance(auth_result, VisionProviderError):
         return _failure_result(auth_result, diagnostics, model, started)
     diagnostics["auth"] = True
-    diagnostics["modelReachable"] = True
 
     try:
         provider = QwenProvider(vision_settings=settings)
@@ -269,6 +268,7 @@ def test_qwen_connectivity(vision_settings: VisionSettings | None = None) -> dic
         diagnostics["networkPath"] = final_path
         diagnostics["connectionPath"] = final_path
         diagnostics["visionRequest"] = bool(result.get("success"))
+        diagnostics["modelReachable"] = bool(result.get("success"))
         diagnostics["qwenApi"] = {
             "status": "PASS" if result.get("success") else "FAIL",
             "message": result.get("message", ""),

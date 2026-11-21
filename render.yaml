@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: xingbia-imageppt
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: off
+    domains:
+      - ppt.xingbia.xyz
+    envVars:
+      - key: IMAGE2EDITABLEPPT_SHARE_QWEN
+        value: "1"
+      - key: QWEN_API_KEY
+        sync: false
+      - key: QWEN_BASE_URL
+        value: https://dashscope.aliyuncs.com/compatible-mode/v1
+      - key: QWEN_MODEL
+        value: qwen3-vl-plus

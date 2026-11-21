@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import os
 import platform
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_CLOUD_BASE_URL = "https://maas.qwencloudapi.com/compatible-mode/v1"
@@ -119,7 +118,23 @@ def default_providers() -> dict[str, ProviderSettings]:
 
 
 def load_vision_settings() -> VisionSettings:
-    from app.config import VISION_PROVIDER, QWEN_TIMEOUT
+    from app.config import PUBLIC_SHARED_MODE
+
+    if PUBLIC_SHARED_MODE:
+        settings = VisionSettings(
+            proxy_mode="none",
+            providers={"qwen": ProviderSettings(base_url=QWEN_BASE_URL, model="qwen3-vl-plus")},
+        )
+        if os.getenv("IMAGE2EDITABLEPPT_SHARE_QWEN") == "1":
+            local = load_local_vision_settings()
+            if local.enabled and local.selected_provider == "qwen" and local.api_key:
+                settings.providers["qwen"] = local.providers["qwen"]
+        return settings
+    return load_local_vision_settings()
+
+
+def load_local_vision_settings() -> VisionSettings:
+    from app.config import QWEN_TIMEOUT, VISION_PROVIDER
 
     value = VisionSettings(enabled=VISION_PROVIDER not in {"none", "off", "false"}, selected_provider="local" if VISION_PROVIDER in {"none", "off", "false", "local"} else "qwen", timeout=QWEN_TIMEOUT)
     path = _settings_path()
@@ -153,7 +168,8 @@ def load_vision_settings() -> VisionSettings:
     return value
 
 
-def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSettings:
+def preview_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSettings:
+    """Apply the same validation and key handling as save, without writing settings."""
     current = load_vision_settings()
     incoming = payload.to_dict() if isinstance(payload, VisionSettings) else dict(payload)
     current.enabled = incoming.get("enabled", current.enabled)
@@ -186,6 +202,11 @@ def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSett
     current.providers["qwen"].enabled = current.selected_provider == "qwen"
     current.providers["qwen"].base_url = normalize_qwen_base_url(current.providers["qwen"].base_url, current.providers["qwen"].api_key)
     current.providers["qwen"].model = current.providers["qwen"].model or QWEN_MODEL
+    return current
+
+
+def save_vision_settings(payload: VisionSettings | dict[str, Any]) -> VisionSettings:
+    current = preview_vision_settings(payload)
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"vision": current.to_dict()}, ensure_ascii=False, indent=2), encoding="utf-8")

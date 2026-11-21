@@ -49,6 +49,12 @@ def glyph_raster(text: str,filename: str,size: int,stroke: float=0,spacing: floa
 
 
 def paint_measured_text(base: Image.Image,element: dict,color: str | None=None) -> None:
+    from app.services.reconstruction.line_text import measured_line_runs
+    runs = measured_line_runs(element)
+    if runs:
+        for run in runs:
+            paint_measured_text(base, run, color)
+        return
     style = element.get('style') or {}
     # fontFile is measurement provenance, not a second authoritative font. A
     # manual family/weight/size edit must also change the backend preview.

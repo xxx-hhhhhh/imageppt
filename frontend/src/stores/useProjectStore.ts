@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import axios from 'axios';
 import type { LayoutElement, LayoutJSON, PagePreview, ProjectInfo } from '../types/layout';
 import { acceptCurrentResult, approvePage, artifactUrl, createProject, downgradePage, exportPptx, revisePage, saveSlide, uploadImages } from '../services/api';
+import type { PptxEngine } from '../services/api';
 import { cancelTask, readTask, restoreProject, startTask, taskIsActive, type AnalysisTask, type RestoredProject } from '../services/analysisTasks';
 
 interface ProjectState {
@@ -40,7 +41,7 @@ interface ProjectState {
   deleteSelected: () => void;
   copySelected: () => void;
   moveLayer: (direction: 'up' | 'down' | 'top' | 'bottom') => void;
-  export: () => Promise<string>;
+  export: (engine?: PptxEngine) => Promise<string>;
 }
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -293,12 +294,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return { ...layout, elements };
     });
   },
-  export: async () => {
+  export: async (engine = 'standard') => {
     const project = get().project;
     if (!project) throw new Error('项目尚未创建');
-    set({ busy: true, message: '正在生成对象级可编辑 PPTX…' });
+    set({ busy: true, message: engine === 'ppt-master' ? '正在使用 PPT Master 导出…' : '正在生成对象级可编辑 PPTX…' });
     try {
-      const result = await exportPptx(project.id);
+      const result = await exportPptx(project.id, engine);
       set({ busy: false, message: 'PPTX 导出完成' });
       return result.downloadUrl;
     } catch (error) {

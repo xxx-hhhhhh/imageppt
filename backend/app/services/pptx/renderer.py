@@ -141,6 +141,13 @@ class PPTXRenderer:
             paragraph = frame.paragraphs[0]
             paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}.get(style.get("align", "left"), PP_ALIGN.LEFT)
             paragraph.line_spacing = float(style.get("lineSpacing", 1.12))
+            from app.services.reconstruction.line_text import measured_line_runs
+            measured_runs = measured_line_runs(element)
+            if measured_runs:
+                from app.services.pptx.text_runs import write_measured_runs
+                frame.word_wrap = False
+                write_measured_runs(paragraph, measured_runs, sx)
+                return
             run = paragraph.add_run()
             lines = element.get("lines") or []
             # The editor changes `text`; OCR lines are provenance, not another

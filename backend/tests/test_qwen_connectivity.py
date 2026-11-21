@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import httpx
-
 import app.services.vision.openai_compatible_provider as compatible
-import app.services.vision.qwen_provider as qwen_module
+import httpx
 from app.services.settings.runtime_settings import ProviderSettings, VisionSettings
-from app.services.vision.openai_compatible_provider import OpenAICompatibleVisionProvider, VisionProviderError, classify_vision_error
+from app.services.vision.openai_compatible_provider import (
+    OpenAICompatibleVisionProvider,
+    VisionProviderError,
+    classify_vision_error,
+)
 from app.services.vision.qwen_provider import QwenProvider, _connection_options
 
 
@@ -126,6 +128,33 @@ def test_public_test_endpoint_returns_detailed_failure(monkeypatch):
     assert payload["statusCode"] == 429
     assert payload["errorType"] == "insufficient_quota"
     assert payload["connectionPath"] == "DIRECT"
+
+
+def test_testing_draft_reuses_saved_key_without_overwriting_live_settings(monkeypatch, tmp_path):
+    import app.main as main_module
+    from app.services.settings import runtime_settings
+    from fastapi.testclient import TestClient
+
+    path = tmp_path / 'settings.json'
+    monkeypatch.setattr(runtime_settings, '_settings_path', lambda: path)
+    runtime_settings.save_vision_settings(_settings())
+    before = path.read_bytes()
+    monkeypatch.setattr(main_module, 'PUBLIC_SHARED_MODE', False)
+
+    def connectivity(router):
+        assert router.settings.api_key == 'sk-test'
+        return {'success':True, 'model':router.settings.model, 'statusCode':200}
+
+    monkeypatch.setattr(main_module.VisionRouter, 'test_connection', connectivity)
+    client = TestClient(main_module.app)
+    response = client.post('/api/settings/vision/test', json={'providers':{'qwen':{'model':'qwen3-vl-plus'}}})
+    assert response.status_code == 200
+    assert response.json()['model'] == 'qwen3-vl-plus'
+    assert path.read_bytes() == before
+    assert client.post('/api/settings/vision/test').json()['model'] == 'qwen3-vl-flash'
+
+    monkeypatch.setattr(main_module, 'PUBLIC_SHARED_MODE', True)
+    assert client.post('/api/settings/vision/test', json={'providers':{'qwen':{'model':'qwen3-vl-plus'}}}).status_code == 403
 
 
 def test_qwen_retries_transient_failure_then_tries_proxy_without_network(monkeypatch):

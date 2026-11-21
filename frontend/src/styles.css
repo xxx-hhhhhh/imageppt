@@ -229,6 +229,15 @@ body { color: var(--studio-ink); background: var(--studio-bg); }
 .field { color: #8594ae; font-size: 11px; }
 .field input, .field textarea { border-radius: 9px !important; border-color: #dfe6f1 !important; background: #fff !important; color: #273c60 !important; min-height: 37px; }
 .field textarea { min-height: 76px; }
+.text-pptx-dialog { width: min(620px, calc(100vw - 28px)); border: 0; padding: 0; }
+.text-pptx-dialog::backdrop { background: #14213d66; }
+.text-pptx-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.text-pptx-dialog .field span { color: #445575; font-size: 12px; font-weight: 600; }
+.text-pptx-dialog textarea { line-height: 1.6; max-height: 44vh; }
+.text-pptx-dialog select { min-height: 38px; padding: 6px 8px; border: 1px solid #dfe6f1; border-radius: 9px; background: #fff; color: #273c60; }
+.text-pptx-dialog .ai-modal-body > .field-hint { margin-top: 10px; }
+.text-pptx-counter { text-align: right; }
+.text-pptx-dialog .ai-status .toolbar-button { margin-left: 8px; }
 .field input:focus, .field textarea:focus { outline: 2px solid #bfd0ff; border-color: #819ff8 !important; }
 .segmented { border-radius: 9px; border-color: #e0e7f2; }
 .segmented button { min-height: 34px; }

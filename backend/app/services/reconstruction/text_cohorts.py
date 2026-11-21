@@ -71,4 +71,8 @@ def prepare_text_lines(source, items, semantic):
                     element['metadata']['fontCohort'] = {
                         'members': [i['id'] for i in group], 'family': family,
                         'policy': 'neighbour_consensus_with_individual_glyph_validation'}
+    from app.services.reconstruction.line_text import pack_text_line
+    for item in items:
+        candidates, evidence = prepared[item['id']]
+        prepared[item['id']] = (pack_text_line(item, candidates), evidence)
     return prepared

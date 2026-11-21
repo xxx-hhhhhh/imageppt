@@ -1,0 +1,30 @@
+name: Cloud image smoke test
+
+on:
+  push:
+    branches: [codex/cloud-deployment]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t imageppt-cloud .
+      - name: Verify PPT Master and project isolation
+        run: |
+          docker run --rm \
+            -e IMAGE2EDITABLEPPT_PUBLIC_SHARED=0 \
+            -v "$PWD/backend/tests:/checks:ro" \
+            --entrypoint python imageppt-cloud -m pytest -q /checks/test_text_pptx.py /checks/test_shared_access.py
+      - name: Verify frontend and API start together
+        run: |
+          docker run -d --name imageppt -p 127.0.0.1:10000:10000 imageppt-cloud
+          trap 'docker logs imageppt' EXIT
+          curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:10000/api/health
+          curl --fail --silent http://127.0.0.1:10000/ | grep 'Image2EditablePPT'
+          curl --fail --silent -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:10000/api/projects | grep '"imageCount":0'

@@ -4,6 +4,7 @@ import { Canvas, Ellipse, FabricImage, Line, Rect, Textbox } from 'fabric';
 import type { LayoutElement, LayoutJSON } from '../types/layout';
 import { assetUrl } from '../services/api';
 import { hitElement } from './alphaHitTest';
+import { measuredTextRuns } from './measuredTextLine';
 import { selectionBounds, transformSelection } from './selectionGeometry';
 
 interface Props {
@@ -139,6 +140,8 @@ export function EditorCanvas({ page, zoomFactor = 1, selectedIds, onSelection, o
 }
 
 function VisualElement({ element, selected, selectedIds, onSelect, onChange, page }: { element: LayoutElement; selected: boolean; selectedIds: string[]; onSelect: (ids: string[]) => void; onChange: (layout: LayoutJSON) => void; page: LayoutJSON }) {
+  const [textRevision, setTextRevision] = useState(0);
+  const textRuns = measuredTextRuns(element);
   const style = element.style || {};
   const lowConfidence = element.confidence != null && element.confidence < 0.65;
   const base: CSSProperties = { position: 'absolute', left: element.x, top: element.y, width: Math.max(1, element.width), height: Math.max(1, element.height), transform: `rotate(${element.rotation}deg)`, lineHeight: style.lineSpacing || 1.12, opacity: style.opacity ?? 1, pointerEvents: element.type === 'background' ? 'none' : 'auto', outline: selected ? '2px solid #2563a6' : undefined, outlineOffset: 2, boxShadow: lowConfidence ? '0 0 0 2px #f59e0b66' : undefined };
@@ -204,10 +207,12 @@ function VisualElement({ element, selected, selectedIds, onSelect, onChange, pag
     const target = event.currentTarget.querySelector<HTMLElement>('[data-text-content]');
     if (!target || target.isContentEditable) return;
     // Editing must never remove React-owned sibling controls (Ctrl+A/Delete).
+    target.textContent = element.text || '';
     target.contentEditable = 'true';
     target.focus();
     const finish = () => {
       target.contentEditable = 'false';
+      setTextRevision(value => value + 1);
       onChange({ ...page, elements: page.elements.map((item) => item.id === element.id ? { ...item, text: target.innerText } : item) });
       target.removeEventListener('blur', finish);
     };
@@ -222,7 +227,7 @@ function VisualElement({ element, selected, selectedIds, onSelect, onChange, pag
     const bottom = Math.min(.95 - top, Math.max(0, crop.bottom || 0));
     return <div data-element-id={element.id} className="visual-image" style={base} onPointerDown={beginDrag}><div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}><img src={assetUrl(element.src)} alt="" draggable={false} style={{ position: 'absolute', width: `${100 / (1 - left - right)}%`, height: `${100 / (1 - top - bottom)}%`, left: `${-left * 100 / (1 - left - right)}%`, top: `${-top * 100 / (1 - top - bottom)}%`, objectFit: 'fill', pointerEvents: 'none' }} /></div>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   }
-  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', letterSpacing: style.letterSpacing || 0, textAlign: style.align || 'left', whiteSpace: element.metadata?.exclusiveFontVerified ? 'pre' : 'pre-wrap', overflow: 'hidden' }}><span data-text-content style={{ display: 'block', width: '100%', height: '100%' }}>{element.text}</span>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
+  if (element.type === 'text') return <div data-element-id={element.id} className="visual-text" onPointerDown={beginDrag} onDoubleClick={beginTextEdit} style={{ ...base, color: style.color || '#111827', fontFamily: style.fontFamily || 'Microsoft YaHei', fontSize: style.fontSize || 24, fontWeight: style.fontWeight || 400, fontStyle: style.fontStyle || 'normal', letterSpacing: style.letterSpacing || 0, textAlign: style.align || 'left', whiteSpace: element.metadata?.exclusiveFontVerified ? 'pre' : 'pre-wrap', overflow: 'hidden' }}><span key={`${element.id}-${textRevision}-${element.text}`} data-text-content style={{ display: 'block', position: 'relative', width: '100%', height: '100%' }}>{textRuns.length ? textRuns.map((run, index) => <span key={index} style={{ position: 'absolute', left: run.x, top: run.y, fontFamily: run.style.fontFamily, fontSize: run.style.fontSize, fontWeight: run.style.fontWeight, fontStyle: run.style.fontStyle, color: run.style.color, letterSpacing: run.style.letterSpacing, whiteSpace: 'pre' }}>{run.text}</span>) : element.text}</span>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (element.type === 'line' || element.type === 'arrow') return <div data-element-id={element.id} className={`visual-line ${element.type}`} onPointerDown={beginDrag} style={{ ...base, width: element.width, height: 0, top: element.y + element.height / 2, borderTop: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}` }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   if (['rectangle', 'roundedRectangle', 'ellipse'].includes(element.type)) return <div data-element-id={element.id} className={`visual-shape ${element.type}`} onPointerDown={beginDrag} style={{ ...base, background: style.fill || '#DCE6F1', border: `${style.strokeWidth || 1}px solid ${style.stroke || '#17365D'}`, borderRadius: element.type === 'ellipse' ? '50%' : element.type === 'roundedRectangle' ? 18 : 0 }}>{selected && <span className="resize-handle" onPointerDown={beginResize} />}</div>;
   return null;

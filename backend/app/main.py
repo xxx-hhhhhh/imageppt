@@ -6,10 +6,12 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from PIL import Image, UnidentifiedImageError
 
 from app.config import (
     LOCAL_INPAINT_ENABLED,
@@ -24,6 +26,7 @@ from app.models.project_store import ProjectStore
 from app.schemas.layout import AnalyzeResponse, LayoutJSON, RevisionResponse
 from app.schemas.project import ProjectCreate, ProjectResponse, UploadResponse
 from app.schemas.tasks import AnalysisTaskRequest
+from app.schemas.text_pptx import TextPptxRequest
 from app.schemas.vision import (
     VisionSettingsPayload,
     VisionSettingsResponse,
@@ -32,14 +35,22 @@ from app.schemas.vision import (
 from app.services.inpainting.local_client import LocalIOPaintClient
 from app.services.paddle_runtime import paddle_diagnostics
 from app.services.pptx import PPTXRenderer
+from app.services.pptx.master_export import (
+    MASTER_FILENAME,
+    MasterExportError,
+    export_master,
+)
+from app.services.pptx.text_deck import TextDeckError, generate_text_pptx
 from app.services.reconstruction.downgrade import downgrade_problem_regions
 from app.services.reconstruction.revision import run_revision_loop
 from app.services.reconstruction.tasks import AnalysisTasks, TaskConflict
 from app.services.settings.runtime_settings import (
     load_vision_settings,
     mask_api_key,
+    preview_vision_settings,
     save_vision_settings,
 )
+from app.services.shared_access import current_session, shared_access
 from app.services.vision.proxy import display_proxy_url, proxy_tcp_test, resolve_proxy
 from app.services.vision.router import VisionRouter
 
@@ -55,6 +66,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if PUBLIC_SHARED_MODE:
+    app.middleware("http")(shared_access)
 
 
 def project_response(record: dict) -> ProjectResponse:
@@ -79,6 +92,8 @@ def _get_project(project_id: str) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    if PUBLIC_SHARED_MODE:
+        return {"status": "ok", "service": "Image2EditablePPT"}
     return {"status": "ok", "service": "Image2EditablePPT", **paddle_diagnostics()}
 
 
@@ -92,6 +107,12 @@ def local_inpainting_status() -> dict:
 
 @app.post("/api/projects", response_model=ProjectResponse)
 def create_project(payload: ProjectCreate) -> ProjectResponse:
+    session = current_session.get()
+    if session is not None:
+        with session.lock:
+            if session.project_id is None:
+                session.project_id = store.create(payload.name)["id"]
+            return project_response(store.get(session.project_id))
     return project_response(store.create(payload.name))
 
 
@@ -135,11 +156,26 @@ def cancel_analysis_task(project_id: str, task_id: str) -> dict:
 
 @app.post("/api/projects/{project_id}/images", response_model=UploadResponse)
 async def upload_images(project_id: str, files: list[UploadFile] = File(...)) -> UploadResponse:
-    _get_project(project_id)
+    record = _get_project(project_id)
     _require_idle_project(project_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image is required")
     allowed = {".png", ".jpg", ".jpeg", ".webp"}
+    if PUBLIC_SHARED_MODE:
+        if len(files) + len(record["images"]) > 12:
+            raise HTTPException(422, detail="分享版每个工作区最多可添加 12 张图片。")
+        formats = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
+        for upload in files:
+            try:
+                with Image.open(upload.file) as image:
+                    if image.format != formats.get(Path(upload.filename or "").suffix.lower()):
+                        raise ValueError("Image format mismatch")
+                    if image.width * image.height > 16_000_000:
+                        raise ValueError("Image dimensions exceed limit")
+                    image.verify()
+                await upload.seek(0)
+            except (ValueError, UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError) as exc:
+                raise HTTPException(415, detail="请上传有效的 PNG、JPEG 或 WEBP 图片，每张最多 1600 万像素。") from exc
     image_records = []
     project_upload_dir = UPLOADS_DIR / project_id
     project_upload_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +197,8 @@ async def upload_images(project_id: str, files: list[UploadFile] = File(...)) ->
         }
         store.add_image(project_id, image_record)
         image_records.append(image_record)
+    if PUBLIC_SHARED_MODE:
+        image_records = [{key: value for key, value in image.items() if key != "path"} for image in image_records]
     return UploadResponse(project=project_response(store.get(project_id)), images=image_records)
 
 
@@ -274,8 +312,12 @@ def put_vision_settings(payload: VisionSettingsPayload) -> VisionSettingsRespons
 
 
 @app.post("/api/settings/vision/test", response_model=VisionTestResponse)
-def test_vision_settings() -> VisionTestResponse:
-    runtime = load_vision_settings()
+def test_vision_settings(payload: VisionSettingsPayload | None = None) -> VisionTestResponse:
+    if payload is not None:
+        _require_private_settings_access()
+        runtime = preview_vision_settings(payload.model_dump(mode="json", exclude_unset=True))
+    else:
+        runtime = load_vision_settings()
     result = VisionRouter(runtime).test_connection()
     return VisionTestResponse(
         success=bool(result.get("success")),
@@ -302,11 +344,16 @@ def _vision_settings_response(runtime) -> VisionSettingsResponse:
     provider_view = {"qwen": {
         "enabled": config.enabled,
         "configured": bool(config.api_key and config.base_url),
-        "apiKeyMasked": mask_api_key(config.api_key),
+        "apiKeyMasked": "" if PUBLIC_SHARED_MODE else mask_api_key(config.api_key),
         "baseUrl": config.base_url,
         "model": config.model or "qwen3-vl-flash",
     }}
     selected = VisionRouter(runtime).status()
+    if PUBLIC_SHARED_MODE:
+        return VisionSettingsResponse(enabled=runtime.enabled, selectedProvider=runtime.selected_provider,
+                                      providers=provider_view, configured=bool(selected.get("configured")),
+                                      mode=runtime.mode, timeout=runtime.timeout, proxyMode="none",
+                                      manualProxy="", network={}, publicShared=True)
     system_proxy = resolve_proxy("system")
     active_proxy = resolve_proxy(runtime.proxy_mode, runtime.manual_proxy)
     tcp = proxy_tcp_test(active_proxy.url)
@@ -350,6 +397,10 @@ def get_slide(project_id: str, page: int) -> LayoutJSON:
 @app.put("/api/projects/{project_id}/slides/{page}", response_model=LayoutJSON)
 def update_slide(project_id: str, page: int, layout: LayoutJSON) -> LayoutJSON:
     _get_project(project_id)
+    if PUBLIC_SHARED_MODE:
+        own_asset = re.compile(rf"/media/(?:assets|backgrounds)/{re.escape(project_id)}/[a-zA-Z0-9_-]+\.(?:png|jpe?g|webp)(?:\?[^#]*)?")
+        if any(element.src and not own_asset.fullmatch(element.src) for element in layout.elements):
+            raise HTTPException(422, detail="页面只能引用当前项目的图片资源。")
     with analysis_tasks.lock:
         _require_idle_project(project_id)
         store.save_slide(project_id, page, layout.model_dump(mode="json"))
@@ -357,7 +408,7 @@ def update_slide(project_id: str, page: int, layout: LayoutJSON) -> LayoutJSON:
 
 
 @app.post("/api/projects/{project_id}/export/pptx")
-def export_pptx(project_id: str) -> dict:
+def export_pptx(project_id: str, engine: Literal['standard', 'ppt-master'] = 'standard') -> dict:
     record = _get_project(project_id)
     _require_idle_project(project_id)
     if any(page not in record.get("approvedPages", []) for page in range(1, len(record.get("images", [])) + 1)):
@@ -366,19 +417,37 @@ def export_pptx(project_id: str) -> dict:
     if not layouts:
         raise HTTPException(status_code=400, detail="Analyze images before exporting")
     try:
-        output_path, validation = renderer.render_project(project_id, layouts)
+        if engine == 'ppt-master':
+            output_path, validation = export_master(OUTPUTS_DIR / project_id, layouts)
+        else:
+            output_path, validation = renderer.render_project(project_id, layouts)
+    except MasterExportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        if PUBLIC_SHARED_MODE:
+            raise HTTPException(500, detail="PPTX 导出失败，请调整页面后重试。") from exc
         raise HTTPException(status_code=500, detail=f"PPTX export failed: {exc}") from exc
-    return {"downloadUrl": f"/api/projects/{project_id}/export/pptx", "fileName": output_path.name, "validation": validation}
+    suffix = '?engine=ppt-master' if engine == 'ppt-master' else ''
+    return {"downloadUrl": f"/api/projects/{project_id}/export/pptx{suffix}", "fileName": output_path.name, "validation": validation}
+
+
+@app.post('/api/export/text-pptx', response_class=Response)
+def text_pptx(payload: TextPptxRequest) -> Response:
+    try:
+        output = generate_text_pptx(payload)
+    except TextDeckError as exc:
+        raise HTTPException(exc.status, detail=str(exc)) from exc
+    return Response(output, media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                    headers={'Content-Disposition':'attachment; filename="text-ppt-master.pptx"', 'Cache-Control':'no-store'})
 
 
 @app.get("/api/projects/{project_id}/export/pptx")
-def download_pptx(project_id: str) -> FileResponse:
+def download_pptx(project_id: str, engine: Literal['standard', 'ppt-master'] = 'standard') -> FileResponse:
     _get_project(project_id)
-    output_path = OUTPUTS_DIR / project_id / "editable.pptx"
+    output_path = OUTPUTS_DIR / project_id / (MASTER_FILENAME if engine == 'ppt-master' else 'editable.pptx')
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="PPTX has not been exported")
-    return FileResponse(output_path, filename="editable.pptx", media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    return FileResponse(output_path, filename=output_path.name, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
 
 @app.get("/media/uploads/{project_id}/{file_name}")

@@ -48,18 +48,26 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
   const [error, setError] = useState('');
   const [diagnostics, setDiagnostics] = useState<Diagnostics>({});
   const [testResult, setTestResult] = useState<VisionTestResult | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [edited, setEdited] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    let active = true;
+    setLoaded(false); setEdited(false); setVisibleKey(false);
     setError(''); setStatus(''); setDiagnostics({}); setTestResult(null); setDraftKey(''); setClearKey(false);
     void getVisionSettings().then((value) => {
+      if (!active) return;
       setSettings({ ...empty, ...value, selectedProvider: value.selectedProvider === 'local' ? 'local' : 'qwen', providers: { qwen: { ...emptyQwen, ...(value.providers?.qwen || {}) } } });
-    }).catch(() => setError('无法读取本机 Qwen 设置'));
+      setLoaded(true);
+    }).catch(() => { if (active) setError('无法读取本机 Qwen 设置，请关闭后重试'); });
+    return () => { active = false; };
   }, [open]);
 
   const qwen = settings.providers.qwen || emptyQwen;
-  const update = (patch: Partial<VisionSettings>) => setSettings((current) => ({ ...current, ...patch }));
-  const updateQwen = (patch: Partial<VisionProviderSettings>) => setSettings((current) => ({ ...current, providers: { qwen: { ...current.providers.qwen, ...patch } } }));
+  const update = (patch: Partial<VisionSettings>) => { setEdited(true); setSettings((current) => ({ ...current, ...patch })); };
+  const updateQwen = (patch: Partial<VisionProviderSettings>) => { setEdited(true); setSettings((current) => ({ ...current, providers: { qwen: { ...current.providers.qwen, ...patch } } })); };
+  const dirty = edited || Boolean(draftKey) || clearKey;
 
   const payload = () => ({
     enabled: settings.enabled,
@@ -71,7 +79,7 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
     providers: {
       qwen: {
         enabled: qwen.enabled,
-        apiKey: draftKey,
+        apiKey: draftKey.trim(),
         baseUrl: qwen.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: qwen.model || 'qwen3-vl-flash',
         clearApiKey: clearKey,
@@ -81,7 +89,7 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
 
   const save = async () => {
     setBusy(true); setError(''); setStatus('');
-    try { const saved = await saveVisionSettings(payload()); setSettings(saved); setDraftKey(''); setClearKey(false); onSaved?.(saved); setStatus('已保存到本机设置'); }
+    try { const saved = await saveVisionSettings(payload()); setSettings(saved); setDraftKey(''); setClearKey(false); setEdited(false); onSaved?.(saved); setStatus('已保存到本机设置'); }
     catch { setError('保存失败，请检查设置内容'); }
     finally { setBusy(false); }
   };
@@ -89,16 +97,11 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
   const testCurrent = async () => {
     setBusy(true); setError(''); setStatus('正在测试 DNS、HTTPS、认证和真实视觉请求…'); setTestResult(null);
     try {
-      try {
-        await saveVisionSettings(payload());
-      } catch (saveError: unknown) {
-        const statusCode = (saveError as { response?: { status?: number } })?.response?.status;
-        if (statusCode !== 403 || Boolean(draftKey) || clearKey) throw saveError;
-      }
-      const result = await testVisionSettings();
+      if (!dirty) setSettings(await getVisionSettings());
+      const result = await testVisionSettings(dirty ? payload() : undefined);
       setDiagnostics(result.diagnostics || {});
       setTestResult(result);
-      setStatus(result.success ? '连接成功' : `连接失败：${result.statusCode || result.errorType || result.errorCode || '未知错误'}`);
+      setStatus(result.success ? (dirty ? '连接成功，修改尚未保存' : '连接成功') : `连接失败：${result.statusCode || result.errorType || result.errorCode || '未知错误'}`);
       if (!result.success) setError(result.message);
     } catch (requestError: unknown) {
       const detail = (requestError as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -108,6 +111,11 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
   };
 
   if (!open) return null;
+  if (settings.publicShared) return <div className="modal-backdrop" role="presentation"><section className="ai-modal" role="dialog" aria-modal="true" aria-labelledby="shared-ai-title">
+    <div className="ai-modal-header"><h2 id="shared-ai-title">AI 设置</h2><button className="modal-close" onClick={onClose} aria-label="关闭">×</button></div>
+    <div className="ai-modal-body"><p>{settings.configured ? '分享站已配置千问服务，可以直接生成 PPT。' : '分享站的千问服务暂未配置。'}</p></div>
+    <div className="ai-modal-footer"><button className="toolbar-button" onClick={onClose}>关闭</button></div>
+  </section></div>;
   return <div className="modal-backdrop" role="presentation"><section className="ai-modal ai-settings-modal-large" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
     <div className="ai-modal-header"><h2 id="ai-settings-title">AI视觉模型设置</h2><button className="modal-close" onClick={onClose} aria-label="关闭">×</button></div>
     <div className="ai-modal-body">
@@ -129,13 +137,13 @@ export function AISettingsModal({ open, onClose, onSaved }: Props) {
         <div className="network-hint">自动模式：优先直连当前 Qwen 服务；仅在超时、连接或 TLS 失败时回退系统代理。</div>
       </div>
       <div className="field"><span>模式</span><div className="radio-row"><label><input type="radio" checked={settings.mode === 'fast'} onChange={() => update({ mode: 'fast' })} /> 快速</label><label><input type="radio" checked={settings.mode === 'standard'} onChange={() => update({ mode: 'standard' })} /> 标准</label><label><input type="radio" checked={settings.mode === 'high'} onChange={() => update({ mode: 'high' })} /> 高精度</label></div></div>
-      <button className="test-connection" disabled={busy} onClick={() => void testCurrent()}>测试当前模型</button>
+      <button className="test-connection" disabled={busy || !loaded} onClick={() => void testCurrent()}>测试当前模型</button>
       {(diagnostics.proxyTcp || diagnostics.qwenBaseUrl || diagnostics.qwenApi) && <div className="network-test-results"><div>Qwen TCP：{diagnostics.tcp ? 'PASS' : 'FAIL'}</div><div>HTTPS Direct：{diagnostics.qwenBaseUrl?.status || '—'} {diagnostics.qwenBaseUrl?.message || ''}</div><div>Auth：{diagnostics.auth ? 'PASS' : 'FAIL'}</div><div>Model Request：{diagnostics.modelReachable ? 'PASS' : 'FAIL'}</div><div>VISION_OK：{diagnostics.visionRequest ? 'PASS' : 'FAIL'}</div><div>Proxy TCP：{diagnostics.proxyTcp?.status || '—'}</div><div>Connection path：{testResult?.connectionPath || diagnostics.connectionPath || diagnostics.networkPath || '—'}</div>{testResult?.latencyMs != null && <div>Latency：{testResult.latencyMs} ms</div>}</div>}
       {testResult?.success && <div className="ai-status"><div>Provider: 千问视觉理解</div><div>Model: {testResult.model}</div><div>Network: {testResult.connectionPath || 'DIRECT'}</div><div>Latency: {testResult.latencyMs ?? '—'} ms</div></div>}
       {testResult && !testResult.success && <div className="ai-error"><div>HTTP：{testResult.statusCode ?? '—'}</div><div>Error：{testResult.errorType || testResult.errorCode || 'unknown'}</div><div>Stage：{testResult.stage || 'request'}</div></div>}
       {status && <div className="ai-status">状态：{status}</div>}{error && <div className="ai-error">{error}</div>}
       <div className="local-secret-note">API Key 仅保存在本机设置目录，不写入 Google Drive 项目目录。</div>
     </div>
-    <div className="ai-modal-footer"><button className="toolbar-button" onClick={onClose}>取消</button><button className="toolbar-button primary" disabled={busy} onClick={() => void save()}>保存</button></div>
+    <div className="ai-modal-footer"><button className="toolbar-button" onClick={onClose}>取消</button><button className="toolbar-button primary" disabled={busy || !loaded || !dirty} onClick={() => void save()}>保存</button></div>
   </section></div>;
 }
