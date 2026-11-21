@@ -41,6 +41,6 @@ jobs:
         run: |
           docker run -d --name imageppt -p 127.0.0.1:10000:10000 imageppt-cloud
           trap 'docker logs imageppt' EXIT
-          curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:10000/api/health
+          curl --fail --silent --show-error --retry 20 --retry-all-errors --retry-delay 1 --max-time 5 http://127.0.0.1:10000/api/health
           curl --fail --silent http://127.0.0.1:10000/ | grep 'Image2EditablePPT'
           curl --fail --silent -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:10000/api/projects | grep '"imageCount":0'
