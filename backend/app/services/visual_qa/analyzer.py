@@ -29,6 +29,12 @@ def _font(style: dict[str, Any], size_scale: float = 1.0) -> ImageFont.FreeTypeF
                 return ImageFont.truetype(str(path), size=size)
             except OSError:
                 continue
+    from app.services.typography.font_raster import font_face
+
+    try:
+        return font_face('msyh.ttc', size, int(style.get('fontWeight', 400)))
+    except OSError:
+        pass
     return ImageFont.load_default()
 
 

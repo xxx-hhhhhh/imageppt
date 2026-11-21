@@ -7,12 +7,11 @@ best editable substitute; it must not turn all normal text into screenshots.
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import cv2
 import numpy as np
 
-from app.services.typography.font_raster import font_face, glyph_raster
+from app.services.typography.font_raster import FONT_DIR, NOTO_SANS, NOTO_SERIF, font_face, glyph_raster
 
 
 def measured_surface(patch: np.ndarray, border: int = 4, *, extrapolate: int = 0) -> tuple[np.ndarray, dict] | None:
@@ -146,7 +145,9 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
                ("SimHei","simhei.ttf",400),("FangSong","simfang.ttf",400),
                ("Arial","arial.ttf",400),("Arial","arialbd.ttf",700),
                ("Times New Roman","times.ttf",400),("Times New Roman","timesbd.ttf",700),
-               ("KaiTi","simkai.ttf",400)]
+               ("KaiTi","simkai.ttf",400),
+               ("Noto Sans CJK SC",NOTO_SANS[0],400),("Noto Sans CJK SC",NOTO_SANS[1],700),
+               ("Noto Serif CJK SC",NOTO_SERIF[0],400),("Noto Serif CJK SC",NOTO_SERIF[1],700)]
     choices.sort(key=lambda item: item[0] != preferred)
     import unicodedata
     punctuation=all(c.isspace() or unicodedata.category(c).startswith(('P','S')) for c in text)
@@ -154,7 +155,7 @@ def _fit_font(text: str, mask: np.ndarray, preferred: str, source_alpha: np.ndar
         choices = [choice for choice in choices if choice[0] == required_family]
     best = None
     for family,filename,weight in choices:
-        if not (Path("C:/Windows/Fonts") / filename).is_file():
+        if not (FONT_DIR / filename).is_file():
             continue
         # Latin-only files otherwise score their missing-CJK square glyphs.
         if any('\u2e80' <= c <= '\u9fff' for c in text) and family in ('Arial','Times New Roman'):

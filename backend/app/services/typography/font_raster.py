@@ -1,4 +1,5 @@
 """Shared measured glyph raster for font matching, preview and preservation QA."""
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -6,15 +7,23 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_DIR = Path('C:/Windows/Fonts')
+FONT_DIR = Path(os.getenv('IMAGE2EDITABLEPPT_FONT_DIR', 'C:/Windows/Fonts'))
+NOTO_SANS = ('NotoSansCJK-Regular.ttc', 'NotoSansCJK-Bold.ttc')
+NOTO_SERIF = ('NotoSerifCJK-Regular.ttc', 'NotoSerifCJK-Bold.ttc')
 
 
 @lru_cache(maxsize=1024)
 def font_face(filename: str,size: int,weight: int=400):
     if Path(filename).name != filename:
         raise ValueError('Font must be an installed face name')
-    font = ImageFont.truetype(str(FONT_DIR/filename),size)
-    if filename in {'NotoSansSC-VF.ttf', 'NotoSerifSC-VF.ttf'}:
+    path = FONT_DIR / filename
+    if not path.is_file():
+        fallback = FONT_DIR / NOTO_SANS[weight >= 600]
+        if fallback.is_file():
+            path = fallback
+    index = 2 if path.name in (*NOTO_SANS, *NOTO_SERIF) else 0
+    font = ImageFont.truetype(str(path), size, index=index)
+    if path.name in {'NotoSansSC-VF.ttf', 'NotoSerifSC-VF.ttf'}:
         axes = font.get_variation_axes()
         font.set_variation_by_axes([
             max(axis['minimum'], min(axis['maximum'], weight))
@@ -66,6 +75,8 @@ def paint_measured_text(base: Image.Image,element: dict,color: str | None=None) 
            'DengXian':'Dengb.ttf' if weight>=600 else 'Deng.ttf',
            'Noto Sans SC':'NotoSansSC-VF.ttf',
            'Noto Serif SC':'NotoSerifSC-VF.ttf',
+           'Noto Sans CJK SC':NOTO_SANS[weight>=600],
+           'Noto Serif CJK SC':NOTO_SERIF[weight>=600],
            'Arial':'arialbd.ttf' if weight>=600 else 'arial.ttf',
            'Times New Roman':'timesbd.ttf' if weight>=600 else 'times.ttf'}
     filename=faces.get(family,style.get('fontFile','msyh.ttc'))

@@ -13,11 +13,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INPAINT_ENABLED=false \
     INPAINT_PROVIDER=opencv \
     PPT_MASTER_SKILL_DIR=/opt/ppt-master/skills/ppt-master \
+    IMAGE2EDITABLEPPT_FONT_DIR=/usr/share/fonts/opentype/noto \
     OMP_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl fontconfig fonts-noto-cjk libgomp1 \
+    && apt-get install -y --no-install-recommends ca-certificates curl fontconfig fonts-noto-cjk libgl1 libglib2.0-0 libgomp1 libxcb1 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/ppt-master \
     && curl --fail --location --silent --show-error --retry 3 \

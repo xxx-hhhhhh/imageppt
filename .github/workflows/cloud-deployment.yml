@@ -21,6 +21,22 @@ jobs:
             -e IMAGE2EDITABLEPPT_PUBLIC_SHARED=0 \
             -v "$PWD/backend/tests:/checks:ro" \
             --entrypoint python imageppt-cloud -m pytest -q /checks/test_text_pptx.py /checks/test_shared_access.py
+      - name: Verify OCR and Simplified Chinese fonts
+        run: |
+          docker run --rm -i --entrypoint python imageppt-cloud - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          from app.services.ocr.service import OCRService
+          from app.services.typography.font_raster import font_face
+
+          font = font_face("msyh.ttc", 43)
+          assert "SC" in font.getname()[0]
+          sample = Path("/tmp/ocr.png")
+          image = Image.new("RGB", (560, 100), "white")
+          ImageDraw.Draw(image).text((20, 20), "Editable PPT", fill="black", font=font)
+          image.save(sample)
+          assert "Editable" in " ".join(item.text for item in OCRService("rapidocr").recognize(sample))
+          PY
       - name: Verify frontend and API start together
         run: |
           docker run -d --name imageppt -p 127.0.0.1:10000:10000 imageppt-cloud
